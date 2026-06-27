@@ -1,0 +1,484 @@
+% Blueprint for "Improved Batch Code Lower Bounds" (Ray Li, Mary Wootters),
+% arXiv:2106.02163v1.  No \begin{document} here; web.tex/print.tex supply it.
+%
+% Two-kind model:
+%   * Standard linear-algebra / coding facts already in Mathlib are LEAF nodes
+%     (\mathlibok + \lean{...}, no proof).  Where the exact decl name is not
+%     confirmed, \mathlibok is kept with a "% TODO: confirm Lean decl name".
+%   * The paper's own definitions and results are FULL nodes: complete statement,
+%     full \uses, and a complete proof (no \leanok / \mathlibok).
+
+\chapter{Introduction}
+
+\begin{definition}[Batch code, Definition 1.1]
+  \label{def:batch-code}
+  Let $C : \Sigma^n \to \Sigma^N$ be a code that maps $x_1, \dots, x_n$ to
+  $c_1, \dots, c_N$. The code $C$ is a \emph{$k$-batch code} if, for every
+  multiset of indices $\{i_1, \dots, i_k\} \subset [n]$, there exist $k$
+  mutually disjoint sets $R_1, \dots, R_k \subseteq [N]$ and functions
+  $g_1, \dots, g_k$ such that, for all information symbols
+  $x_1, \dots, x_n \in \Sigma$ and codewords
+  $(c_1, \dots, c_N) = C(x_1, \dots, x_n) \in \Sigma^N$, and for all
+  $j \in [k]$, we have $g_j(c|_{R_j}) = x_{i_j}$. Here $c|_{R_j}$ denotes the
+  restriction of the codeword $c$ to the coordinates indexed by $R_j$.
+
+  We say $C$ is a \emph{linear} batch code if $\Sigma = \F$ is a finite field,
+  the functions $g_i$ are all linear, and $C$ is a linear map. We say $C$ has a
+  \emph{systematic encoding} if $c_i = x_i$ for $i = 1, \dots, n$.
+
+  The \emph{redundancy} of $C$ is $N - n$. (For a linear code with a systematic
+  encoding, $\dim C = n$, so the redundancy equals $N - \dim C$.)
+\end{definition}
+
+\begin{definition}[Primitive multiset batch codes, Remark 1.2]
+  \label{def:primitive}
+  \uses{def:batch-code}
+  Definition~\ref{def:batch-code} is the \emph{primitive multiset} special case
+  of the general notion of batch code of Ishai--Kushilevitz--Ostrovsky--Sahai.
+  In the general definition, $n$ symbols are encoded into ``buckets'' of symbols
+  whose total size is $N$, and each batch of $k$ symbols can be decoded by
+  reading at most one symbol from each bucket. A batch code is a \emph{multiset}
+  batch code if (a) the $k$ requested symbols may form a multiset and (b) the
+  $k$ symbols can be decoded by querying $k$ pairwise disjoint sets of buckets.
+  When each bucket stores a single symbol the batch code is called
+  \emph{primitive}. Throughout this blueprint ``batch code'' means the primitive
+  multiset notion of Definition~\ref{def:batch-code}.
+\end{definition}
+
+\begin{theorem}[Main lower bound, Theorem 1.3]
+  \label{thm:main}
+  \uses{def:batch-code}
+  A linear $k$-batch code of length $N$ with a systematic encoding must have
+  redundancy $\Omega(\sqrt{Nk})$.
+\end{theorem}
+% The proof is given in the chapter "Proof of the main theorem".
+
+
+\chapter{Preliminaries}
+
+% --- Basic notation: already in Mathlib. ------------------------------------
+
+\begin{definition}[Support and subspaces]
+  \label{def:notation}
+  \lean{Function.support}
+  \mathlibok
+  % TODO: confirm Lean decl names (Finset/Function.support, Submodule for V <= W)
+  We write $[N] = \{1, \dots, N\}$. For a vector $c \in \F^N$, the
+  \emph{support} is $\supp(c) := \{ i \in [N] : c_i \neq 0 \}$. For two vector
+  spaces $V, W$ over $\F$ we write $V \le W$ to mean $V$ is a subspace of $W$.
+  (Standard; recalled so later nodes can depend on it.)
+\end{definition}
+
+% --- Dual codes. ------------------------------------------------------------
+
+\begin{definition}[Dual code]
+  \label{def:dual-code}
+  \uses{def:notation}
+  \lean{Submodule.orthogonalBilin}
+  \mathlibok
+  % TODO: confirm Lean decl name (orthogonal complement w.r.t. the standard
+  % symmetric bilinear form / dot product on F^N).
+  The \emph{dual code} $\dualcode{C} \le \F^N$ of a linear code $C \le \F^N$ is
+  the subspace of all vectors orthogonal (under the standard dot product
+  $\langle u, v\rangle = \sum_{i=1}^N u_i v_i$) to every codeword of $C$.
+  Elements of $\dualcode{C}$ are called \emph{dual codewords} (of $C$).
+\end{definition}
+
+\begin{lemma}[Dimension of the dual code]
+  \label{lem:dual-dim}
+  \uses{def:dual-code}
+  \lean{Subspace.finrank_add_finrank_orthogonal}
+  \mathlibok
+  % TODO: confirm Lean decl name (finrank of orthogonal complement of a
+  % nondegenerate bilinear form on a finite-dimensional space).
+  For a linear code $C \le \F^N$ one has $\dim \dualcode{C} = N - \dim C$. In
+  particular, for a code with systematic encoding the dimension of $\dualcode{C}$
+  equals the redundancy $N - n$ of $C$.
+\end{lemma}
+
+\begin{lemma}[Dual-codeword witness, Lemma 1.4]
+  \label{lem:dual-witness}
+  \uses{def:dual-code, def:batch-code}
+  Suppose $C \le \F^N$ is a linear code with a systematic encoding, and there
+  exist an index $i \in [N]$, a set $R \subset [N] \setminus \{i\}$, and a
+  linear function $g$ such that $g(c|_R) = c_i$ for all codewords $c \in C$.
+  Then there exists a nonzero dual codeword $\dperp$ such that
+  $\supp(\dperp) \subset R \cup \{i\}$ and $i \in \supp(\dperp)$.
+\end{lemma}
+\begin{proof}
+  \uses{def:dual-code}
+  Since $g$ is linear, write $g(c|_R) = \sum_{j \in R} \alpha_j c_j$ for scalars
+  $\alpha_j \in \F$. The hypothesis $g(c|_R) = c_i$ gives, for all codewords
+  $c \in C$,
+  \[
+    -c_i + \sum_{j \in R} \alpha_j c_j = 0 .
+  \]
+  Thus the vector $\dperp \in \F^N$ defined by $\dperp_j = -1$ if $j = i$,
+  $\dperp_j = \alpha_j$ if $j \in R$, and $\dperp_j = 0$ otherwise satisfies
+  $\langle \dperp, c\rangle = 0$ for every codeword $c$, so $\dperp$ is a dual
+  codeword. By construction $\supp(\dperp) \subseteq R \cup \{i\}$, and
+  $\dperp_i = -1 \neq 0$ gives $i \in \supp(\dperp)$; in particular $\dperp$ is
+  nonzero.
+\end{proof}
+
+% --- Tensor products. -------------------------------------------------------
+
+\begin{definition}[Tensor product of vectors; simple tensors]
+  \label{def:tensor}
+  \uses{def:notation}
+  \lean{TensorProduct.tmul}
+  \mathlibok
+  % TODO: confirm Lean decl name (concrete coordinatewise tensor of vectors in
+  % F^N, identified with F^{N^s}).
+  Let $e_i$ denote the standard basis vector of $\F^N$, so $(e_i)_i = 1$ and
+  $(e_i)_j = 0$ for $j \neq i$. For $v^{(1)}, \dots, v^{(s)} \in \F^N$, the
+  \emph{tensor product} $v^{(1)} \otimes \cdots \otimes v^{(s)} \in \F^{N^s}$ is
+  the vector indexed by tuples $(i_1, \dots, i_s) \in [N]^s$ with
+  \[
+    \bigl(v^{(1)} \otimes \cdots \otimes v^{(s)}\bigr)_{(i_1, \dots, i_s)}
+      = \prod_{j=1}^{s} v^{(j)}_{i_j} .
+  \]
+  A tensor of this form is a \emph{simple tensor}; a \emph{tensor} is any linear
+  combination of simple tensors.
+\end{definition}
+
+\begin{lemma}[Standard tensor basis]
+  \label{lem:std-tensor-basis}
+  \uses{def:tensor}
+  \lean{Basis.tensorProduct}
+  \mathlibok
+  % TODO: confirm Lean decl name (basis of a tensor power induced by a basis).
+  The set of simple tensors
+  \[
+    \Bigl\{ \bigtensor_{j=1}^{s} e_{i_j} : (i_1, \dots, i_s) \in [N]^s \Bigr\}
+  \]
+  forms a basis for $\F^{N^s}$, the \emph{standard tensor basis}. Consequently
+  every vector in $\F^{N^s}$ has a unique expression as a linear combination of
+  standard tensor basis elements, the \emph{standard basis representation}; we
+  say it \emph{contains} a basis element when the corresponding coefficient is
+  nonzero.
+\end{lemma}
+
+\begin{lemma}[Linear independence from distinct leading basis tensors, Lemma 1.5]
+  \label{lem:lin-indep}
+  \uses{def:tensor, lem:std-tensor-basis}
+  Let $(e^{(1)}, w^{(1)}), \dots, (e^{(D)}, w^{(D)})$ be pairs of tensors in
+  $\F^{N^s}$ such that, for all $i = 1, \dots, D$, the tensor $e^{(i)}$ is in the
+  standard tensor basis and the standard basis representation of $w^{(i)}$
+  contains $e^{(i)}$ and none of $e^{(i+1)}, \dots, e^{(D)}$. Then
+  $w^{(1)}, \dots, w^{(D)}$ are linearly independent.
+\end{lemma}
+\begin{proof}
+  \uses{lem:std-tensor-basis}
+  Suppose for contradiction that $\sum_{i=1}^{D} \alpha_i w^{(i)} = 0$ is a
+  nontrivial linear relation. Let $j$ be the largest index with
+  $\alpha_j \neq 0$; then $\alpha_i = 0$ for $i > j$, so the relation reads
+  $\sum_{i=1}^{j} \alpha_i w^{(i)} = 0$. By hypothesis the standard basis
+  representation of $w^{(j)}$ contains $e^{(j)}$, so we may write
+  $w^{(j)} = \beta\, e^{(j)} + w'$ for some $\beta \neq 0$ and some
+  $w' \in \F^{N^s}$ whose standard basis representation does not contain
+  $e^{(j)}$. For each $i < j$, since $j > i$ we have
+  $e^{(j)} \in \{e^{(i+1)}, \dots, e^{(D)}\}$, so by hypothesis the standard
+  basis representation of $w^{(i)}$ does not contain $e^{(j)}$. Hence the
+  coefficient of $e^{(j)}$ in
+  \[
+    \sum_{i=1}^{j} \alpha_i w^{(i)}
+      = \Bigl(\sum_{i<j} \alpha_i w^{(i)} + \alpha_j w'\Bigr)
+        + \alpha_j \beta\, e^{(j)}
+  \]
+  equals $\alpha_j \beta$, because none of $w^{(1)}, \dots, w^{(j-1)}, w'$
+  contributes to $e^{(j)}$. Since $\alpha_j, \beta \neq 0$ this coefficient is
+  nonzero, contradicting $\sum_{i=1}^{j} \alpha_i w^{(i)} = 0$.
+\end{proof}
+
+\begin{definition}[Tensor power of a subspace]
+  \label{def:tensor-power}
+  \uses{def:tensor}
+  For a subspace $V \le \F^N$ and a positive integer $s$, let $\tpow{V}{s}$
+  denote the subspace of $\F^{N^s}$ spanned by the simple tensors
+  $v^{(1)} \otimes \cdots \otimes v^{(s)}$ with $v^{(1)}, \dots, v^{(s)} \in V$.
+\end{definition}
+
+\begin{lemma}[Dimension of a tensor power]
+  \label{lem:tensor-power-dim}
+  \uses{def:tensor-power}
+  \lean{Module.finrank_tensorProduct}
+  \mathlibok
+  % TODO: confirm Lean decl name (finrank of a tensor power: finrank multiplies,
+  % so dim V^{\otimes s} = (dim V)^s).
+  For every subspace $V \le \F^N$ and positive integer $s$,
+  $\dim \tpow{V}{s} = (\dim V)^s$.
+\end{lemma}
+
+
+\chapter{Proof of the main theorem}
+
+% Section 2.2 of the paper.  We fix throughout a linear $k$-batch code
+% $C \le \F^N$ with a systematic encoding, set $V := \dualcode{C}$, choose
+% $t := \lfloor k/3 \rfloor$, and set $W := \tpow{V}{2t}$.  An informal sketch
+% (Section 2.1) is subsumed by the granular development below.
+
+\begin{definition}[Good simple tensor]
+  \label{def:good-tensor}
+  \uses{def:tensor, lem:std-tensor-basis}
+  Fix an integer $t \ge 1$ and work in the standard tensor basis of
+  $\F^{N^{2t}}$. A simple tensor $e_{i'_1} \otimes \cdots \otimes e_{i'_{2t}}$
+  is called \emph{good} if the multiset $\{i'_1, \dots, i'_{2t}\} \subset [N]$
+  contains exactly $t$ distinct elements, each appearing exactly twice.
+\end{definition}
+
+\begin{lemma}[Batch codes are downward closed in $k$]
+  \label{lem:batch-monotone}
+  \uses{def:batch-code}
+  If $C$ is a $k$-batch code and $k' \le k$, then $C$ is also a $k'$-batch code.
+\end{lemma}
+\begin{proof}
+  \uses{def:batch-code}
+  Let $\{i_1, \dots, i_{k'}\} \subset [n]$ be a multiset of size $k'$. Extend it
+  to a multiset $\{i_1, \dots, i_{k'}, i_{k'+1}, \dots, i_k\}$ of size $k$ by
+  appending arbitrary indices (e.g. repeating $i_1$). Since $C$ is a $k$-batch
+  code, there exist mutually disjoint sets $R_1, \dots, R_k$ and functions
+  $g_1, \dots, g_k$ with $g_j(c|_{R_j}) = x_{i_j}$ for all $j \in [k]$.
+  Restricting to $j \in [k']$, the sets $R_1, \dots, R_{k'}$ are still mutually
+  disjoint and satisfy $g_j(c|_{R_j}) = x_{i_j}$, witnessing that $C$ is a
+  $k'$-batch code.
+\end{proof}
+
+\begin{lemma}[Pairs of dual codewords meeting in a single index]
+  \label{lem:dual-pairs}
+  \uses{def:batch-code, def:dual-code}
+  Let $C \le \F^N$ be a linear $k$-batch code with a systematic encoding and set
+  $t := \lfloor k/3 \rfloor$. For every $t$-tuple $(i_1, \dots, i_t) \in [n]^t$
+  there exist sets $R_{j,\ell} \subseteq [N]$ (for $j \in [t]$, $\ell \in [3]$)
+  that are \emph{pairwise disjoint} over all $(j,\ell)$, together with, for each
+  $j \in [t]$, two dual codewords $c^{(j,1)}, c^{(j,2)} \in \dualcode{C}$ such
+  that
+  \[
+    \supp\bigl(c^{(j,\ell)}\bigr) \subseteq \{i_j\} \cup R_{j,\ell}
+      \quad(\ell = 1,2),
+    \qquad
+    \supp\bigl(c^{(j,1)}\bigr) \cap \supp\bigl(c^{(j,2)}\bigr) = \{i_j\}.
+  \]
+  We write $\mathcal{D}_{i_1, \dots, i_t} := (c^{(j,\ell)})_{1 \le j \le t,\ \ell=1,2}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:batch-code, lem:batch-monotone, lem:dual-witness}
+  Since $t = \lfloor k/3 \rfloor$ we have $3t \le k$, so by
+  Lemma~\ref{lem:batch-monotone} the code $C$ is a $3t$-batch code. Consider the
+  $3t$-multiset of information symbols $\bigcup_{j=1}^{t} \{i_j, i_j, i_j\}$
+  (three copies of each $i_j$). By the $3t$-batch property there exist mutually
+  disjoint recovery sets $R_{j,1}, R_{j,2}, R_{j,3}$ ($j \in [t]$) and linear
+  functions $g_{j,\ell}$ with $g_{j,\ell}(c|_{R_{j,\ell}}) = x_{i_j} = c_{i_j}$
+  for all codewords $c$ (the last equality by the systematic encoding). In
+  particular all the $R_{j,\ell}$ are pairwise disjoint.
+
+  Fix $j \in [t]$. Since $R_{j,1}, R_{j,2}, R_{j,3}$ are pairwise disjoint, the
+  index $i_j$ lies in at most one of them; hence at least two of the three sets,
+  say $R_{j,\ell}$ for $\ell$ in a two-element set, do not contain $i_j$. Relabel
+  these two as $R_{j,1}, R_{j,2}$. For each such $\ell$, applying
+  Lemma~\ref{lem:dual-witness} with $i = i_j$, $R = R_{j,\ell}$, and $g =
+  g_{j,\ell}$ yields a nonzero dual codeword $c^{(j,\ell)}$ with
+  $\supp(c^{(j,\ell)}) \subseteq R_{j,\ell} \cup \{i_j\}$ and
+  $i_j \in \supp(c^{(j,\ell)})$. Because $R_{j,1}$ and $R_{j,2}$ are disjoint,
+  the only index common to $\supp(c^{(j,1)})$ and $\supp(c^{(j,2)})$ is $i_j$, so
+  $\supp(c^{(j,1)}) \cap \supp(c^{(j,2)}) = \{i_j\}$.
+\end{proof}
+
+\begin{definition}[Good map]
+  \label{def:good-map}
+  A \emph{good map} is a bijection $\pi : [2t] \to [t] \times [2]$. We write
+  $\pi_1 : [2t] \to [t]$ for the first coordinate of $\pi$ and
+  $\pi_2 : [2t] \to [2]$ for the second coordinate, so
+  $\pi(j) = (\pi_1(j), \pi_2(j))$.
+\end{definition}
+
+\begin{definition}[The simple tensor $e_{i_1,\dots,i_t,\pi}$]
+  \label{def:e-tensor}
+  \uses{def:good-map, def:tensor}
+  For a good map $\pi$ and indices $i_1, \dots, i_t$, define the simple tensor
+  \[
+    e_{i_1, \dots, i_t, \pi} := \bigtensor_{j=1}^{2t} e_{i_{\pi_1(j)}} \in \F^{N^{2t}} .
+  \]
+  Note that this definition does not depend on $\pi_2$.
+\end{definition}
+
+\begin{lemma}[$e_{i_1,\dots,i_t,\pi}$ is good]
+  \label{lem:e-good}
+  \uses{def:e-tensor, def:good-tensor, def:good-map}
+  For every good map $\pi$ and indices $i_1, \dots, i_t$, the simple tensor
+  $e_{i_1, \dots, i_t, \pi}$ is a good simple tensor.
+\end{lemma}
+\begin{proof}
+  \uses{def:e-tensor, def:good-map, def:good-tensor}
+  Since $\pi$ is a bijection onto $[t] \times [2]$, for each value $a \in [t]$
+  there are exactly two indices $j \in [2t]$ with $\pi_1(j) = a$ (namely the
+  preimages of $(a,1)$ and $(a,2)$). Hence in the product
+  $\bigtensor_{j=1}^{2t} e_{i_{\pi_1(j)}}$ each $e_{i_a}$ occurs exactly twice.
+  Assuming $i_1, \dots, i_t$ are distinct, the multiset of indices appearing is
+  $\{i_1, i_1, \dots, i_t, i_t\}$: exactly $t$ distinct values, each twice. By
+  Definition~\ref{def:good-tensor} the tensor is good.
+\end{proof}
+
+\begin{definition}[The tensor $w_{i_1,\dots,i_t,\pi}$]
+  \label{def:w-tensor}
+  \uses{def:e-tensor, lem:dual-pairs, def:tensor-power, def:good-map}
+  Let $\mathcal{D}_{i_1, \dots, i_t} = (c^{(j,\ell)})_{1 \le j \le t,\ \ell=1,2}$
+  be the dual codewords of Lemma~\ref{lem:dual-pairs}. For a good map $\pi$ and
+  indices $i_1, \dots, i_t$, define the tensor
+  \[
+    w_{i_1, \dots, i_t, \pi} := \bigtensor_{j=1}^{2t} c^{(\pi_1(j),\, \pi_2(j))} .
+  \]
+  Since each $c^{(\pi_1(j),\pi_2(j))} \in V = \dualcode{C}$, we have
+  $w_{i_1, \dots, i_t, \pi} \in W = \tpow{V}{2t}$.
+\end{definition}
+
+\begin{lemma}[Claim 2.1: few good simple tensors]
+  \label{lem:claim-count}
+  \uses{def:w-tensor, def:good-tensor}
+  Each $w_{i_1, \dots, i_t, \pi}$, written in the standard basis of
+  $\F^{N^{2t}}$, contains at most $3^t$ good simple tensors.
+\end{lemma}
+\begin{proof}
+  \uses{def:w-tensor, lem:dual-pairs, def:good-tensor, def:e-tensor}
+  Recall from Lemma~\ref{lem:dual-pairs} that
+  $\supp(c^{(j,\ell)}) \subseteq \{i_j\} \cup R_{j,\ell}$ and that the sets
+  $R_{j,\ell}$ are pairwise disjoint. Consequently:
+  \begin{itemize}
+    \item each of $i_1, \dots, i_t$ lies in at most three of the supports
+      $\supp(c^{(j,\ell)})$: an index $i_j$ lies in $\supp(c^{(j,1)})$ and
+      $\supp(c^{(j,2)})$, and otherwise can lie in $\supp(c^{(j',\ell)})$ only
+      when $i_j \in R_{j',\ell}$, which holds for at most one pair $(j',\ell)$ by
+      pairwise disjointness of the $R_{j',\ell}$;
+    \item any index $i \in [N] \setminus \{i_1, \dots, i_t\}$ lies in at most one
+      set $R_{j,\ell}$, hence in at most one support $\supp(c^{(j,\ell)})$.
+  \end{itemize}
+  In the standard basis representation of
+  $w_{i_1, \dots, i_t, \pi} = \bigtensor_{j=1}^{2t} c^{(\pi_1(j),\pi_2(j))}$, a
+  simple tensor $e_{i'_1} \otimes \cdots \otimes e_{i'_{2t}}$ can occur only if,
+  for each position $j$, the index $i'_j$ lies in $\supp(c^{(\pi_1(j),\pi_2(j))})$.
+  By the two bullet points, across the $2t$ positions each of
+  $e_{i_1}, \dots, e_{i_t}$ can appear at most three times and any other $e_i$ at
+  most once.
+
+  Now suppose $e_{i'_1} \otimes \cdots \otimes e_{i'_{2t}}$ is moreover a
+  \emph{good} simple tensor: then every value in its index multiset appears
+  exactly twice. A value other than $i_1, \dots, i_t$ appears at most once, so it
+  cannot appear (exactly twice is impossible); hence the only values are
+  $i_1, \dots, i_t$, and each $e_{i_j}$ appears exactly twice. For a fixed $j$,
+  the positions $p \in [2t]$ at which $e_{i_j}$ can occur are: the two positions
+  $p$ with $\pi_1(p) = j$ (where $c^{(\pi_1(p),\pi_2(p))} = c^{(j,\cdot)}$ has
+  $i_j$ in its support), plus at most one position $p$ with
+  $R_{\pi_1(p),\pi_2(p)} \ni i_j$. So there are at most three admissible
+  positions, and we must choose which two of them carry $e_{i_j}$: at most
+  $\binom{3}{2} = 3$ choices. Independently over $j \in [t]$, the number of good
+  simple tensors is therefore at most $3^t$.
+\end{proof}
+
+\begin{lemma}[Claim 2.2: $w_{i_1,\dots,i_t,\pi}$ contains $e_{i_1,\dots,i_t,\pi}$]
+  \label{lem:claim-contains}
+  \uses{def:w-tensor, def:e-tensor}
+  Each $w_{i_1, \dots, i_t, \pi}$, written in the standard basis of
+  $\F^{N^{2t}}$, contains the simple tensor $e_{i_1, \dots, i_t, \pi}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:w-tensor, lem:dual-pairs, def:e-tensor}
+  By Lemma~\ref{lem:dual-pairs}, for each $j \in [2t]$ the dual codeword
+  $c^{(\pi_1(j),\pi_2(j))}$ has $i_{\pi_1(j)}$ in its support, i.e. a nonzero
+  coordinate at index $i_{\pi_1(j)}$. By the definition of the tensor product
+  (Definition~\ref{def:tensor}), the coordinate of
+  $w_{i_1, \dots, i_t, \pi} = \bigtensor_{j=1}^{2t} c^{(\pi_1(j),\pi_2(j))}$ at
+  the tuple $(i_{\pi_1(1)}, \dots, i_{\pi_1(2t)})$ equals
+  $\prod_{j=1}^{2t} c^{(\pi_1(j),\pi_2(j))}_{i_{\pi_1(j)}} \neq 0$. Hence the
+  standard basis representation of $w_{i_1, \dots, i_t, \pi}$ contains
+  $\bigtensor_{j=1}^{2t} e_{i_{\pi_1(j)}} = e_{i_1, \dots, i_t, \pi}$.
+\end{proof}
+
+\begin{lemma}[Size of the set of good simple tensors]
+  \label{lem:E-count}
+  \uses{def:e-tensor, def:good-map}
+  Let $E$ be the set of all simple tensors $e_{i_1, \dots, i_t, \pi}$ with
+  $i_1 > \cdots > i_t$ (from $[n]$) and $\pi$ a good map. Then
+  \[
+    |E| = \binom{n}{t} \cdot \binom{2t}{2, 2, \dots, 2}
+        = \binom{n}{t} \cdot \frac{(2t)!}{2^t},
+  \]
+  where the multinomial coefficient has $t$ twos.
+\end{lemma}
+\begin{proof}
+  \uses{def:e-tensor, def:good-map}
+  By Definition~\ref{def:e-tensor}, $e_{i_1, \dots, i_t, \pi}$ depends only on
+  $(i_1, \dots, i_t)$ and on $\pi_1$ (not on $\pi_2$). The strictly decreasing
+  tuples $i_1 > \cdots > i_t$ from $[n]$ are in bijection with $t$-subsets of
+  $[n]$, giving $\binom{n}{t}$ choices. Given the tuple, the data
+  $e_{i_1, \dots, i_t, \pi}$ is determined by $\pi_1 : [2t] \to [t]$, the first
+  coordinate of a good map; since $\pi$ is a bijection onto $[t] \times [2]$, the
+  map $\pi_1$ takes each value in $[t]$ exactly twice. The number of such maps
+  $\pi_1$ is the number of ways to partition the $2t$ positions into $t$ ordered
+  groups of size $2$, namely $\binom{2t}{2,2,\dots,2} = (2t)!/2^t$. Distinct
+  $\pi_1$ give distinct simple tensors (the assignment of indices to positions
+  differs), so $|E| = \binom{n}{t} \cdot (2t)!/2^t$.
+\end{proof}
+
+\begin{proof}[Proof of Theorem~\ref{thm:main}]
+  \proves{thm:main}
+  \uses{def:dual-code, lem:dual-dim, def:tensor-power, lem:tensor-power-dim,
+    lem:dual-pairs, def:good-map, def:e-tensor, lem:e-good, def:w-tensor,
+    lem:claim-count, lem:claim-contains, lem:lin-indep, lem:E-count,
+    lem:batch-monotone}
+  Let $C \le \F^N$ be a linear $k$-batch code with systematic encoding, and set
+  $t := \lfloor k/3 \rfloor$. Define $V := \dualcode{C}$ and
+  $W := \tpow{V}{2t}$. By Lemma~\ref{lem:dual-dim} the redundancy of $C$ equals
+  $\dim V$, so it suffices to lower bound $\dim V$.
+
+  For every strictly decreasing tuple $i_1 > \cdots > i_t$ from $[n]$,
+  Lemma~\ref{lem:dual-pairs} furnishes the dual codewords
+  $\mathcal{D}_{i_1, \dots, i_t}$, and for each good map $\pi$
+  (Definition~\ref{def:good-map}) we obtain the simple tensor
+  $e_{i_1, \dots, i_t, \pi}$ (Definition~\ref{def:e-tensor}), which is good by
+  Lemma~\ref{lem:e-good}, and the tensor $w_{i_1, \dots, i_t, \pi} \in W$
+  (Definition~\ref{def:w-tensor}).
+
+  Let $E$ be the set of good simple tensors $e_{i_1, \dots, i_t, \pi}$ with
+  $i_1 > \cdots > i_t$ and $\pi$ a good map. We greedily build a sequence
+  $(e^{(1)}, w^{(1)}), (e^{(2)}, w^{(2)}), \dots \in E \times W$: given
+  $(e^{(1)}, w^{(1)}), \dots, (e^{(r)}, w^{(r)})$, choose a good simple tensor
+  $e^{(r+1)} = e_{i_1, \dots, i_t, \pi} \in E$ that does not appear in the
+  standard basis representation of any of $w^{(1)}, \dots, w^{(r)}$, and set
+  $w^{(r+1)} := w_{i_1, \dots, i_t, \pi}$; by Lemma~\ref{lem:claim-contains} the
+  representation of $w^{(r+1)}$ contains $e^{(r+1)}$. Each $w^{(r)}$ contains at
+  most $3^t$ good simple tensors by Lemma~\ref{lem:claim-count}, so after $r$
+  steps at most $r \cdot 3^t$ elements of $E$ are excluded; hence the greedy
+  choice succeeds for at least
+  \[
+    D := \lceil |E| / 3^t \rceil
+  \]
+  steps. By construction $w^{(r)}$ contains $e^{(r)}$ (Lemma~\ref{lem:claim-contains})
+  and, for $r' > r$, $e^{(r')}$ was chosen to avoid $w^{(r)}$, so $w^{(r)}$
+  contains none of $e^{(r+1)}, \dots, e^{(D)}$. Thus the hypotheses of
+  Lemma~\ref{lem:lin-indep} hold (with $s = 2t$), and $w^{(1)}, \dots, w^{(D)}$
+  are linearly independent in $W$.
+
+  Therefore, using Lemma~\ref{lem:tensor-power-dim} and Lemma~\ref{lem:E-count},
+  \[
+    (\dim V)^{2t} = \dim W \ge D \ge \frac{|E|}{3^t}
+      = \binom{n}{t} \cdot \frac{(2t)!}{2^t} \cdot \frac{1}{3^t}
+      \ge \Bigl(\frac{n}{t}\Bigr)^t \cdot \frac{(2t)^{2t}/e^{2t}}{2^t \cdot 3^t}
+      = \frac{n^t t^t}{(3e^2/2)^t},
+  \]
+  where we used $\binom{n}{t} \ge (n/t)^t$ and
+  $(2t)! \ge (2t/e)^{2t} = (2t)^{2t}/e^{2t}$, and simplified
+  $(2t)^{2t} = 4^t t^{2t}$ so that
+  $4^t/(2^t 3^t e^{2t}) = (2/3)^t/e^{2t} = (3e^2/2)^{-t}$. Taking $2t$-th roots,
+  \[
+    \dim V \ge \Bigl(\frac{n^t t^t}{(3e^2/2)^t}\Bigr)^{1/(2t)}
+      = \sqrt{\frac{n t}{3e^2/2}} = \Omega(\sqrt{nt}) = \Omega(\sqrt{nk}),
+  \]
+  since $t = \lfloor k/3 \rfloor = \Theta(k)$.
+
+  Finally we convert $\Omega(\sqrt{nk})$ into $\Omega(\sqrt{Nk})$. If
+  $n = \Omega(N)$ then $\sqrt{nk} = \Omega(\sqrt{Nk})$ and we are done. Otherwise
+  $n < N/2$ (for large $N$), so the redundancy is $N - n > N/2$; since
+  $k \le N$ gives $\sqrt{Nk} \le N$, we again have redundancy
+  $\ge N/2 = \Omega(\sqrt{Nk})$. In all cases the redundancy is
+  $\Omega(\sqrt{Nk})$, completing the proof.
+\end{proof}

@@ -1,0 +1,21 @@
+# Deploy target — produced fresh by scripts/build.py and in CI.
+/site/
+
+# Per-blueprint build artifacts (plasTeX / latexmk output + generated files).
+blueprints/*/blueprint/web/
+blueprints/*/blueprint/print/
+blueprints/*/blueprint/lean_decls
+blueprints/*/blueprint/src/web.bbl
+blueprints/*/blueprint/src/*.paux
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Editor / OS cruft
+.DS_Store
+
+Papers/

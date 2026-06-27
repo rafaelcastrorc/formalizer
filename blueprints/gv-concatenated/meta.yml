@@ -1,0 +1,8 @@
+# Per-blueprint metadata. `name` MUST match the folder name; it is
+# used as the URL subpath (the blueprint is published at site/<name>/).
+name: gv-concatenated
+title: "When Do Low-Rate Concatenated Codes Approach the Gilbert-Varshamov Bound?"
+description: "Sufficient conditions on an outer code so that concatenation with a single random linear inner code lies on the GV bound."
+build_pdf: false        # if true, also build + link a PDF (requires TeX in CI)
+home: "https://arxiv.org/abs/2405.08584"                # optional URL shown as a "home" link on the landing card
+github: ""              # optional repo URL shown as a "GitHub" link on the landing card

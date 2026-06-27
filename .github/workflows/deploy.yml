@@ -1,0 +1,63 @@
+name: Deploy blueprints to Cloudflare Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Only need to read the repo; deployment goes to Cloudflare via API token.
+permissions:
+  contents: read
+
+# Serialize deploys so overlapping pushes don't clash.
+concurrency:
+  group: cloudflare-pages
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # No Lean, no elan, no lake, no Mathlib anywhere in this job.
+      - name: Install graphviz
+        run: sudo apt-get update && sudo apt-get install -y graphviz libgraphviz-dev
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # Use build.py itself so the "needs TeX?" decision uses the exact same
+      # meta.yml interpretation as the build (one source of truth).
+      - name: Detect whether any blueprint needs a PDF (and therefore TeX)
+        id: pdf
+        run: |
+          need_tex="$(python scripts/build.py --print-needs-tex)"
+          echo "need_tex=$need_tex" >> "$GITHUB_OUTPUT"
+          echo "needs TeX: $need_tex"
+
+      - name: Install TeX (only when a blueprint sets build_pdf)
+        if: steps.pdf.outputs.need_tex == 'true'
+        run: sudo apt-get update && sudo apt-get install -y texlive-xetex texlive-latex-extra texlive-fonts-recommended latexmk
+
+      - name: Build site
+        run: python scripts/build.py
+
+      # Direct Upload to Cloudflare Pages. The project (auto-blueprint) must
+      # already exist as a "Direct Upload" Pages project. Required repo secrets:
+      #   CLOUDFLARE_API_TOKEN  -- token with the "Cloudflare Pages: Edit" permission
+      #   CLOUDFLARE_ACCOUNT_ID -- your Cloudflare account id
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy site --project-name=auto-blueprint --branch=main

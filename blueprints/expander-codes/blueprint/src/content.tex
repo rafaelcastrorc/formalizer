@@ -1,0 +1,867 @@
+% Blueprint for "Expander Codes" (M. Sipser, D. A. Spielman),
+% IEEE Trans. Inform. Theory 42(6):1710-1722, 1996.
+% Paper numbering (Definition 4, Theorem 7, ...) is preserved in node titles.
+% Two-kind model: settled library facts are leaves (\mathlibok, no proof);
+% everything novel is a full node with a complete proof and \uses edges.
+
+\chapter{Coding-theoretic preliminaries}
+
+% --- Settled dependencies: basic finite-field / coding / entropy facts. -------
+
+\begin{definition}[The binary field $\GFtwo$]
+  \label{def:gf2}
+  \lean{ZMod}
+  \mathlibok
+  The alphabet $\{0,1\}$ with addition and multiplication modulo $2$, i.e. the
+  field $\GFtwo = \mathbb{Z}/2\mathbb{Z}$. All codes in this blueprint are built
+  over $\GFtwo$ (the constructions generalize to larger fields).
+  % TODO: confirm Lean decl name -- ZMod 2 is the intended model.
+\end{definition}
+
+\begin{definition}[Hamming distance]
+  \label{def:hamming-dist}
+  \uses{def:gf2}
+  \lean{hammingDist}
+  \mathlibok
+  For words $u,v \in \GFtwo^{\,n}$, the Hamming distance $\dist(u,v)$ is the
+  number of coordinates in which $u$ and $v$ differ.
+\end{definition}
+
+\begin{definition}[Hamming weight]
+  \label{def:hamming-weight}
+  \uses{def:gf2}
+  \lean{hammingNorm}
+  \mathlibok
+  The Hamming weight $\wt(w)$ of $w \in \GFtwo^{\,n}$ is the number of nonzero
+  coordinates of $w$; equivalently $\wt(w) = \dist(w,0)$.
+\end{definition}
+
+\begin{definition}[Binary entropy function]
+  \label{def:binary-entropy}
+  \lean{Real.binEntropy}
+  \mathlibok
+  The binary entropy function is
+  $\Hb(x) = -x\log_2 x - (1-x)\log_2(1-x)$ for $x \in (0,1)$, with
+  $\Hb(0)=\Hb(1)=0$. It governs the Gilbert--Varshamov bound and the
+  random-expansion estimates of Appendix~II.
+\end{definition}
+
+\begin{lemma}[Azuma's inequality]
+  \label{lem:azuma}
+  \mathlibok
+  Let $X_0,\dots,X_m$ be a martingale with bounded differences
+  $|X_{i+1}-X_i| \le 1$. Then for $\lambda > 0$,
+  $\Pr[\,|X_m - X_0| > \lambda\sqrt{m}\,] < 2e^{-\lambda^2/2}$.
+  % TODO: confirm Lean decl name (Mathlib.Probability.Martingale.Azuma).
+\end{lemma}
+
+% --- The paper's coding-theoretic framework (its own setup). ------------------
+
+\begin{definition}[Linear code, block length, rate]
+  \label{def:linear-code}
+  \uses{def:gf2}
+  A \emph{linear code} of block length $n$ and rate $r$ is a subspace
+  $\code \subseteq \GFtwo^{\,n}$ of dimension $rn$. Words have $n$ symbols, of
+  which $rn$ are message symbols (freely chosen) and the remaining $(1-r)n$ are
+  determined by the linear constraints defining $\code$.
+\end{definition}
+
+\begin{definition}[Minimum relative distance]
+  \label{def:relative-distance}
+  \uses{def:linear-code, def:hamming-dist}
+  A code $\code$ has \emph{minimum relative distance} $\alpha$ if every pair of
+  distinct words of $\code$ differ in at least $\alpha n$ symbols. For a linear
+  code this equals $\min\{\wt(w)/n : w \in \code,\ w \neq 0\}$.
+\end{definition}
+
+\begin{definition}[Correcting an $\epsilon$ fraction of error]
+  \label{def:correct-error}
+  \uses{def:linear-code, def:hamming-dist}
+  An algorithm \emph{corrects an $\epsilon$ fraction of error} from a code
+  $\code$ if, on input a word $w$ that differs from some $v \in \code$ in at
+  most $\epsilon n$ symbols, it outputs $v$ (no restriction is placed on its
+  behaviour on other inputs).
+\end{definition}
+
+\begin{definition}[Asymptotically good family]
+  \label{def:asymptotically-good}
+  \uses{def:linear-code, def:relative-distance}
+  A family of linear codes is \emph{asymptotically good} if there are constants
+  $r>0$ and $\alpha>0$ such that the codes have block length tending to
+  infinity, rate at least $r$, and minimum relative distance at least $\alpha$.
+\end{definition}
+
+\chapter{Models of linear time}
+
+% Section II. Computational models underlying the running-time claims. These are
+% standard model definitions (not numbered in the paper); they carry logical
+% weight for the complexity statements, so each is a node. No proofs.
+
+\begin{definition}[RAM, uniform cost model]
+  \label{def:ram-uniform}
+  A Random Access Machine (RAM) has a central processor with basic operations
+  (addition, subtraction, read/write of a memory cell, branch on zero, branch
+  on positive, etc.). Under the \emph{uniform cost model} each basic operation
+  costs one unit of time, regardless of operand size.
+\end{definition}
+
+\begin{definition}[RAM, logarithmic cost model]
+  \label{def:ram-log}
+  \uses{def:ram-uniform}
+  Under the \emph{logarithmic cost model} the cost of a basic step is
+  proportional to the bit-length of its arguments: adding two $n$-bit numbers
+  costs $\Theta(n)$, and reading an $n$-bit word from an address described by
+  $n$ bits costs $2n$.
+\end{definition}
+
+\begin{definition}[Pointer Machine]
+  \label{def:pointer-machine}
+  A Pointer Machine (Kolmogorov--Uspenskii machine) operates on a
+  constant-degree directed graph: its input, output and working memory are
+  nodes; at each step the CPU node inspects the configuration of nodes within
+  distance two of itself and rearranges edges, possibly creating new nodes.
+  Any reasonable model is simulable on a Pointer Machine up to a constant
+  factor.
+\end{definition}
+
+\begin{definition}[Boolean circuit: size and depth]
+  \label{def:circuit}
+  An (acyclic) Boolean circuit has gates each computing a Boolean function of
+  two input wires; a gate output may fan out to many wires. The \emph{size} is
+  the number of wires and the \emph{depth} is the length of the longest
+  directed path. This is the model used to analyze the parallel decoders.
+\end{definition}
+
+\chapter{Expander graphs}
+
+% Section III.
+
+\begin{definition}[Expansion by a factor of $\delta$]
+  \label{def:expansion-factor}
+  Let $G=(V,E)$ be a graph on $n$ vertices. We say \emph{every set of at most
+  $m$ vertices expands by a factor of $\delta$} if for all $S \subseteq V$ with
+  $|S| \le m$,
+  \[
+    \bigl|\{\,y : \exists\, x \in S \text{ with } (x,y)\in E\,\}\bigr| > \delta\,|S|.
+  \]
+\end{definition}
+
+\begin{definition}[Unbalanced bipartite $(c,d)$-regular graph]
+  \label{def:cd-regular}
+  An \emph{unbalanced bipartite} graph has its vertices split into two sets with
+  no edges inside a set. It is \emph{$(c,d)$-regular} if every vertex on one
+  side has degree $c$ and every vertex on the other side has degree $d$. By
+  counting edges, the number of $c$-regular vertices exceeds the number of
+  $d$-regular vertices by the factor $d/c$.
+\end{definition}
+
+\begin{definition}[$(c,d,\epsilon,\delta)$-expander]
+  \label{def:cdes-expander}
+  \uses{def:cd-regular, def:expansion-factor}
+  A graph is a \emph{$(c,d,\epsilon,\delta)$-expander} if it is a $(c,d)$-regular
+  graph in which every subset of at most an $\epsilon$ fraction of the
+  $c$-regular vertices expands (into the $d$-regular side) by a factor of at
+  least $\delta$. We use families of $(c,d,\epsilon,\delta)$-expanders in which
+  $c,d,\epsilon,\delta$ are constant as the number of vertices grows.
+\end{definition}
+
+\begin{proposition}[Proposition 1: random graphs are good expanders]
+  \label{prop:random-expander}
+  \uses{def:cd-regular, def:binary-entropy}
+  Let $B$ be a randomly chosen $(c,d)$-regular bipartite graph between $n$
+  $c$-regular vertices and $(c/d)n$ $d$-regular vertices. Then for all
+  $0<\alpha<1$, with high probability all sets of $\alpha n$ $c$-regular
+  vertices in $B$ have at least
+  \[
+    n\!\left(\frac{c}{d}\bigl(1-(1-\alpha)^d\bigr)
+      - \sqrt{\frac{2c\alpha\,\Hb(\alpha)}{\log_2 e}}\right)
+  \]
+  neighbours, where $\Hb(\cdot)$ is the binary entropy function.
+\end{proposition}
+\begin{proof}
+  \uses{thm:expansion-random}
+  This is Theorem~\ref{thm:expansion-random}, proved in Appendix~II.
+\end{proof}
+
+\begin{theorem}[Theorem 2: Lubotzky--Phillips--Sarnak, Margulis]
+  \label{thm:lps-margulis}
+  \notready
+  For every pair of primes $p,q$ congruent to $1$ modulo $4$ such that $p$ is a
+  quadratic residue modulo $q$, there is a $(p+1)$-regular Cayley graph of
+  $PSL(2,\mathbb{Z}/q\mathbb{Z})$ with $q(q^2-1)/2$ vertices whose
+  second-largest eigenvalue is at most $2\sqrt{p}$. A graph with this eigenvalue
+  separation is a good expander.
+\end{theorem}
+% TODO: cited from [19],[21] (Ramanujan graphs); proof omitted in the paper.
+
+\begin{proposition}[Proposition 3: polynomial-time construction of Theorem 2 graphs]
+  \label{prop:lps-construct}
+  \uses{thm:lps-margulis}
+  \notready
+  Each graph described in Theorem~\ref{thm:lps-margulis} can be constructed in
+  time polynomial in its number of vertices. Moreover there is an algorithm
+  that, given a logarithmic-size description of the graph, produces the labels
+  of the neighbours of a node in time polynomial in the length of the labels
+  (i.e. polylogarithmic in the number of vertices).
+\end{proposition}
+% TODO: cited construction; proof omitted in the paper.
+
+\begin{definition}[Definition 4: edge-vertex incidence graph]
+  \label{def:edge-vertex}
+  Let $G$ be a graph with edge set $E$ and vertex set $V$. The
+  \emph{edge-vertex incidence graph} of $G$ is the bipartite graph with vertex
+  set $E \cup V$ and edge set $\{(e,v) \in E\times V : v \text{ is an endpoint
+  of } e\}$. If $G$ is $d$-regular on $n$ vertices, this is a $(2,d)$-regular
+  graph with $dn/2$ vertices on one side and $n$ on the other.
+\end{definition}
+
+\begin{lemma}[Lemma 5: Alon--Chung]
+  \label{lem:alon-chung}
+  \uses{def:edge-vertex}
+  \notready
+  Let $G$ be a $d$-regular graph on $n$ vertices with second-largest eigenvalue
+  $\eigtwo$. Let $X$ be a subset of the vertices of $G$ of size $\gamma n$. Then
+  the number of edges contained in the subgraph induced by $X$ in $G$ is at most
+  \[
+    \frac{dn}{2}\left(\gamma^2 + \frac{\eigtwo}{d}\,\gamma(1-\gamma)\right).
+  \]
+\end{lemma}
+% TODO: cited from [2] (Alon--Chung); proof omitted in the paper.
+
+\chapter{The construction}
+
+% Section IV.
+
+\begin{definition}[Definition 6: the expander code $\code(B,\Sc)$]
+  \label{def:expander-code}
+  \uses{def:cd-regular, def:linear-code}
+  Let $B$ be a $(c,d)$-regular graph between a set of $n$ nodes
+  $\{v_1,\dots,v_n\}$, called \emph{variables}, and a set of $cn/d$ nodes
+  $\{C_1,\dots,C_{cn/d}\}$, called \emph{constraints}, with $d>c$. Let
+  $b(i,j)$ be a function so that for each constraint $C_i$ the variables
+  neighbouring $C_i$ are $v_{b(i,1)},\dots,v_{b(i,d)}$. Let $\Sc$ be an
+  error-correcting code of block length $d$. The \emph{expander code}
+  $\code(B,\Sc)$ is the code of block length $n$ whose codewords are the words
+  $(x_1,\dots,x_n)$ such that, for $1 \le i \le cn/d$, the restriction
+  $(x_{b(i,1)},\dots,x_{b(i,d)})$ is a codeword of $\Sc$. Because the
+  restrictions are linear, $\code(B,\Sc)$ is a linear code.
+\end{definition}
+
+\begin{theorem}[Theorem 7: rate and distance of $\code(B,\Sc)$]
+  \label{thm:rate-distance}
+  \uses{def:expander-code, def:cdes-expander, def:relative-distance}
+  Let $B$ be a $(c,d,\alpha,c/(d\epsilon))$-expander and let $\Sc$ be an
+  error-correcting code of block length $d$, rate $r > (c-1)/c$, and minimum
+  relative distance $\epsilon$. Then $\code(B,\Sc)$ has rate at least
+  $cr-(c-1)$ and minimum relative distance at least $\alpha$.
+\end{theorem}
+\begin{proof}
+  \uses{def:expander-code, def:cdes-expander, def:relative-distance, def:hamming-weight}
+  \emph{Rate.} Each of the $cn/d$ constraints imposes at most $(1-r)d$ linear
+  restrictions on the variables, so the variables suffer at most
+  \[
+    n\,\frac{c}{d}\,(1-r)d = cn(1-r)
+  \]
+  linear restrictions in total. Hence they have at least
+  $n\bigl(cr-(c-1)\bigr)$ degrees of freedom, giving rate at least $cr-(c-1)$.
+
+  \emph{Distance.} We show $\code(B,\Sc)$ has no nonzero codeword of weight
+  $\alpha n$ or less. Let $w$ be a nonzero word of weight at most $\alpha n$ and
+  let $V$ be the set of variables that are $1$ in $w$, so $|V| \le \alpha n$.
+  There are $c|V|$ edges leaving $V$. By the expansion property (since
+  $|V| \le \alpha n$), these edges enter more than $\frac{c}{d\epsilon}|V|$
+  constraints. Hence the average number of edges per neighbouring constraint is
+  less than
+  \[
+    \frac{c|V|}{(c/(d\epsilon))|V|} = d\epsilon,
+  \]
+  so some constraint $C$ neighbouring $V$ has fewer than $d\epsilon$ neighbours
+  in $V$. The restriction of $w$ to $C$ is therefore a nonzero word of weight
+  less than $\epsilon d$, the minimum distance of $\Sc$; so it is not a codeword
+  of $\Sc$. Thus $w$ is not a codeword of $\code(B,\Sc)$. Hence the minimum
+  relative distance is at least $\alpha$.
+\end{proof}
+
+\chapter{A simple example and sequential decoding}
+
+% Section V and V-A.
+
+\begin{definition}[The even-weight parity-check code $\Pc$]
+  \label{def:parity-code}
+  \uses{def:linear-code, def:hamming-weight}
+  Let $\Pc$ be the code consisting of all even-weight words of length $d$, i.e.
+  those $(x_1,\dots,x_d) \in \{0,1\}^d$ with $\sum_i x_i = 0 \pmod 2$. It has
+  rate $(d-1)/d$ and minimum relative distance $2/d$.
+\end{definition}
+
+\begin{proposition}[Section V example: $\code(B,\Pc)$]
+  \label{prop:parity-example}
+  \uses{def:expander-code, def:parity-code, def:edge-vertex}
+  Let $B$ be a graph with expansion greater than $c/2$ on sets of size at most
+  $\alpha n$, and let $\Pc$ be the even-weight code of length $d$. Then the
+  parity-check matrix of $\code(B,\Pc)$ is the adjacency matrix of $B$, and
+  $\code(B,\Pc)$ has rate $1-c/d$ and minimum relative distance at least
+  $\alpha$.
+\end{proposition}
+\begin{proof}
+  \uses{thm:rate-distance, def:parity-code}
+  Each constraint requires that the sum of its $d$ neighbouring variables be
+  even, i.e. that the restriction lie in $\Pc$; the matrix of these constraints
+  is exactly the bipartite adjacency matrix of $B$. The rate $1-c/d$ follows by
+  the count of Theorem~\ref{thm:rate-distance} with $r=(d-1)/d$ (giving
+  $cr-(c-1)=1-c/d$). The distance bound is the distance part of
+  Theorem~\ref{thm:rate-distance}; with $\Pc$ of relative distance $2/d$ the
+  required expansion factor $c/(d\epsilon)=c/2$, matching the hypothesis.
+\end{proof}
+
+\begin{definition}[Satisfied and unsatisfied constraints]
+  \label{def:satisfied}
+  \uses{def:expander-code}
+  A constraint $C_i$ is \emph{satisfied} by a word $(x_1,\dots,x_n)$ if its
+  restriction $(x_{b(i,1)},\dots,x_{b(i,d)})$ is a codeword of $\Sc$; otherwise
+  it is \emph{unsatisfied}. For the even-weight code $\Pc$, a constraint is
+  satisfied iff the sum of its neighbouring variables is even.
+\end{definition}
+
+\begin{definition}[Simple Sequential Decoding Algorithm]
+  \label{def:seq-decode}
+  \uses{def:satisfied}
+  Repeat the following until no such variable remains: if there is a variable
+  that is in more unsatisfied than satisfied constraints, then flip its value
+  (a $0$ becomes $1$ and a $1$ becomes $0$). On termination, if all constraints
+  are satisfied output the current word; otherwise report ``failed to decode''.
+\end{definition}
+
+\begin{lemma}[Lemma 9: sequential decoding runs in linear time]
+  \label{lem:seq-linear-time}
+  \uses{def:seq-decode, def:pointer-machine, def:ram-uniform}
+  For $c$ and $d$ constant, the implementation of the simple sequential
+  decoding algorithm (Fig.~2 of the paper) runs in linear time on a Pointer
+  Machine, and on a RAM under the uniform cost model.
+\end{lemma}
+\begin{proof}
+  \uses{def:seq-decode}
+  The implementation runs in two phases. \emph{Set-up} (linear time): partition
+  the variables into sets $S_0,\dots,S_c$, where $S_i$ holds the variables that
+  appear in exactly $i$ unsatisfied constraints; computing for each constraint
+  whether it is satisfied and bucketing each variable takes linear time. On a
+  RAM this is immediate; on a Pointer Machine it is linear because the input
+  graph lets one find a variable's neighbours in constant time rather than the
+  logarithmic time needed for arbitrary memory access.
+
+  \emph{Loop} (constant time per iteration): repeatedly take a variable $v$ from
+  the highest nonempty $S_i$ with $i > c/2$, flip $v$, update the status of each
+  of the $c$ constraints containing $v$, and move each affected variable to its
+  new bucket. Only a constant number ($c,d$ constant) of constraints, variables
+  and pointers are touched, all linked in the graph, so each iteration costs
+  $O(1)$. Each flip strictly decreases the number of unsatisfied constraints,
+  and there are only linearly many constraints, so the loop runs a linear number
+  of times. Hence the total time is linear.
+\end{proof}
+
+\begin{theorem}[Theorem 10: correctness of sequential decoding]
+  \label{thm:seq-correct}
+  \uses{def:cdes-expander, def:parity-code, def:seq-decode, def:correct-error}
+  Let $B$ be a $(c,d,\alpha,3c/4)$-expander and let $\Pc$ be the code of all
+  even-weight words of length $d$. Then the simple sequential decoding algorithm
+  corrects an $\alpha/2$ fraction of error from the code $\code(B,\Pc)$.
+\end{theorem}
+\begin{proof}
+  \uses{def:cdes-expander, def:seq-decode, lem:seq-linear-time}
+  Suppose the input is within distance $\alpha n/2$ of a codeword; call the
+  variables in which the input differs from that codeword \emph{corrupt}. Track
+  a \emph{state} $(v,u)$, where $v$ is the number of corrupt variables and $u$
+  the number of unsatisfied constraints; $u$ is a potential we drive to zero.
+
+  First suppose $v \le \alpha n$. Let $s$ be the number of satisfied neighbours
+  of the corrupt variables. By expansion of the $\le \alpha n$ corrupt
+  variables (factor $3c/4$), the total number of neighbouring constraints
+  satisfies $u + s > (3/4)cv$. Each satisfied neighbour shares at least two
+  edges with the corrupt variables and each unsatisfied neighbour at least one,
+  so $cv \ge u + 2s$. Combining,
+  \[
+    u > cv/2. \tag{1}
+  \]
+  Since each unsatisfied constraint shares at least one of the $cv$ edges
+  leaving the corrupt variables, inequality (1) shows more than half those
+  edges enter unsatisfied constraints; hence some corrupt variable has more
+  unsatisfied than satisfied neighbours, and the algorithm will flip some
+  variable while $v \le \alpha n$.
+
+  It remains to show $v$ never exceeds $\alpha n$, given $v \le \alpha n/2$
+  initially. The only way to fail is to flip so many uncorrupt variables that
+  $v$ grows past $\alpha n$. If this happened there would be a time with
+  $v=\alpha n$, and then (1) gives $u > c\alpha n/2$. This is a contradiction,
+  because $u$ is initially at most $c\alpha n/2$ (the input is within distance
+  $\alpha n/2$, each corrupt variable touches $c$ constraints) and $u$ only
+  decreases. So $v \le \alpha n$ throughout, the algorithm keeps flipping until
+  $u=0$, and it outputs the codeword. Linear running time is
+  Lemma~\ref{lem:seq-linear-time}.
+\end{proof}
+
+\chapter{Necessity of expansion (Appendix I)}
+
+\begin{theorem}[Theorem 24: necessity of expansion]
+  \label{thm:necessity}
+  \uses{def:seq-decode, def:parity-code, def:cd-regular}
+  Let $d>c$, and let $B$ be a bipartite graph between $n$ variables of degree
+  $c$ and $(c/d)n$ constraints of degree $d$ such that the simple sequential
+  decoding algorithm successfully decodes all sets of at most $\alpha n$ errors
+  in $\code(B,\Pc)$. Then every set of $\alpha n$ variables must have at least
+  \[
+    \alpha n\left(1 + \frac{2\,\frac{c-1}{2d}}{3+\frac{c-1}{2d}}\right)
+  \]
+  neighbours.
+\end{theorem}
+\begin{proof}
+  \uses{def:seq-decode, def:parity-code}
+  \emph{Case $c$ even.} Every flip changes the parity of each incident
+  constraint, so flipping a variable changes the number of unsatisfied
+  constraints by an even amount; whenever the algorithm flips a variable the
+  number of unsatisfied constraints decreases by at least $2$. Since the
+  algorithm corrects $\alpha n$ corrupt variables it must reduce the count by at
+  least $2\alpha n$, so every word of weight $\alpha n$ is unsatisfied in at
+  least $2\alpha n$ constraints; hence every set of $\alpha n$ variables has at
+  least $2\alpha n$ neighbours, and because $d>c$ this exceeds the displayed
+  bound. So the even case is done.
+
+  \emph{Case $c$ odd.} Now a flip can decrease the count of unsatisfied
+  constraints by $1$. At minimum every set of $\alpha n$ variables induces at
+  least $\alpha n$ unsatisfied constraints, which alone only gives expansion by a
+  factor $>1$. Consider what must happen for the algorithm to be in a state with
+  $\alpha n$ corrupt variables and no flip available that decreases the count by
+  more than $1$. Each corrupt variable must have at least $(c-1)/2$ of its edges
+  in satisfied constraints; since each satisfied constraint has at most $d$
+  incoming edges, there are at least $\alpha n(c-1)/2d$ satisfied neighbours.
+  Together with the $\alpha n$ unsatisfied constraints, the $\alpha n$ variables
+  have at least $\alpha n\bigl(1+(c-1)/2d\bigr)$ neighbours.
+
+  On the other hand, if the algorithm decreases the count by more than $1$, it
+  must decrease by at least $3$ (parity, $c$ odd). For a word of weight
+  $\alpha n$, suppose the algorithm flips $\beta\alpha n$ variables that
+  decrease the count by only $1$ before it flips a variable that decreases it by
+  $3$. Accounting for both kinds of step (and the possible overlap between the
+  $3\beta\alpha n$ previously-flipped constraints and the extra
+  $(1-\beta)\alpha n\,(c-1)/2d$), the original $\alpha n$ variables must have had
+  at least
+  \[
+    \Bigl(1+\tfrac{c-1}{2d}\Bigr)(1-\beta)\alpha n
+      + 3\beta\alpha n
+  \]
+  neighbours. This bound is strictly decreasing in $\beta$, while the previous
+  paragraph's bound is strictly increasing in $\beta$, so the weakest (true)
+  lower bound on expansion occurs where the two are equal:
+  \[
+    3\beta\alpha n + (1-\beta)\alpha n
+      = \Bigl(1+\tfrac{c-1}{2d}\Bigr)(1-\beta)\alpha n
+    \ \Longrightarrow\
+    \beta = \frac{\frac{c-1}{2d}}{3+\frac{c-1}{2d}}.
+  \]
+  Substituting this $\beta$ back, the set of $\alpha n$ variables has at least
+  \[
+    \alpha n\!\left(1 + \frac{2\,\frac{c-1}{2d}}{3+\frac{c-1}{2d}}\right)
+  \]
+  neighbours, as claimed.
+\end{proof}
+
+\chapter{Parallel decoding}
+
+% Section V-B.
+
+\begin{definition}[Simple Parallel Decoding Algorithm]
+  \label{def:parallel-decode}
+  \uses{def:satisfied}
+  Repeat until no such variable remains: in parallel, flip every variable that
+  is in more unsatisfied than satisfied constraints.
+\end{definition}
+
+\begin{theorem}[Theorem 11: correctness of parallel decoding]
+  \label{thm:parallel-correct}
+  \uses{def:cdes-expander, def:parity-code, def:parallel-decode, def:correct-error}
+  Let $B$ be a $(c,d,\alpha,(3/4+\epsilon)c)$-expander, for any $\epsilon>0$, and
+  let $\Pc$ be the code of all even-weight words of length $d$. Then the simple
+  parallel decoding algorithm corrects any
+  $\alpha_0 < \alpha(1+4\epsilon)/2$ fraction of error after
+  $\log_{1/(1-4\epsilon)}(\alpha_0 n)$ decoding rounds.
+\end{theorem}
+\begin{proof}
+  \uses{def:cdes-expander, def:parallel-decode}
+  Let $V$ be the set of corrupt variables in the input, with
+  $|V| < \alpha n(1+4\epsilon)/2$. We show that after one round at most
+  $(1-4\epsilon)|V|$ variables are corrupt; iterating then drives the count
+  below $1$ in $\log_{1/(1-4\epsilon)}(\alpha_0 n)$ rounds.
+
+  Let $F$ be the corrupt variables that fail to flip in the round and $C$ the
+  variables that were uncorrupt but become corrupt (wrongly flipped). After the
+  round the corrupt set is $F \cup C$. Set $\delta = 3/4+\epsilon$, the
+  expansion factor, so $\delta > 3/4+\epsilon$.
+
+  \emph{Step 1: $|V \cup C| < \alpha n$.} Suppose not; take a subset $C'
+  \subseteq C$ with $|V\cup C'| = \alpha n$. By expansion,
+  $|\Nbr(V\cup C')| \ge (3/4+\epsilon)c\alpha n$. On the other hand every
+  variable in $C$ has at most $c/2$ neighbours that are not neighbours of $V$
+  (else it would not have been flipped toward corruption), so
+  $|\Nbr(V\cup C')| \le \delta c|V| + c(\alpha n - |V|)/2$. Combining,
+  $|V| \ge \alpha n(1+4\epsilon)/(4\delta-2)$; since $\delta \le 1$ this
+  contradicts $|V| < \alpha n(1+4\epsilon)/2$. Hence $|V\cup C| < \alpha n$.
+
+  \emph{Step 2: bounding the surviving corrupt set.} Since
+  $|V\cup C| < \alpha n$, by expansion
+  \[
+    (3/4+\epsilon)c\,(|V|+|C|) \le |\Nbr(V\cup C)| \le \delta c|V| + (c/2)|C|.
+    \tag{2}
+  \]
+  Each variable in $F$ shares at least half of its $c$ edges with other corrupt
+  variables (it failed to flip), so each variable of $F$ accounts for at most
+  $(3/4)c$ neighbours, and each variable of $V\setminus F$ for at most $c$;
+  hence
+  \[
+    \delta c|V| \le (3/4)c|F| + c(|V|-|F|) = c\bigl(|V|-|F|/4\bigr).
+  \]
+  Substituting into (2) gives
+  $(3/4+\epsilon)(|V|+|C|) \le |V| - |F|/4 + |C|/2$, i.e.
+  \[
+    |V|(1-4\epsilon) \ge |F| + (1+4\epsilon)|C| \ge |F\cup C|.
+  \]
+  Thus the number of corrupt variables drops to at most $(1-4\epsilon)|V|$ each
+  round, proving the claim.
+\end{proof}
+
+\begin{proposition}[Proposition 12: parallel decoding as a circuit]
+  \label{prop:parallel-circuit}
+  \uses{def:parallel-decode, def:circuit}
+  For $c$ and $d$ constant, the simple parallel decoding algorithm can be
+  implemented as a Boolean circuit of size $O(n\log n)$ and depth
+  $O(\log n)$.
+\end{proposition}
+\begin{proof}
+  \uses{def:parallel-decode, thm:parallel-correct}
+  Each parallel decoding round is implementable in linear size and constant
+  depth: computing which constraints are unsatisfied is a constant number of
+  layers of \textsc{xor} gates (each constraint has $d$ inputs, $d$ constant),
+  and deciding whether a given variable should flip is a majority of a constant
+  number of inputs (the variable's $c$ constraints, $c$ constant). By
+  Theorem~\ref{thm:parallel-correct} there are $O(\log n)$ rounds, so stacking
+  the rounds gives total size $O(n\log n)$ and depth $O(\log n)$.
+\end{proof}
+
+\chapter{Explicit constructions of expander codes}
+
+% Section VI.
+
+\begin{lemma}[Lemma 15: distance from eigenvalue separation]
+  \label{lem:distance-eigenvalue}
+  \uses{def:edge-vertex, def:expander-code, def:relative-distance}
+  If $\Sc$ is a linear code of rate $r$, block length $d$, and minimum relative
+  distance $\epsilon$, and $B$ is the edge-vertex incidence graph of a
+  $d$-regular graph with second-largest eigenvalue $\eigtwo$, then the code
+  $\code(B,\Sc)$ has rate at least $2r-1$ and minimum relative distance at least
+  \[
+    \left(\frac{\epsilon-\eigtwo/d}{1-\eigtwo/d}\right)^2.
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{lem:alon-chung, def:edge-vertex, def:expander-code}
+  Let $G$ be the $d$-regular graph from which $B$ is derived and $n$ its number
+  of vertices, so $\code(B,\Sc)$ has $dn/2$ variables and $n$ constraints. The
+  rate bound $2r-1$ follows as in Theorem~\ref{thm:rate-distance} (here $c=2$):
+  $cr-(c-1)=2r-1$.
+
+  For the distance, consider a nonzero codeword and let $X$ be the set of
+  $\gamma n$ constraints (vertices of $G$) incident to the support variables. By
+  Lemma~\ref{lem:alon-chung}, the support edges lie in a subgraph containing at
+  most $\tfrac{dn}{2}\bigl(\gamma^2 + \tfrac{\eigtwo}{d}(\gamma-\gamma^2)\bigr)$
+  edges, so the average number of support variables per constraint in $X$ is
+  \[
+    \frac{2\cdot\frac{dn}{2}\bigl(\gamma^2+\frac{\eigtwo}{d}(\gamma-\gamma^2)\bigr)}
+         {\gamma n}
+    = d\!\left(\gamma + \Bigl(\tfrac{\eigtwo}{d}\Bigr)(1-\gamma)\right).
+  \]
+  If $d\bigl(\gamma+(\eigtwo/d)(1-\gamma)\bigr) < \epsilon d$, i.e.
+  \begin{equation}
+    d\Bigl(\gamma + (\eigtwo/d)(1-\gamma)\Bigr) < \epsilon d,
+    \label{eq:lem15-key}
+  \end{equation}
+  then some constraint sees fewer than $\epsilon d$ support variables, so its
+  restriction is a nonzero word of weight below the minimum distance of $\Sc$ --
+  impossible. Inequality~\eqref{eq:lem15-key} holds for
+  $\gamma < (1-\eigtwo/d)/(\epsilon-\eigtwo/d)\cdot(\epsilon-\eigtwo/d)$; solving
+  for the relative weight $\gamma^2+(\eigtwo/d)(\gamma-\gamma^2)$ shows
+  $\code(B,\Sc)$ has no nonzero codeword of relative weight
+  $\bigl((\epsilon-\eigtwo/d)/(1-\eigtwo/d)\bigr)^2$ or less.
+\end{proof}
+
+\begin{lemma}[Lemma 17: progress of one parallel round]
+  \label{lem:round-progress}
+  \uses{def:edge-vertex, def:expander-code, def:parallel-decode}
+  Let $\Sc$ be a linear code of rate $r$, block length $d$, and minimum relative
+  distance $\epsilon$, and let $B$ be the edge-vertex incidence graph of a
+  $d$-regular graph with second-largest eigenvalue $\eigtwo$. If a parallel
+  decoding round for $\code(B,\Sc)$ is given as input a word of relative
+  distance $\alpha$ from a codeword, then it outputs a word of relative distance
+  at most
+  \[
+    \alpha\left(\frac{2}{3} + \frac{16\alpha}{\epsilon^2}
+      + \frac{4\eigtwo}{\epsilon d}\right)
+  \]
+  from that codeword.
+\end{lemma}
+\begin{proof}
+  \uses{lem:alon-chung, def:parallel-decode}
+  (Here a round flips a variable iff each constraint containing it, seeing its
+  restriction within $d\epsilon/4$ of a codeword of $\Sc$, sends it a ``flip''
+  signal.) Let $G$ be the $d$-regular graph defining $B$, with $n$ vertices, so
+  $\code(B,\Sc)$ has $dn/2$ variables and $n$ constraints. Let $X$ be the set of
+  $\alpha\,dn/2$ corrupt variables.
+
+  A corrupt output variable is one not in $X$ that receives a flip, or one in
+  $X$ that does not. Call a constraint \emph{confused} if it sends a flip to a
+  variable not in $X$, and \emph{unhelpful} if it contains a variable of $X$ but
+  sends it no flip. For a constraint to be confused it must have at least
+  $3d\epsilon/4$ variables of $X$ as neighbours; each variable of $X$ neighbours
+  two constraints, so there are at most
+  $\frac{2\alpha\,dn/2}{\frac34 d\epsilon}=\frac{4\alpha n}{3\epsilon}$ confused
+  constraints, each sending at most $d\epsilon/4$ flips, so at most
+  $\frac{4\alpha n}{3\epsilon}\cdot\frac{d\epsilon}{4}=\frac{dn}{2}\cdot
+  \frac{2\alpha}{3}$ variables outside $X$ receive flips.
+
+  For a constraint to be unhelpful it must contain more than $d\epsilon/4$
+  variables of $X$, so there are at most
+  $\frac{2\alpha\,dn/2}{d\epsilon/4}=\frac{4\alpha n}{\epsilon}$ unhelpful
+  constraints. By Lemma~\ref{lem:alon-chung}, the number of variables both of
+  whose neighbouring constraints are unhelpful (a superset of the variables of
+  $X$ that fail to receive a flip) is at most
+  \[
+    \frac{dn}{2}\left(\Bigl(\frac{4\alpha}{\epsilon}\Bigr)^2
+      + \frac{\eigtwo}{d}\Bigl(\frac{4\alpha}{\epsilon}\Bigr)\right).
+  \]
+  Adding the two contributions, the number of corrupt output variables is at
+  most $\frac{dn}{2}\bigl(\frac{2\alpha}{3}
+  + \frac{16\alpha^2}{\epsilon^2} + \frac{4\alpha\eigtwo}{\epsilon d}\bigr)$,
+  which is the claimed relative distance $\alpha\bigl(\frac23
+  + \frac{16\alpha}{\epsilon^2} + \frac{4\eigtwo}{\epsilon d}\bigr)$ times
+  $\frac{dn}{2}$.
+\end{proof}
+
+\begin{proposition}[Proposition 16: one round is a constant-depth circuit]
+  \label{prop:round-circuit}
+  \uses{def:parallel-decode, def:circuit, def:expander-code}
+  For $\Sc$ fixed, a parallel decoding round for $\code(B,\Sc)$ can be
+  implemented as a linear-size Boolean circuit of constant depth.
+\end{proposition}
+\begin{proof}
+  \uses{def:parallel-decode}
+  Since $\Sc$ has fixed block length $d$, deciding for each constraint whether
+  its restriction lies within $d\epsilon/4$ of a codeword of $\Sc$, and which
+  variables to signal, is a Boolean function of a constant number ($d$) of
+  inputs, hence a constant-depth subcircuit. Deciding whether a variable flips
+  is a function of the constant number ($c=2$) of signals it receives. There is
+  one such gadget per constraint and per variable, so the whole round has linear
+  size and constant depth.
+\end{proof}
+
+\begin{lemma}[Gilbert--Varshamov bound]
+  \label{lem:gilbert-varshamov}
+  \uses{def:linear-code, def:relative-distance, def:binary-entropy}
+  \notready
+  For every $\epsilon$ with $0<\epsilon<1/2$ and all sufficiently long block
+  lengths, there exists a binary linear code of minimum relative distance
+  $\epsilon$ and rate $1-\Hb(\epsilon)$.
+\end{lemma}
+% TODO: standard coding-theory result, cited from [25]; proof omitted here.
+
+\begin{theorem}[Theorem 19: explicit asymptotically good expander codes]
+  \label{thm:explicit}
+  \uses{def:edge-vertex, def:expander-code, def:asymptotically-good, def:circuit, def:pointer-machine, def:ram-uniform}
+  For all $\epsilon$ such that $1-2\Hb(\epsilon)>0$, there exists a
+  polynomial-time constructible family of expander codes of rate $1-2\Hb(\epsilon)$
+  and minimum relative distance arbitrarily close to $\epsilon^2$, in which an
+  $\alpha < \epsilon^2/48$ fraction of error can be corrected by a circuit of
+  size $O(n\log n)$ and depth $O(\log n)$. Moreover, the action of this circuit
+  can be simulated in linear time on a Pointer Machine or RAM under the uniform
+  cost model.
+\end{theorem}
+\begin{proof}
+  \uses{lem:gilbert-varshamov, thm:lps-margulis, lem:distance-eigenvalue, lem:round-progress, prop:round-circuit, def:edge-vertex}
+  By the Gilbert--Varshamov bound (Lemma~\ref{lem:gilbert-varshamov}) there
+  exist, for all sufficiently long block lengths, linear codes $\Sc$ of minimum
+  relative distance $\epsilon$ and rate $1-\Hb(\epsilon)$; fix one. By
+  Theorem~\ref{thm:lps-margulis} we can build $d$-regular expander graphs with
+  second-largest eigenvalue $\eigtwo_d \approx 2\sqrt{d-1}$, so for $d$ large
+  $\eigtwo_d/d \to 0$. Choose $d$ large enough that
+  $\alpha < \epsilon^2(1/3 - 4\eigtwo_d/(\epsilon d))/16$ and
+  $\epsilon > 12\eigtwo_d/d$, and let $B$ be the edge-vertex incidence graph of
+  the degree-$d$ graph.
+
+  By Lemma~\ref{lem:distance-eigenvalue}, $\code(B,\Sc)$ has rate at least
+  $2r-1 = 1-2\Hb(\epsilon)$ and minimum relative distance at least
+  $\bigl((\epsilon-\eigtwo_d/d)/(1-\eigtwo_d/d)\bigr)^2$, which is arbitrarily
+  close to $\epsilon^2$ as $d\to\infty$. By Lemma~\ref{lem:round-progress} a
+  parallel decoding round transforms a word of relative distance $\alpha$ into
+  one of relative distance at most $\alpha\beta$ with
+  $\beta = 2/3 + 16\alpha/\epsilon^2 + \eigtwo_d/(4\epsilon \cdot \tfrac14)$;
+  more precisely $\beta = (2/3 + 16\alpha/\epsilon^2 + 4\eigtwo_d/(\epsilon d))$.
+  Our choice of $d$ and $\alpha$ makes $\beta<1$, so iterating
+  $\log_{1/\beta}(\alpha n)$ rounds corrects all $\alpha n$ errors.
+
+  Each round is a constant-depth linear-size circuit
+  (Proposition~\ref{prop:round-circuit}); stacking the $O(\log n)$ rounds gives
+  a circuit of size $O(n\log n)$ and depth $O(\log n)$. The graph $B$ is
+  polynomial-time (indeed logarithmic-space) constructible by
+  Theorem~\ref{thm:lps-margulis}, and the circuit's action can be simulated in
+  linear time on a Pointer Machine or RAM under the uniform cost model.
+\end{proof}
+
+\chapter{Alon's generalization}
+
+% Section VI-A.
+
+\begin{lemma}[Lemma 21: Kahale path-counting bound]
+  \label{lem:kahale}
+  \notready
+  Let $G_{n,d}$ be a $d$-regular graph on $n$ nodes with second-largest
+  eigenvalue $\eigtwo$. Let $S$ be a subset of the vertices of $G_{n,d}$ of size
+  $\gamma n$. Then the number of paths of length $k$ contained in the subgraph
+  induced by $S$ in $G_{n,d}$ is at most
+  \[
+    \gamma n d^k\!\left(\gamma + \frac{\eigtwo}{d}(1-\gamma)\right)^{\!k}.
+  \]
+\end{lemma}
+% TODO: cited from [13],[3] (Kahale); generalizes Lemma 5; proof omitted here.
+
+\begin{theorem}[Theorem 22: higher-rate generalization]
+  \label{thm:alon-general}
+  \uses{lem:kahale, def:edge-vertex, def:expander-code, def:asymptotically-good}
+  \notready
+  For all integers $k\ge 2$ and all $\epsilon$ such that $1-k\Hb(\epsilon)>0$,
+  there exists a polynomial-time constructible family of linear codes of rate
+  $1-k\Hb(\epsilon)$ and minimum relative distance arbitrarily close to
+  $\epsilon^{1+1/(k-1)}$, for which a circuit of size $O(n\log n)$ and
+  logarithmic depth will decode some $\Omega(\epsilon^{1+1/(k-1)})$ fraction of
+  error. Moreover this circuit can be simulated in linear time on a sequential
+  machine.
+\end{theorem}
+\begin{proof}
+  \uses{lem:kahale, thm:lps-margulis, lem:gilbert-varshamov}
+  (Sketch, following Theorem~\ref{thm:explicit}.) Use the graphs of
+  Theorem~\ref{thm:lps-margulis}. Form a code on the
+  \emph{$k$-path-vertex incidence graph} of $G_{n,p+1}$: the large side is all
+  paths of length $k$ in the graph, the small side is its vertices, and a path
+  is connected to the vertices along it (the case $k=1$ recovers the edge-vertex
+  construction of Theorem~\ref{thm:explicit}). Take the constraints to be a
+  Gilbert--Varshamov code (Lemma~\ref{lem:gilbert-varshamov}); for large block
+  length $p+1$ there exist linear codes of rate $r$ and relative distance
+  $\epsilon$ with $r \le 1-\Hb(\epsilon)$. Replacing Lemma~5 by
+  Lemma~\ref{lem:kahale} in the distance and round-progress arguments, and
+  letting the eigenvalue term $\eigtwo/d \to 0$, shows that no word of weight up
+  to $\epsilon^{(k+1)/k}$ can be a codeword and that a decoding round shrinks the
+  corrupt set; since $\eigtwo/d$ never reaches $0$ the relative distance only
+  comes arbitrarily close to $\epsilon^{1+1/(k-1)}$. The rate is
+  $1-k\Hb(\epsilon)$ because there are $nd^k$ variables of degree $k$ and $n$
+  constraints of degree $kd^k$.
+\end{proof}
+% TODO: paper gives only a sketch ("[Sketch]"); full argument not written out.
+
+\chapter{Linear time in the logarithmic cost model}
+
+% Section VII.
+
+\begin{definition}[Product (concatenation) of two codes]
+  \label{def:product-code}
+  \uses{def:linear-code}
+  The \emph{product} of an outer expander code over an alphabet of
+  $(\log n)/2$ bits with an inner binary code of length $\log n$ and rate $1/2$
+  is the code obtained by encoding each $(\log n)/2$-bit byte of a codeword with
+  the inner code. Equivalently it is a code over the larger alphabet whose
+  symbols are themselves protected by a short good code.
+\end{definition}
+
+\begin{corollary}[Corollary 23: linear time in the logarithmic cost model]
+  \label{cor:log-cost}
+  \uses{thm:explicit, def:product-code, def:asymptotically-good, def:ram-log}
+  The product of an asymptotically good linear code of length $O(\log n)$ with
+  one of the expander codes (of length $O(n/\log n)$) from Section~V or VI
+  yields an asymptotically good code that can be decoded in linear time on a RAM
+  in the logarithmic cost model.
+\end{corollary}
+\begin{proof}
+  \uses{thm:explicit, def:product-code}
+  Decode each of the $2n/\log n$ bytes by a precomputed nearest-neighbour table
+  lookup, costing $O(\log n)$ time per byte and $O(n)$ in total. Then run the
+  expander decoder (Theorem~\ref{thm:explicit}) on the resulting symbols: it
+  corrects a constant fraction of error, and unless a constant fraction of error
+  appears in the encoding of a constant fraction of the bytes, very few errors
+  remain after the byte decoding. The expander decoder now manipulates bytes of
+  $(\log n)/2$ bits, so each of its $O(n/\log n)$ memory accesses costs
+  $O(\log n)$ in the logarithmic cost model, for $O(n)$ total. Hence the whole
+  decoder runs in linear time in the logarithmic cost model, and the composite
+  code is asymptotically good.
+\end{proof}
+
+\chapter{The expansion of random graphs (Appendix II)}
+
+\begin{theorem}[Theorem 25: upper bound on expansion]
+  \label{thm:upper-expansion}
+  \uses{def:cd-regular}
+  Let $B$ be a bipartite graph between $n$ $c$-regular vertices and $(c/d)n$
+  $d$-regular vertices. For all $0<\alpha<1$, there exists a set of $\alpha n$
+  $c$-regular vertices with at most
+  \[
+    n\,\frac{c}{d}\bigl(1-(1-\alpha)^d\bigr) + O(1)
+  \]
+  neighbours.
+\end{theorem}
+\begin{proof}
+  \uses{def:cd-regular}
+  Choose a set $X$ of $\alpha n$ $c$-regular vertices uniformly at random.
+  Consider a fixed $d$-regular vertex; each of its $d$ neighbours lies in $X$
+  with probability $\alpha$, so the probability it is \emph{not} a neighbour of
+  $X$ is
+  \[
+    \prod_{i=0}^{d-1}\frac{n-\alpha n-i}{n-i},
+  \]
+  which tends to $(1-\alpha)^d$ as $n\to\infty$. Hence the expected number of
+  $d$-regular non-neighbours tends to $\frac{c}{d}n(1-\alpha)^d$, so the
+  expected number of neighbours is $\frac{c}{d}n\bigl(1-(1-\alpha)^d\bigr)+O(1)$.
+  Some choice of $X$ achieves at most the expectation, giving the bound. The
+  bound becomes tight as $c$ grows.
+\end{proof}
+
+\begin{theorem}[Theorem 26 (= Proposition 1): expansion of random graphs]
+  \label{thm:expansion-random}
+  \uses{def:cd-regular, def:binary-entropy, lem:azuma}
+  Let $B$ be a randomly chosen $(c,d)$-regular bipartite graph between $n$
+  variables and $(c/d)n$ constraints. Then for all $0<\alpha<1$, with
+  exponentially high probability all sets of $\alpha n$ variables in $B$ have at
+  least
+  \[
+    n\!\left(\frac{c}{d}\bigl(1-(1-\alpha)^d\bigr)
+      - \sqrt{\frac{2c\alpha\,\Hb(\alpha)}{\log_2 e}}\right)
+  \]
+  neighbours, where $\Hb(\cdot)$ is the binary entropy function.
+\end{theorem}
+\begin{proof}
+  \uses{lem:azuma, def:binary-entropy, def:cd-regular}
+  Fix a set $V$ of $\alpha n$ variables. The probability that a given constraint
+  is a neighbour of $V$ is at least $1-(1-\alpha)^d$, so the expected number of
+  neighbours of $V$ is at least $n\frac{c}{d}\bigl(1-(1-\alpha)^d\bigr)$.
+
+  Each of the $c\alpha n$ edges leaving $V$ has its endpoint revealed one at a
+  time. Let $X_i$ be the expected size of the neighbour set of $V$ given that
+  the first $i$ edges leaving $V$ have been revealed. Then
+  $X_0,\dots,X_{c\alpha n}$ is a martingale with $|X_{i+1}-X_i|\le 1$, $X_0$ is
+  the expectation above, and $X_{c\alpha n}$ is the actual number of neighbours.
+  By Azuma's inequality (Lemma~\ref{lem:azuma}),
+  \[
+    \Pr\bigl[\,E[X_{c\alpha n}] - X_{c\alpha n} > \lambda\sqrt{c\alpha n}\,\bigr]
+      < e^{-\lambda^2/2}.
+  \]
+  There are only $\binom{n}{\alpha n}$ choices of $V$, so it suffices to choose
+  $\lambda$ with $\binom{n}{\alpha n}e^{-\lambda^2/2}\ll 1$. By Stirling's
+  formula $\binom{n}{\alpha n}\le 2^{nH(\alpha)}$, so the condition holds for
+  large $n$ once $\frac{nH(\alpha)}{\log_2 e}<\frac{\lambda^2}{2}$, i.e.
+  $\lambda > \sqrt{2nH(\alpha)/\log_2 e}$. Substituting this $\lambda$ into the
+  deviation $\lambda\sqrt{c\alpha n}$ and dividing by $n$ gives the stated
+  shortfall $\sqrt{2c\alpha H(\alpha)/\log_2 e}$ below the expectation, uniformly
+  over all $V$ with exponentially high probability.
+\end{proof}

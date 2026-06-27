@@ -1,0 +1,935 @@
+% Blueprint for "Fundamental Limitations on Subquadratic Alternatives to
+% Transformers" (Josh Alman, Hantao Yu, ICLR 2025), arXiv:2410.04271v2.
+%
+% Two-kind model:
+%   * LEAF nodes (\mathlibok, no proof) = standard facts already in Mathlib
+%     (Kronecker product, inner product, norm, continuity closure).
+%   * FULL nodes = the paper's definitions, hypotheses, reductions, hardness
+%     theorems and transformer constructions. These carry a complete statement,
+%     \uses edges, and (for results) a complete proof. They are NOT marked
+%     \leanok/\mathlibok.
+% Node titles keep the paper's numbering, e.g. [Theorem 3.1], [Lemma A.8].
+
+\chapter{Preliminaries: notation and library facts}
+
+% --- Settled dependencies: already in Mathlib, emitted as leaves. -----------
+
+\begin{definition}[Inner product of binary/real vectors]
+  \label{def:inner-prod}
+  \lean{Matrix.dotProduct}
+  \mathlibok
+  For $v, w \in \R^{\ell}$ we write $\inner{v}{w} = \sum_{i=1}^{\ell} v[i]\, w[i]$
+  for their (standard) inner product, where $v[i]$ denotes the $i$-th entry of
+  $v$. For binary vectors $v,w \in \{0,1\}^{\ell}$ this counts the coordinates on
+  which both are $1$. Recalled only so later nodes can depend on it.
+\end{definition}
+
+\begin{definition}[$\ell_2$ norm]
+  \label{def:l2norm}
+  \lean{EuclideanSpace.norm_eq}
+  \mathlibok
+  For $v \in \R^{\ell}$, $\norm{v} = \sqrt{\inner{v}{v}}$ is the $\ell_2$ norm.
+  We also use the $\ell_1$ norm $\norm{v}_1 = \sum_{i=1}^{\ell} |v[i]|$; for a
+  binary vector $\norm{v}_1$ is its number of $1$ entries. Standard.
+\end{definition}
+
+\begin{definition}[Kronecker (tensor) product of vectors]
+  \label{def:kron}
+  \lean{Matrix.kroneckerMap}
+  \mathlibok
+  % TODO: confirm exact Mathlib decl name for the vector Kronecker product.
+  For $v \in \R^{a}$ and $w \in \R^{b}$, the Kronecker product
+  $v \otimes w \in \R^{ab}$ is the vector whose entries are all the products of
+  an entry of $v$ and an entry of $w$. We write $v^{\otimes q}$ for the $q$-fold
+  Kronecker power $v \otimes \cdots \otimes v$. Standard.
+\end{definition}
+
+\begin{lemma}[Multiplicativity of inner products under Kronecker product]
+  \label{lem:kron-inner}
+  \uses{def:inner-prod, def:kron}
+  \lean{Matrix.dotProduct_kronecker}
+  \mathlibok
+  % TODO: confirm exact Mathlib decl name.
+  For $v, w \in \R^{a}$ and $x, y \in \R^{b}$ we have
+  $\inner{v \otimes x}{w \otimes y} = \inner{v}{w}\cdot\inner{x}{y}$. In
+  particular $\inner{v^{\otimes q}}{w^{\otimes q}} = \inner{v}{w}^{q}$ and
+  $\norm{v^{\otimes q}} = \norm{v}^{q}$. Standard property of tensor products.
+\end{lemma}
+
+\begin{lemma}[Continuity is closed under sums, products and composition]
+  \label{lem:continuity-closure}
+  \lean{Continuous.comp}
+  \mathlibok
+  % TODO: this packages Continuous.add, Continuous.mul, Continuous.comp,
+  % continuous_const and continuity of coordinate projections / max / min.
+  Finite sums, finite products and compositions of continuous functions between
+  finite-dimensional real vector spaces are continuous, as are constant maps,
+  coordinate projections, and the maps $x \mapsto \max(x,c)$, $x \mapsto
+  \min(x,c)$. Recalled so the piecewise-linear MLP constructions below can be
+  shown continuous.
+\end{lemma}
+
+% --- A domain notion that carries logical weight: truly subquadratic time. ---
+
+\begin{definition}[Truly subquadratic time]
+  \label{def:truly-subquadratic}
+  An algorithm for a problem on inputs of size parameter $n$ runs in
+  \emph{truly subquadratic time} if it runs in time $\bigO(n^{2-\eps})$ for some
+  fixed constant $\eps > 0$ (independent of the instance). Throughout, "cannot
+  be solved in $\bigO(n^{2-\eps})$ time" is understood with $\eps$ quantified as
+  in each statement. We say a problem $\mathcal P$ \emph{reduces to} $\mathcal Q$
+  if a truly subquadratic algorithm for $\mathcal Q$ yields one for
+  $\mathcal P$; the two are \emph{subquadratic equivalent} if each reduces to
+  the other.
+\end{definition}
+
+\chapter{The transformer architecture}
+
+\begin{definition}[Softmax]
+  \label{def:softmax}
+  For a vector $v \in \R^{n}$,
+  \[
+    \softmax(v) = \frac{(\exp(v[1]), \ldots, \exp(v[n]))}{\sum_{i=1}^{n} \exp(v[i])}
+    \in \R^{n}.
+  \]
+  For a matrix $A \in \R^{n \times n}$ the softmax operator is applied row-wise:
+  $\softmax(A)_{i,:} = \softmax(A_{i,:})$.
+\end{definition}
+
+\begin{definition}[Attention, Definition 2.1]
+  \label{def:attention}
+  \uses{def:softmax}
+  For input dimension $d_{\mathrm{in}} \in \N$, output dimension
+  $d_{\mathrm{out}} \in \N$, embedding dimension $m \in \N$, and matrices
+  $Q, K \in \R^{d_{\mathrm{in}} \times m}$ and
+  $V \in \R^{d_{\mathrm{in}} \times d_{\mathrm{out}}}$, an \emph{attention} is the
+  mapping $A_{Q,K,V} : \R^{n \times d_{\mathrm{in}}} \to
+  \R^{n \times d_{\mathrm{out}}}$ defined by
+  \[
+    A_{Q,K,V}(X) = \softmax\!\left(X Q K^{\top} X^{\top}\right) X V.
+  \]
+  We write $\mathcal A_{d_{\mathrm{in}}, m, d_{\mathrm{out}}}$ for the set of all
+  such attentions.
+\end{definition}
+
+\begin{definition}[Multi-layer perceptron, Definition 2.2]
+  \label{def:mlp}
+  A \emph{multi-layer perceptron} (MLP) is represented by some continuous
+  function $\varphi : \R^{a} \to \R^{b}$ for positive integers $a,b$ (modelling,
+  following the universal approximation theorem, any function approximable by a
+  neural network). It is applied to a matrix row-wise: for $X \in \R^{n \times
+  a}$, $\varphi(X) = (\varphi(X_1), \ldots, \varphi(X_n)) \in \R^{n \times b}$.
+\end{definition}
+
+\begin{definition}[Transformer, Definition 2.3]
+  \label{def:transformer}
+  \uses{def:attention, def:mlp}
+  A \emph{transformer} is a mapping $\TF : \R^{n \times d} \to \R$ specified by
+  an attention unit $A_{Q,K,V}$ and two MLPs $\varphi_1 : \R^{n \times d} \to
+  \R^{n \times d_{\mathrm{in}}}$ and $\varphi_2 : \R^{n \times d_{\mathrm{out}}}
+  \to \R$. On an embedding matrix $E \in \R^{n \times d}$ it outputs
+  \[
+    \TF(E) = \varphi_2\!\left(A_{Q,K,V}(\varphi_1(E))\right).
+  \]
+  This models a single-attention-unit transformer (first MLP, then the attention
+  unit, then the second MLP).
+\end{definition}
+
+\begin{definition}[A transformer solving a decision problem]
+  \label{def:tf-solves}
+  \uses{def:transformer}
+  A transformer $\TF$ \emph{solves} a (decision) problem whose answer on instance
+  $E \in \R^{n \times d}$ is $\TF(E)$. For a problem on vectors $v_1, \ldots,
+  v_n$ with answer a Boolean, $\TF$ solves it if for every input $E$ with
+  $E_{i,:} = v_i$ for all $i$ one has $\TF(E) = 1$ exactly when the answer is
+  "yes" and $\TF(E) = 0$ otherwise.
+\end{definition}
+
+\chapter{Document similarity embeddings and problems}
+
+\begin{definition}[Bag-of-words embedding]
+  \label{def:bow}
+  Fix a list of $\ell$ key words. The \emph{bag-of-words embedding} of a document
+  $D$ is the vector $\BOW(D) \in \{0,1\}^{\ell}$ whose $i$-th entry is $1$ iff the
+  $i$-th key word occurs in $D$. (E.g.\ a document containing only "There are ten
+  apples on the apple tree", with key words "apple", "tree", "computer", "ten",
+  has embedding $(1,1,0,1)$.)
+\end{definition}
+
+\begin{definition}[Cosine similarity]
+  \label{def:cosine}
+  \uses{def:inner-prod, def:l2norm}
+  For nonzero document embeddings $v, w \in \R^{d}$, their \emph{cosine
+  similarity} is $\cossim{v}{w} \in [0,1]$ when $v,w \in \{0,1\}^d$; the value
+  $1$ means complete similarity and $0$ means no similarity. (Used instead of the
+  raw inner product so that two vectors with similar directions but large
+  magnitude are still considered close.)
+\end{definition}
+
+% --- Most/Least Similar Document problems and their variants. ---------------
+
+\begin{definition}[Most Similar Document, $\MSD_{n,\ell}$, Definition 2.10]
+  \label{def:msd}
+  \uses{def:cosine}
+  Given $n$ document embeddings $v_1, \ldots, v_n \in \{0,1\}^{\ell}$ (assumed
+  nonzero), $\MSD_{n,\ell}$ asks to find $1 \le i,j \le n$, $i \ne j$, maximizing
+  $\cossim{v_i}{v_j}$. Note $\MSD$ differs from $\MaxIP$ because of the
+  normalization by $\norm{v_i}\norm{v_j}$.
+\end{definition}
+
+\begin{definition}[$\gamma$-MSD, Definition 2.11]
+  \label{def:gamma-msd}
+  \uses{def:cosine}
+  Given $v_1, \ldots, v_n \in \{0,1\}^{\ell}$, $\gamma\text{-}\MSD_{n,\ell}$ asks
+  to find $i^{*}, j^{*}$ with $i^{*}\ne j^{*}$ such that
+  \[
+    \frac{1}{\gamma}\cdot \max_{1 \le i,j \le n} \cossim{v_i}{v_j}
+    \le \cossim{v_{i^{*}}}{v_{j^{*}}}
+    \le \max_{1 \le i,j \le n} \cossim{v_i}{v_j},
+  \]
+  i.e.\ a pair whose cosine similarity is within a factor $\gamma$ of the maximum.
+\end{definition}
+
+\begin{definition}[MSD decision version, $\MSD_{n,\ell,t}$, Definition 2.12]
+  \label{def:msd-dec}
+  \uses{def:cosine}
+  Given $v_1, \ldots, v_n \in \{0,1\}^{\ell}$ and $t \in [0,1]$,
+  $\MSD_{n,\ell,t}$ asks to determine whether there exist $i \ne j$ with
+  $\cossim{v_i}{v_j} \ge t$.
+\end{definition}
+
+\begin{definition}[Least Similar Document, $\LSD_{n,\ell}$, Definition A.14]
+  \label{def:lsd}
+  \uses{def:cosine}
+  Given nonzero $v_1, \ldots, v_n \in \{0,1\}^{\ell}$, $\LSD_{n,\ell}$ asks to
+  find $i \ne j$ \emph{minimizing} $\cossim{v_i}{v_j}$.
+\end{definition}
+
+\begin{definition}[$\gamma$-LSD, Definition A.15]
+  \label{def:gamma-lsd}
+  \uses{def:cosine}
+  Given $v_1, \ldots, v_n \in \{0,1\}^{\ell}$, $\gamma\text{-}\LSD_{n,\ell}$ asks
+  to find $i^{*} \ne j^{*}$ such that
+  \[
+    \min_{1 \le i,j \le n} \cossim{v_i}{v_j}
+    \le \cossim{v_{i^{*}}}{v_{j^{*}}}
+    \le \gamma \cdot \min_{1 \le i,j \le n} \cossim{v_i}{v_j}.
+  \]
+\end{definition}
+
+\begin{definition}[LSD decision version, $\LSD_{n,\ell,t}$, Definition A.16]
+  \label{def:lsd-dec}
+  \uses{def:cosine}
+  Given $v_1, \ldots, v_n \in \{0,1\}^{\ell}$ and $t \in [0,1]$,
+  $\LSD_{n,\ell,t}$ asks to determine whether there exist $i \ne j$ with
+  $\cossim{v_i}{v_j} \le t$.
+\end{definition}
+
+\chapter{Fine-grained complexity: hypotheses and intermediate problems}
+
+% --- The hardness hypotheses, stated as assumptions/conjectures. ------------
+
+\begin{definition}[$k$-SAT]
+  \label{def:ksat}
+  $k\SAT$ is the satisfiability problem for Boolean formulas in conjunctive
+  normal form in which every clause has at most $k$ literals; $n$ denotes the
+  number of variables. Recalled to state SETH.
+\end{definition}
+
+\begin{assumption}[Strong Exponential Time Hypothesis (SETH), Definition 2.4 / A.1]
+  \label{assumption:seth}
+  \uses{def:ksat}
+  For every $\eps > 0$ there exists a positive integer $k$ such that $k\SAT$
+  requires $\Omega\!\left(2^{(1-\eps)n}\right)$ time, where $n$ is the number of
+  variables in the CNF. (A popular strengthening of $\mathrm P \ne \mathrm{NP}$.)
+\end{assumption}
+
+\begin{definition}[Orthogonal Vectors, $\OV_{n,\ell}$, Definition 2.5 / A.2]
+  \label{def:ov}
+  \uses{def:inner-prod}
+  Given binary vectors $v_1, \ldots, v_n \in \{0,1\}^{\ell}$, $\OV_{n,\ell}$ asks
+  to determine whether there exists a pair $i \ne j$ with $\inner{v_i}{v_j} = 0$.
+\end{definition}
+
+\begin{definition}[Bichromatic Orthogonal Vectors]
+  \label{def:bichromatic-ov}
+  \uses{def:inner-prod}
+  Given two sets $A = \{a_1, \ldots, a_n\}$ and $B = \{b_1, \ldots, b_n\}$ of
+  vectors in $\{0,1\}^{\ell}$, bichromatic $\OV_{n,\ell}$ asks whether there
+  exist $i,j$ with $\inner{a_i}{b_j} = 0$.
+\end{definition}
+
+\begin{conjecture}[Orthogonal Vectors Conjecture (OVC), Conjecture 2.6 / A.3]
+  \label{conjecture:ovc}
+  \uses{def:ov, def:truly-subquadratic}
+  For any $\eps > 0$ there exists a constant $c > 0$ such that
+  $\OV_{n, c \log n}$ cannot be solved in $\bigO(n^{2-\eps})$ time.
+\end{conjecture}
+
+\begin{theorem}[SETH implies OVC, Williams (2005)]
+  \label{thm:seth-implies-ovc}
+  \uses{assumption:seth, conjecture:ovc}
+  \notready
+  If SETH (Assumption~\ref{assumption:seth}) holds, then OVC
+  (Conjecture~\ref{conjecture:ovc}) holds. Consequently all hardness results
+  below can be stated under SETH \emph{or} OVC.
+\end{theorem}
+% TODO: cited external result (Williams 2005, "A new algorithm for optimal
+% 2-constraint satisfaction and its implications"); proof not reproduced in the
+% paper. Reconstruct from the standard split-and-list OV-from-SAT reduction or
+% cite before marking ready.
+
+% --- Minimum Inner Product problems. ---------------------------------------
+
+\begin{definition}[Minimum Inner Product, $\MinIP_{n,\ell}$, Definition 2.7 / A.5]
+  \label{def:minip}
+  \uses{def:inner-prod}
+  Given $v_1, \ldots, v_n \in \{0,1\}^{\ell}$, $\MinIP_{n,\ell}$ asks to find a
+  pair $i \ne j$ such that $\inner{v_i}{v_j}$ is minimum.
+\end{definition}
+
+\begin{definition}[$\gamma$-Min-IP, Definition 2.8 / A.6]
+  \label{def:gamma-minip}
+  \uses{def:inner-prod}
+  Given $v_1, \ldots, v_n \in \{0,1\}^{\ell}$, $\gamma\text{-}\MinIP_{n,\ell}$
+  asks to find $i \ne j$ such that $\inner{v_i}{v_j}$ is a $\gamma$-approximation
+  of the minimal inner product.
+\end{definition}
+
+\begin{definition}[Min-IP decision version, $\MinIP_{n,\ell,t}$, Definition 2.9 / A.7]
+  \label{def:minip-dec}
+  \uses{def:inner-prod}
+  Given $v_1, \ldots, v_n \in \{0,1\}^{\ell}$ and $0 \le t \le \ell$,
+  $\MinIP_{n,\ell,t}$ asks to determine whether there exists a pair $i \ne j$
+  with $\inner{v_i}{v_j} \le t$.
+\end{definition}
+
+\begin{definition}[Bichromatic Min-IP]
+  \label{def:bichromatic-minip}
+  \uses{def:inner-prod}
+  Given two sets $A, B$ of vectors in $\{0,1\}^{\ell}$, bichromatic
+  $\MinIP_{n,\ell}$ (resp.\ its $\gamma$-approximate and decision versions) asks
+  to find $i,j$ achieving (resp.\ $\gamma$-approximating, deciding) the minimal
+  $\inner{a_i}{b_j}$ over $a_i \in A$, $b_j \in B$.
+\end{definition}
+
+% --- Maximum Inner Product problems. ---------------------------------------
+
+\begin{definition}[Maximum Inner Product, $\MaxIP_{n,\ell}$, Definition A.9]
+  \label{def:maxip}
+  \uses{def:inner-prod}
+  Given $v_1, \ldots, v_n \in \{0,1\}^{\ell}$, $\MaxIP_{n,\ell}$ asks to find a
+  pair $i \ne j$ such that $\inner{v_i}{v_j}$ is maximal.
+\end{definition}
+
+\begin{definition}[$\gamma$-Max-IP, Definition A.10]
+  \label{def:gamma-maxip}
+  \uses{def:inner-prod}
+  Given $v_1, \ldots, v_n \in \{0,1\}^{\ell}$, $\gamma\text{-}\MaxIP_{n,\ell}$
+  asks to find $i \ne j$ such that $\inner{v_i}{v_j}$ is a $\gamma$-approximation
+  of the maximal inner product.
+\end{definition}
+
+\begin{definition}[Max-IP decision version, $\MaxIP_{n,\ell,t}$, Definition A.11]
+  \label{def:maxip-dec}
+  \uses{def:inner-prod}
+  Given $v_1, \ldots, v_n \in \{0,1\}^{\ell}$ and $0 \le t \le \ell$,
+  $\MaxIP_{n,\ell,t}$ asks to determine whether there exist $i \ne j$ with
+  $\inner{v_i}{v_j} \ge t$.
+\end{definition}
+
+\begin{definition}[Bichromatic Max-IP]
+  \label{def:bichromatic-maxip}
+  \uses{def:inner-prod}
+  Given two sets $A, B$ of vectors in $\{0,1\}^{\ell}$, bichromatic
+  $\MaxIP_{n,\ell}$ (resp.\ its $\gamma$-approximate and decision versions) asks
+  to find $i,j$ achieving (resp.\ $\gamma$-approximating, deciding) the maximal
+  $\inner{a_i}{b_j}$.
+\end{definition}
+
+\chapter{Fine-grained reductions between intermediate problems}
+
+\begin{lemma}[OV is subquadratic equivalent to bichromatic OV, Lemma A.4]
+  \label{lem:ov-bichromatic-equiv}
+  \uses{def:ov, def:bichromatic-ov, def:truly-subquadratic}
+  There exists an algorithm for $\OV_{n,\ell}$ running in time
+  $\bigO(n^{2-\eps}\cdot\operatorname{poly}(\ell))$ for some $\eps>0$ if and only
+  if there exists an algorithm for bichromatic $\OV_{n,\ell}$ running in time
+  $\bigO(n^{2-\eps'}\cdot\operatorname{poly}(\ell))$ for some $\eps'>0$.
+\end{lemma}
+\begin{proof}
+  \uses{def:ov, def:bichromatic-ov, def:inner-prod}
+  ($\Leftarrow$) Suppose $\mathcal A$ solves bichromatic $\OV_{n,\ell}$ in
+  $\bigO(n^{2-\eps}\operatorname{poly}(\ell))$. Given an $\OV_{n,\ell}$ instance
+  $V = \{v_1, \ldots, v_n\}$, first check (in time $\bigO(n\ell)$) whether any
+  $v_i$ is the all-zero vector; if so, this is a yes instance. Otherwise set
+  $A = B = V$ and run $\mathcal A$ on $A,B$. Since no vector is zero,
+  $\inner{v_i}{v_i} \ne 0$ for all $i$, so a pair $i \ne j$ with
+  $\inner{v_i}{v_j} = 0$ exists iff $\mathcal A$ reports an orthogonal pair
+  $a \in A$, $b \in B$. Total time $\bigO(n^{2-\eps}\operatorname{poly}(\ell) +
+  n\ell) = \bigO(n^{2-\eps}\operatorname{poly}(\ell))$.
+
+  ($\Rightarrow$) Suppose $\mathcal A'$ solves $\OV_{n,\ell}$ in
+  $\bigO(n^{2-\eps}\operatorname{poly}(\ell))$. Given a bichromatic instance
+  $A = \{a_1, \ldots, a_n\}$, $B = \{b_1, \ldots, b_n\}$ with $a_i, b_j \in
+  \{0,1\}^{\ell}$, build $a_i' = (a_i, 1, 0) \in \R^{\ell+2}$ and
+  $b_j' = (b_j, 0, 1) \in \R^{\ell+2}$, and let $A' = \{a_1', \ldots, a_n'\}$,
+  $B' = \{b_1', \ldots, b_n'\}$. Then $\inner{a_i'}{a_j'} \ge 1$ and
+  $\inner{b_i'}{b_j'} \ge 1$ for all $i,j$ (the appended coordinates contribute
+  $1$), while $\inner{a_i'}{b_j'} = \inner{a_i}{b_j}$. Hence a pair of orthogonal
+  vectors in $A' \cup B'$ can only be of the form $a_i', b_j'$, i.e.\ an
+  orthogonal bichromatic pair $a_i, b_j$. Running $\mathcal A'$ on $A' \cup B'$
+  (of size $2n$ in dimension $\ell+2$) decides the bichromatic instance in time
+  $\bigO((2n)^{2-\eps}\operatorname{poly}(\ell+2)) =
+  \bigO(n^{2-\eps}\operatorname{poly}(\ell))$.
+\end{proof}
+
+\begin{lemma}[Min-IP is at least as hard as OV]
+  \label{lem:minip-harder-ov}
+  \uses{def:minip, def:gamma-minip, def:ov}
+  For any $\gamma \ge 1$, $\MinIP_{n,\ell}$ and $\gamma\text{-}\MinIP_{n,\ell}$
+  are both at least as hard as $\OV_{n,\ell}$. Consequently, assuming OVC, for
+  any $\eps>0$ there is $c>0$ such that $\MinIP_{n,c\log n}$ cannot be solved in
+  $\bigO(n^{2-\eps})$ time.
+\end{lemma}
+\begin{proof}
+  \uses{def:minip, def:gamma-minip, def:ov, conjecture:ovc}
+  Given an $\OV_{n,\ell}$ instance, run the (approximate) Min-IP algorithm to
+  obtain a pair achieving the minimum inner product (or a $\gamma$-approximation
+  of it) and test whether that value is $0$. There is an orthogonal pair iff the
+  minimum inner product is $0$; and any multiplicative $\gamma$-approximation of
+  $0$ must itself be $0$, so the $\gamma$-approximate version detects it too.
+  Hence a truly subquadratic algorithm for ($\gamma$-)Min-IP gives one for OV,
+  which is impossible under OVC (Conjecture~\ref{conjecture:ovc}).
+\end{proof}
+
+\begin{lemma}[Bichromatic Min-IP reduction, Lemma A.8]
+  \label{lem:minip-bichromatic-reduction}
+  \uses{def:minip, def:gamma-minip, def:minip-dec, def:bichromatic-minip, def:truly-subquadratic}
+  Suppose there is an algorithm $\mathcal A$ for bichromatic $\MinIP_{n,\ell}$
+  running in time $\bigO(n^{2-\eps}\operatorname{poly}(\ell))$ for some $\eps>0$.
+  Then there is an algorithm for $\MinIP_{n,\ell}$ running in time
+  $\bigO(n^{2-\eps'}\operatorname{poly}(\ell))$ for some $\eps'>0$. The same holds
+  for $\gamma\text{-}\MinIP_{n,\ell}$ and the decision version
+  $\MinIP_{n,\ell,t}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:minip, def:bichromatic-minip}
+  Given a $\MinIP_{n,\ell}$ instance $V = \{v_1, \ldots, v_n\}$, partition $V$
+  into two halves $V_1, V_2$ of equal size and run $\mathcal A$ on the
+  bichromatic instance $(V_1, V_2)$; this returns the minimal pair with one
+  element in each half. Then recurse: split $V_1$ into two equal halves and find
+  the minimal pair inside $V_1 \times V_1$, and likewise for $V_2$. The minimal
+  pair of the whole instance lies either across the top-level split or inside one
+  half, so it is found by some recursive call. The running time satisfies
+  \[
+    \operatorname{poly}(\ell)\cdot \sum_{i=1}^{\log n}
+      \bigO\!\left(\left(\tfrac{n}{2^{i}}\right)^{2-\eps}\right)
+    = \bigO\!\left(n^{2-\eps}\operatorname{poly}(\ell)\log n\right)
+    \le \bigO\!\left(n^{2-\eps'}\operatorname{poly}(\ell)\right)
+  \]
+  for some $\eps'>0$ (the geometric sum is dominated by its first term). The same
+  argument applies to $\gamma\text{-}\MinIP$ (the optimal pair still appears in
+  some recursive call) and to $\MinIP_{n,\ell,t}$ (we examine all pairs across
+  some call).
+\end{proof}
+
+\begin{lemma}[Bichromatic Max-IP reduction, Lemma A.12]
+  \label{lem:maxip-bichromatic-reduction}
+  \uses{def:maxip, def:gamma-maxip, def:bichromatic-maxip, def:truly-subquadratic}
+  Suppose there is an algorithm $\mathcal A$ for bichromatic
+  $(\gamma\text{-})\MaxIP_{n,\ell}$ running in time
+  $\bigO(n^{2-\eps}\operatorname{poly}(\ell))$ for some $\eps>0$. Then there is an
+  algorithm for $(\gamma\text{-})\MaxIP_{n,\ell}$ running in time
+  $\bigO(n^{2-\eps'}\operatorname{poly}(\ell))$ for some $\eps'>0$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:minip-bichromatic-reduction, def:maxip, def:bichromatic-maxip}
+  Identical to the proof of Lemma~\ref{lem:minip-bichromatic-reduction}: split
+  the input recursively into halves and run the bichromatic Max-IP algorithm
+  $\mathcal A$ on each pair of halves; the maximal pair appears in some recursive
+  call, and the geometric sum of running times is dominated by the top term,
+  giving $\bigO(n^{2-\eps'}\operatorname{poly}(\ell))$.
+\end{proof}
+
+\begin{lemma}[Max-IP is at least as hard as OV, Lemma A.13]
+  \label{lem:maxip-harder-ov}
+  \uses{def:maxip, def:bichromatic-maxip, def:ov, def:truly-subquadratic}
+  Suppose there is an algorithm $\mathcal A$ for bichromatic $\MaxIP_{n,\ell}$
+  running in time $\bigO(n^{2-\eps}\operatorname{poly}(\ell))$ for some $\eps>0$.
+  Then there is an algorithm for $\OV_{n,\ell}$ running in time
+  $\bigO(n^{2-\eps}\operatorname{poly}(\ell))$.
+\end{lemma}
+\begin{proof}
+  \uses{def:maxip, def:bichromatic-maxip, def:ov, def:inner-prod}
+  Given an $\OV_{n,\ell}$ instance $v_1, \ldots, v_n \in \{0,1\}^{\ell}$,
+  partition the vectors into subsets $S_1, \ldots, S_{\ell}$ where $S_j$ contains
+  all vectors with exactly $j$ ones. For each pair $1 \le i,j \le \ell$ let
+  $\bar S_j$ consist of the vectors in $S_j$ with all entries flipped. Then for
+  any $v \in S_i$ and $w \in \bar S_j$ (so $w = \bar u$ with $u \in S_j$), we have
+  $\inner{v}{w} = i - \inner{v}{u}$, hence $\inner{v}{\bar u} = i$ iff
+  $\inner{v}{u} = 0$. Therefore running the bichromatic Max-IP algorithm
+  $\mathcal A$ on $(S_i, \bar S_j)$ and testing whether the maximum inner product
+  equals $i$ reveals whether there is an orthogonal pair with one vector in $S_i$
+  and one in $S_j$. Doing this for all $\ell^2$ pairs decides OV. The total time
+  is $\bigO(\ell^{2}\cdot n^{2-\eps}\operatorname{poly}(\ell)) =
+  \bigO(n^{2-\eps}\operatorname{poly}(\ell))$.
+\end{proof}
+
+\chapter{Hardness of document similarity}
+
+\begin{theorem}[Hardness of $\gamma$-LSD, Theorem 3.1]
+  \label{thm:gamma-lsd-hardness}
+  \uses{def:gamma-lsd, def:ov, assumption:seth, conjecture:ovc, def:truly-subquadratic}
+  Assuming SETH or OVC, for every $\eps>0$ there exists a constant $c>0$ such
+  that $\gamma\text{-}\LSD_{n,\ell}$ cannot be solved in $\bigO(n^{2-\eps})$ time
+  for any $\gamma \ge 1$ when $\ell = c\log n$.
+\end{theorem}
+\begin{proof}
+  \uses{def:gamma-lsd, def:ov, def:cosine, def:inner-prod, conjecture:ovc, thm:seth-implies-ovc}
+  Assume for contradiction that some algorithm $\mathcal A$ solves
+  $\gamma\text{-}\LSD_{n, c\log n}$ in time $\bigO(n^{2-\eps})$ for some
+  $\gamma \ge 1$, $\eps>0$ and \emph{every} constant $c>0$. We show that
+  $\OV_{n, c\log n}$ can then be solved in $\bigO(n^{2-\eps})$ time for every
+  $c$, refuting OVC (and hence SETH, by
+  Theorem~\ref{thm:seth-implies-ovc}).
+
+  Given $v_1, \ldots, v_n \in \{0,1\}^{\ell}$ with $\ell = c\log n$: if any vector
+  is the zero vector (checkable in $\bigO(n\ell)$ time) output "yes". Otherwise
+  run $\mathcal A$ to obtain $i^{*}, j^{*}$ with
+  \[
+    \min_{1 \le i,j \le n} \cossim{v_i}{v_j}
+    \le \cossim{v_{i^{*}}}{v_{j^{*}}}
+    \le \gamma \cdot \min_{1 \le i,j \le n} \cossim{v_i}{v_j}.
+  \]
+  Since all $\norm{v_i} > 0$, the quantity $\min_{i,j}\cossim{v_i}{v_j}$ equals
+  $0$ iff there is an orthogonal pair (cosine similarity $0 \Leftrightarrow$
+  inner product $0$). As $\gamma \ge 1$, $\cossim{v_{i^{*}}}{v_{j^{*}}} = 0$ iff
+  the true minimum is $0$, i.e.\ iff $\mathcal A$ returns an orthogonal pair.
+  Thus checking whether $\inner{v_{i^{*}}}{v_{j^{*}}} = 0$ decides
+  $\OV_{n,\ell}$. The total time is $\bigO(n\ell + n^{2-\eps}) =
+  \bigO(n^{2-\eps})$, refuting SETH/OVC.
+\end{proof}
+
+\begin{corollary}[Hardness of LSD and its variants, Corollary 3.2]
+  \label{cor:lsd-hardness}
+  \uses{def:lsd, def:gamma-lsd, def:lsd-dec, conjecture:ovc, assumption:seth, def:truly-subquadratic}
+  Assuming SETH or OVC, for every $\eps>0$ there exists a constant $c>0$ such
+  that $\LSD_{n,\ell}$ cannot be solved in $\bigO(n^{2-\eps})$ time when
+  $\ell \ge c\log n$. Moreover, the same lower bound holds for bichromatic
+  $\gamma\text{-}\LSD_{n,\ell}$ for all $\gamma \ge 1$, and for $\LSD_{n,\ell,t}$
+  for some $t \in [0,1]$.
+\end{corollary}
+\begin{proof}
+  \uses{thm:gamma-lsd-hardness, def:lsd, def:lsd-dec, def:truly-subquadratic}
+  Since $\gamma\text{-}\LSD_{n,\ell}$ (with $\gamma = 1$) and bichromatic
+  $\gamma\text{-}\LSD_{n,\ell}$ are both easier than $\LSD_{n,\ell}$, the lower
+  bound of Theorem~\ref{thm:gamma-lsd-hardness} transfers to them. For the
+  decision version: there must exist $t \in [0,1]$ such that $\LSD_{n,\ell,t}$
+  cannot be solved in $\bigO(n^{2-\eps})$ time when $\ell = c\log n$, because
+  otherwise binary search over the $\bigO(\ell^{3})$ possible threshold values
+  would give a $\bigO(n^{2-\eps})$ algorithm for $\LSD_{n,\ell}$, contradicting
+  the result for $\LSD_{n,\ell}$. (Making $\ell$ larger only makes the problem
+  harder, giving the bound for all $\ell \ge c\log n$.)
+\end{proof}
+
+\begin{theorem}[Hardness of $\gamma$-MSD, Theorem 3.3 / B.1]
+  \label{thm:gamma-msd-hardness}
+  \uses{def:gamma-msd, assumption:seth, conjecture:ovc, def:truly-subquadratic}
+  Assuming SETH or OVC, for every $\eps>0$ there exists a constant $c>0$ such
+  that $\gamma\text{-}\MSD_{n,\ell}$ cannot be solved in $\bigO(n^{2-\eps})$ time
+  when
+  \[
+    \ell \ge (\log n)^{\frac{c\log n}{(\log\log n)^{2}}}
+    \quad\text{and}\quad
+    \gamma \le \left(1 + \frac{1}{\log\log n}\right)^{\frac{\log n}{(\log\log n)^{2}}}
+    = 2^{(\log n)^{1-o(1)}}.
+  \]
+\end{theorem}
+\begin{proof}
+  \uses{lem:msd-tensor-reduction, lem:msd-to-additive-msd, lem:additive-msd-maxip-equiv, thm:additive-bmaxip-to-ov, conjecture:ovc, thm:seth-implies-ovc}
+  This follows from a combination of Lemma~\ref{lem:msd-tensor-reduction},
+  Lemma~\ref{lem:msd-to-additive-msd},
+  Lemma~\ref{lem:additive-msd-maxip-equiv} and
+  Theorem~\ref{thm:additive-bmaxip-to-ov}. A truly subquadratic algorithm for
+  $\gamma\text{-}\MSD_{n,\ell}$ with the stated $\ell, \gamma$ would, by
+  Lemma~\ref{lem:msd-tensor-reduction}, give a truly subquadratic algorithm for
+  $(1 + \tfrac{1}{\log\log n})\text{-}\MSD_{n, (\log n)^{k}}$ for any constant
+  $k>0$; by Lemma~\ref{lem:msd-to-additive-msd} (which itself combines
+  Theorem~\ref{thm:additive-maxip-karthik} and
+  Lemma~\ref{lem:additive-msd-maxip-equiv}) this gives a truly subquadratic
+  algorithm for bichromatic $\frac{\log n}{\ell}$-Additive-$\MSD_{n,c\log n}$;
+  and finally Theorem~\ref{thm:additive-bmaxip-to-ov} turns a truly subquadratic
+  algorithm for the corresponding bichromatic additive Max-IP into a truly
+  subquadratic algorithm for $\OV_{n, c'\log n}$, refuting SETH and OVC
+  (Conjecture~\ref{conjecture:ovc}, Theorem~\ref{thm:seth-implies-ovc}). The
+  hardness also transfers to harder problems including $\MSD_{n,\ell}$ and
+  bichromatic $\gamma\text{-}\MSD_{n,\ell}$.
+\end{proof}
+
+\begin{corollary}[Hardness of MSD and its variants, Corollary 3.4]
+  \label{cor:msd-hardness}
+  \uses{def:msd, def:gamma-msd, def:msd-dec, assumption:seth, conjecture:ovc, def:truly-subquadratic}
+  Assuming SETH or OVC, for every $\eps>0$ there exists a constant $c>0$ such
+  that $\MSD_{n,\ell}$ cannot be solved in $\bigO(n^{2-\eps})$ time when
+  $\ell \ge (\log n)^{\frac{c\log n}{(\log\log n)^{2}}}$. Moreover the same lower
+  bound holds for bichromatic $\gamma\text{-}\MSD_{n,\ell}$ for all
+  $1 \le \gamma \le (1 + \tfrac{1}{\log\log n})^{\frac{\log n}{(\log\log n)^{2}}}$
+  and for $\MSD_{n,\ell,t}$ for some $t \in [0,1]$.
+\end{corollary}
+\begin{proof}
+  \uses{thm:gamma-msd-hardness, def:msd, def:msd-dec, def:truly-subquadratic}
+  As in Corollary~\ref{cor:lsd-hardness}: $\gamma\text{-}\MSD$ and bichromatic
+  $\gamma\text{-}\MSD$ are easier than $\MSD$, so the bound of
+  Theorem~\ref{thm:gamma-msd-hardness} transfers; and for the decision version
+  $\MSD_{n,\ell,t}$, the number of distinct relevant thresholds $t$ is
+  $\bigO(\ell^{3})$, so a truly subquadratic algorithm for all $t$ would solve
+  $\MSD_{n,\ell}$ by binary search, contradicting
+  Theorem~\ref{thm:gamma-msd-hardness}; hence some $t$ is hard.
+\end{proof}
+
+\chapter{Proof of the $\gamma$-MSD hardness (Appendix B)}
+
+\begin{definition}[Bichromatic $\gamma$-Additive-MSD]
+  \label{def:additive-msd}
+  \uses{def:cosine}
+  For $A, B \subseteq \{0,1\}^{\ell}$ with $|A| = |B| = n$ and $\alpha \in [0,1]$,
+  the bichromatic $\gamma$-Additive-MSD problem asks to distinguish:
+  \begin{itemize}
+    \item \emph{Yes:} there exists $(a,b) \in A \times B$ with
+      $\dfrac{\inner{a}{b}}{\norm{a}\norm{b}} \ge \alpha$;
+    \item \emph{No:} for every $(a,b) \in A \times B$,
+      $\dfrac{\inner{a}{b}}{\norm{a}\norm{b}} < \alpha - \gamma$.
+  \end{itemize}
+\end{definition}
+
+\begin{definition}[Bichromatic $\gamma$-Additive-Max-IP]
+  \label{def:additive-maxip}
+  \uses{def:inner-prod}
+  For $A, B \subseteq \{0,1\}^{\ell}$ with $|A| = |B| = n$ and a threshold
+  $\alpha$, the bichromatic $\gamma$-Additive-Max-IP problem
+  ($\gamma$-Additive-BMax-IP) asks to distinguish: \emph{Yes:} there is
+  $(a,b)\in A\times B$ with $\inner{a}{b} \ge \alpha$; \emph{No:} for all
+  $(a,b)\in A\times B$, $\inner{a}{b} < \alpha - \gamma$.
+\end{definition}
+
+\begin{lemma}[Tensoring amplifies the MSD approximation factor, Lemma B.2]
+  \label{lem:msd-tensor-reduction}
+  \uses{def:gamma-msd, def:kron, def:truly-subquadratic}
+  Suppose there is an algorithm for $\gamma\text{-}\MSD_{n,\ell}$ with
+  $\ell = (\log n)^{\frac{c\log n}{(\log\log n)^{2}}}$ for any constant $c>0$ and
+  $\gamma \le (1 + \tfrac{1}{\log\log n})^{\frac{\log n}{(\log\log n)^{2}}}$ that
+  runs in $\bigO(n^{2-\eps})$ time for any $\eps>0$. Then there is an algorithm
+  for $(1 + \tfrac{1}{\log\log n})\text{-}\MSD_{n, (\log n)^{k}}$ with running
+  time $\bigO(n^{2-\eps})$ for any constant $k>0$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:kron-inner, def:gamma-msd, def:kron, def:cosine}
+  Let $v_1, \ldots, v_n \in \{0,1\}^{(\log n)^{k}}$ be an instance of
+  $(1 + \tfrac{1}{\log\log n})\text{-}\MSD_{n, (\log n)^{k}}$. Construct
+  $V' = \{v_1^{\otimes q}, \ldots, v_n^{\otimes q}\}$ for
+  $q = \frac{\log n}{(\log\log n)^{2}}$. The vectors of $V'$ have dimension
+  $(\log n)^{kq} = (\log n)^{\frac{k\log n}{(\log\log n)^{2}}}$, so the assumed
+  algorithm applies and finds a $\gamma$-approximation of MSD on $V'$ for some
+  $\gamma \le (1 + \tfrac{1}{\log\log n})^{q}$. By
+  Lemma~\ref{lem:kron-inner},
+  \[
+    \frac{\inner{v_i^{\otimes q}}{v_j^{\otimes q}}}
+         {\norm{v_i^{\otimes q}}\cdot\norm{v_j^{\otimes q}}}
+    = \left(\cossim{v_i}{v_j}\right)^{q}
+  \]
+  for all $i,j$. Therefore a $\gamma$-approximation of MSD on $V'$ is a
+  $\gamma^{1/q} = (1 + \tfrac{1}{\log\log n})$-approximation of MSD on
+  $v_1, \ldots, v_n$. The running time is preserved up to the $\bigO(n^{2-\eps})$
+  bound.
+\end{proof}
+
+\begin{theorem}[Karthik--Manurangsi reduction, Theorem B.4]
+  \label{thm:additive-maxip-karthik}
+  \uses{def:gamma-msd, def:additive-maxip, def:truly-subquadratic}
+  \notready
+  Suppose there is an algorithm for
+  $(1 + \tfrac{1}{\log\log n})\text{-}\MSD_{n, (\log n)^{k}}$ for any constant
+  $k>0$ running in $\bigO(n^{2-\eps})$ time for any $\eps>0$. Then there is an
+  algorithm for bichromatic $(\log n)$-Additive-Max-IP$_{n, c\log n}$ for any
+  constant $c>0$ running in $\bigO(n^{2-\eps'})$ time for some $\eps'>0$.
+\end{theorem}
+% TODO: this is Theorem 6.2 of Karthik & Manurangsi (2020); the paper cites it
+% without reproducing the (graph-construction) proof. Reconstruct or cite before
+% marking ready.
+
+\begin{lemma}[Additive-MSD is equivalent to Additive-Max-IP, Lemma B.5]
+  \label{lem:additive-msd-maxip-equiv}
+  \uses{def:additive-msd, def:additive-maxip, def:truly-subquadratic}
+  Bichromatic $\frac{\log n}{\ell}$-Additive-$\MSD_{n,\ell}$ with
+  $\ell = \bigO(\log n)$ and bichromatic $(\log n)$-Additive-Max-IP$_{n,\ell'}$
+  with $\ell' = \bigO(\log n)$ are subquadratic equivalent.
+\end{lemma}
+\begin{proof}
+  \uses{def:additive-msd, def:additive-maxip, def:inner-prod, def:l2norm}
+  ($\Leftarrow$) Given a bichromatic $(\log n)$-Additive-Max-IP$_{n,\ell'}$
+  instance with sets $A = \{a_1, \ldots, a_n\}$, $B = \{b_1, \ldots, b_n\}$ and
+  threshold $\alpha$, construct $A' = \{a_1', \ldots, a_n'\}$, $B' = \{b_1',
+  \ldots, b_n'\}$ as follows: for each $a_i$ first attach $\ell - \norm{a_i}_1$
+  zeros at the end and then another $\ell - \norm{a_i}_1$ ones to obtain $a_i'
+  \in \{0,1\}^{3\ell}$, and for each $b_j$ attach $\ell + \norm{b_j}_1$ zeros and
+  another $\ell - \norm{b_j}_1$ ones to obtain $b_j' \in \{0,1\}^{3\ell}$.
+  Now every $a_i'$ and $b_j'$ has exactly $\ell$ ones, so $\norm{a_i'} =
+  \norm{b_j'} = \sqrt{\ell}$, and $\inner{a_i'}{b_j'} = \inner{a_i}{b_j}$ by the
+  construction (the appended coordinates never overlap on a $1$). Hence running an
+  $\frac{\log n}{\ell}$-Additive-MSD algorithm on $A', B'$ with threshold
+  $\frac{\alpha}{\ell}$ distinguishes:
+  \begin{itemize}
+    \item there exists $(a',b')$ with $\frac{\inner{a'}{b'}}{\norm{a'}\norm{b'}}
+      \ge \frac{\alpha}{\ell}$, equivalent to $\inner{a}{b} \ge \alpha$; or
+    \item for all $(a',b')$, $\frac{\inner{a'}{b'}}{\norm{a'}\norm{b'}} <
+      \frac{\alpha}{\ell} - \frac{\log n}{\ell}$, equivalent to $\inner{a}{b} <
+      \alpha - \log n$ for all $a \in A$, $b \in B$.
+  \end{itemize}
+  The running time is $\bigO(n^{2-\eps}\operatorname{poly}(3\ell)) =
+  \bigO(n^{2-\eps}\operatorname{poly}(\ell))$.
+
+  ($\Rightarrow$) Conversely, given a bichromatic
+  $\frac{\log n}{\ell}$-Additive-MSD$_{n,\ell}$ instance with sets $A, B$ and
+  threshold $\alpha$, build the exact same $A', B'$ so that
+  $\inner{a_i'}{b_j'} = \inner{a_i}{b_j}$ and $\norm{a_i'} = \norm{b_j'} =
+  \sqrt{\ell}$ for all $i,j$. The same argument shows that running an
+  Additive-Max-IP algorithm on $A', B'$ with threshold $\alpha\cdot\ell$ solves
+  the Additive-MSD instance.
+\end{proof}
+
+\begin{lemma}[Bichromatic Additive-MSD reduces to Additive-Max-IP, Lemma B.3]
+  \label{lem:msd-to-additive-msd}
+  \uses{def:gamma-msd, def:additive-msd, def:additive-maxip, def:truly-subquadratic}
+  Suppose there is an algorithm for
+  $(1 + \tfrac{1}{\log\log n})\text{-}\MSD_{n, (\log n)^{k}}$ for any constant
+  $k>0$ with $\bigO(n^{2-\eps})$ running time. Then there is an algorithm for
+  bichromatic $\frac{\log n}{\ell}$-Additive-$\MSD_{n, c\log n}$ for any $c>0$ in
+  $\bigO(n^{2-\eps'})$ time for some $\eps'>0$.
+\end{lemma}
+\begin{proof}
+  \uses{thm:additive-maxip-karthik, lem:additive-msd-maxip-equiv}
+  By Theorem~\ref{thm:additive-maxip-karthik}, the assumed
+  $(1+\tfrac{1}{\log\log n})$-MSD algorithm yields a truly subquadratic algorithm
+  for bichromatic $(\log n)$-Additive-Max-IP. By
+  Lemma~\ref{lem:additive-msd-maxip-equiv}, bichromatic $(\log n)$-Additive-
+  Max-IP is subquadratic equivalent to bichromatic
+  $\frac{\log n}{\ell}$-Additive-MSD, so the latter is also truly subquadratic.
+\end{proof}
+
+\begin{theorem}[Additive-BMax-IP refutes OVC, Lemma B.6 (Chen 2020)]
+  \label{thm:additive-bmaxip-to-ov}
+  \uses{def:additive-maxip, def:ov, conjecture:ovc, assumption:seth, def:truly-subquadratic}
+  \notready
+  Suppose there is an algorithm for $(\log n)$-Additive-BMax-IP$_{n, c\log n}$
+  for any constant $c>0$ running in $\bigO(n^{2-\eps})$ time for some $\eps>0$.
+  Then there is an algorithm for $\OV_{n, c'\log n}$ for any constant $c'>0$
+  running in $\bigO(n^{2-\eps'})$ time for some $\eps'>0$, refuting SETH and OVC.
+\end{theorem}
+% TODO: cited external result (Chen 2020, "On the hardness of approximate and
+% exact (bichromatic) maximum inner product"). Proof not reproduced in the
+% paper. Reconstruct or cite before marking ready.
+
+\chapter{Representational strength of transformers}
+
+\begin{theorem}[An attention unit solves OV, Theorem 4.1]
+  \label{thm:attention-solves-ov}
+  \uses{def:transformer, def:tf-solves, def:ov}
+  An attention unit with input and output MLPs and parameters $d = \ell$,
+  $d_{\mathrm{in}} = \ell$, $d_{\mathrm{out}} = 1$, $m \ge \ell + 1$ can solve
+  $\OV_{n,\ell}$.
+\end{theorem}
+\begin{proof}
+  \uses{def:attention, def:softmax, def:tf-solves, def:ov, lem:mlp-threshold, def:inner-prod}
+  Let $v_1, \ldots, v_n \in \{0,1\}^{\ell}$ be an $\OV_{n,\ell}$ instance; define
+  $v_{n+1} := 0^{\ell}$ and let $X \in \R^{(n+1)\times\ell}$ have rows
+  $X_{i,:} = v_i$. Since $m \ge \ell + 1$, choose $Q, K \in \R^{\ell \times m}$
+  with $QK^{\top} = -3\log n \cdot I_{\ell}$, let $V \in \R^{\ell\times 1}$ be the
+  all-one matrix, and take $\varphi_1$ to be the identity. We claim that if there
+  is a pair $i \ne j$ with $\inner{v_i}{v_j} = 0$ then $A_{Q,K,V}(X)$ has an
+  entry $\ge \frac{1}{n+1}$, and otherwise all entries are $\le
+  \frac{1}{(n+1)^{1.5}}$; the second MLP $\varphi_2$ then outputs $1$ iff some
+  entry is $\ge \frac{1}{n+1}$ (existence guaranteed by
+  Lemma~\ref{lem:mlp-threshold}).
+
+  The $i$-th entry of $A_{Q,K,V}(X)$ equals
+  \[
+    \sum_{j=1}^{n} \frac{\exp(-3\log n \cdot \inner{v_i}{v_j})}
+      {\sum_{k=1}^{n}\exp(-3\log n \cdot \inner{v_i}{v_k}) + 1}\cdot \norm{v_j}_1
+    = \frac{\sum_{j=1}^{n} n^{-3\inner{v_i}{v_j}}\cdot \norm{v_j}_1}
+           {\sum_{k=1}^{n} n^{-3\inner{v_i}{v_k}} + 1},
+  \]
+  where $\norm{v_j}_1 = (XV)_j$ (the all-one $V$ sums the entries of $v_j$) and
+  the $+1$ in the denominator is the contribution of $v_{n+1} = 0^{\ell}$ (giving
+  $n^{0} = 1$). If there is a pair with $\inner{v_{i^{*}}}{v_{j^{*}}} = 0$, the
+  $i^{*}$-th entry is at least
+  \[
+    \frac{n^{-3\inner{v_{i^{*}}}{v_{j^{*}}}}\cdot \norm{v_{j^{*}}}_1}{n+1}
+    \ge \frac{1}{n+1},
+  \]
+  since $\norm{v_{j^{*}}}_1 \ge 1$ and the denominator is at most $n+1$.
+  Otherwise $\inner{v_i}{v_j} \ge 1$ for all $i,j$, so the $i$-th entry is at most
+  \[
+    \sum_{j=1}^{n} \frac{n^{-3\inner{v_i}{v_j}} \cdot \norm{v_j}_1}{1}
+    \le \sum_{j=1}^{n} \frac{\ell}{n^{3\inner{v_i}{v_j}}}
+    \le n\cdot \frac{\ell}{n^{3}} < \frac{1}{n^{1.5}},
+  \]
+  using $\norm{v_j}_1 \le \ell$ and $\ell = \bigO(\operatorname{polylog} n)$.
+\end{proof}
+
+\begin{theorem}[An attention unit solves Max-IP and Min-IP decision, Theorem C.1]
+  \label{thm:attention-solves-maxip-minip}
+  \uses{def:transformer, def:tf-solves, def:maxip-dec, def:minip-dec}
+  An attention unit with input and output MLPs and parameters $d = \ell$,
+  $d_{\mathrm{in}} = \ell + 1$, $d_{\mathrm{out}} = 1$, $m \ge \ell + 1$ can
+  solve $\MaxIP_{n,\ell,t}$ and $\MinIP_{n,\ell,t}$ for $1 \le t \le \ell$.
+\end{theorem}
+\begin{proof}
+  \uses{def:attention, def:softmax, def:maxip-dec, def:minip-dec, lem:mlp-threshold, lem:mlp-append, def:inner-prod}
+  \textbf{Max-IP.} Given $v_1, \ldots, v_n \in \{0,1\}^{\ell}$ and $V \in
+  \R^{n\times\ell}$ with $V_{i,:} = v_i$, set $x_i = (v_i, 1) \in
+  \{0,1\}^{\ell+1}$, $x_{n+1} = (0, \ldots, 0, t+1) \in \R^{\ell+1}$, and let
+  $X \in \R^{(n+1)\times(\ell+1)}$ have rows $X_{i,:} = x_i$. Choose $Q, K \in
+  \R^{(\ell+1)\times m}$ with $QK^{\top} = 3\log n \cdot I_{\ell+1}$, and
+  $\mathcal V = (1, \ldots, 1, 0) \in \R^{\ell+1}$. The input MLP $\varphi_1$
+  produces the rows $x_i$ from the $v_i$ via Lemma~\ref{lem:mlp-append}. Then the
+  $i$-th entry of $A_{Q,K,\mathcal V}(X)$ equals
+  \[
+    \frac{\sum_{j=1}^{n} n^{3\inner{x_i}{x_j}}\cdot \norm{v_j}_1}
+         {\sum_{k=1}^{n} n^{3\inner{x_i}{x_k}} + n^{3(t+1)}}.
+  \]
+  Let $i^{*} \ne j^{*}$ maximize $\inner{v_{i^{*}}}{v_{j^{*}}}$. If
+  $\inner{v_{i^{*}}}{v_{j^{*}}} \ge t$, then $\inner{x_{i^{*}}}{x_{j^{*}}} \ge
+  t+1$ and the $i^{*}$-th entry is at least
+  \[
+    \frac{n^{3\inner{x_{i^{*}}}{x_{j^{*}}}}\cdot \norm{v_{j^{*}}}_1}
+         {\sum_{k} n^{3\inner{x_{i^{*}}}{x_k}} + n^{3(t+1)}}
+    \ge \frac{\norm{v_{j^{*}}}_1}{n+1} \ge \frac{1}{n+1}.
+  \]
+  If instead $\inner{v_i}{v_j} \le t-1$ for all $i \ne j$, then
+  $\inner{x_i}{x_j} \le t$ and the $i$-th entry is at most
+  \[
+    \frac{\sum_{j=1}^{n} n^{3\inner{x_i}{x_j}}\cdot \norm{v_j}_1}{n^{3(t+1)}}
+    \le \frac{\ell\cdot n\cdot n^{3t}}{n^{3(t+1)}} = \frac{\ell}{n^{2}}
+    < \frac{1}{(n+1)^{1.5}}.
+  \]
+  Thus $\varphi_2$ outputs $1$ iff some entry is $\ge \frac{1}{n+1}$
+  (Lemma~\ref{lem:mlp-threshold}), solving $\MaxIP_{n,\ell,t}$.
+
+  \textbf{Min-IP.} The proof is the same except $QK^{\top} = -3\log n \cdot
+  I_{\ell+1}$ and $x_{n+1} = (0, \ldots, 0, -(t+1)) \in \R^{\ell+1}$. The $i$-th
+  entry of $A_{Q,K,\mathcal V}(X)$ becomes
+  \[
+    \frac{\sum_{j=1}^{n} n^{-3\inner{x_i}{x_j}}\cdot \norm{v_j}_1}
+         {\sum_{k=1}^{n} n^{-3\inner{x_i}{x_k}} + n^{-3(t+1)}}.
+  \]
+  Let $i^{*}, j^{*}$ minimize $\inner{x_{i^{*}}}{x_{j^{*}}}$. If
+  $\inner{v_{i^{*}}}{v_{j^{*}}} \le t$ then $\inner{x_{i^{*}}}{x_{j^{*}}} \le t+1$
+  and the $i^{*}$-th entry is at least $\frac{1}{n+1}$; if $\inner{v_i}{v_j} \ge
+  t+1$ for all $i \ne j$ then $\inner{x_i}{x_j} \ge t+2$ and the $i$-th entry is
+  at most $\frac{\ell}{n^{2}} < \frac{1}{(n+1)^{1.5}}$. Again $\varphi_2$
+  thresholds at $\frac{1}{n+1}$.
+\end{proof}
+
+\begin{theorem}[An attention unit solves MSD and LSD decision, Theorem C.2]
+  \label{thm:attention-solves-msd-lsd}
+  \uses{def:transformer, def:tf-solves, def:msd-dec, def:lsd-dec}
+  An attention unit with input and output MLPs and parameters $d = \ell$,
+  $d_{\mathrm{in}} = \ell + 1$, $d_{\mathrm{out}} = 1$, $m \ge \ell + 1$ can
+  solve $\MSD_{n,\ell,t}$ and $\LSD_{n,\ell,t}$ for any $t \in [0,1]$.
+\end{theorem}
+\begin{proof}
+  \uses{thm:attention-solves-maxip-minip, lem:mlp-normalize, def:msd-dec, def:lsd-dec, def:cosine}
+  When $t = 0$ the problem is trivial (output $1$), so assume $t \ne 0$. Given an
+  $\MSD_{n,\ell,t}$ instance $v_1, \ldots, v_n$ with $V_{i,:} = v_i$, set
+  $x_i = \left(\frac{v_i}{\norm{v_i}_1}, 1\right) \in \R^{\ell+1}$,
+  $x_{n+1} = (0, \ldots, 0, t+1)$, and $X$ with rows $x_i$. Take $QK^{\top} =
+  3\log n \cdot I_{\ell+1}$ and $\mathcal V = (1, \ldots, 1, 0)$. Because
+  cosine similarity is exactly the inner product after normalizing the
+  embeddings, the analysis of Theorem~\ref{thm:attention-solves-maxip-minip}
+  (Max-IP case) applies once $\varphi_1$ produces the normalized rows $x_i$; the
+  required normalizing MLP exists by Lemma~\ref{lem:mlp-normalize}. The proof for
+  $\LSD_{n,\ell,t}$ is identical to the Min-IP case of
+  Theorem~\ref{thm:attention-solves-maxip-minip} after applying the same
+  normalizing $\varphi_1$ (Lemma~\ref{lem:mlp-normalize}).
+\end{proof}
+
+\chapter{MLP constructions (Appendix D)}
+
+\begin{lemma}[Continuous thresholding MLP, Lemma D.1]
+  \label{lem:mlp-threshold}
+  \uses{lem:continuity-closure}
+  For any $a, b \in \R$ with $b > a$, there exists a continuous function
+  $f : \R^{\ell} \to \R$ such that
+  \[
+    f(x) = \begin{cases}
+      1 & \text{if } x[i] \ge b \text{ for all } 1 \le i \le \ell,\\
+      0 & \text{if } x[i] < a \text{ for all } 1 \le i \le \ell.
+    \end{cases}
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{lem:continuity-closure}
+  Define $g : \R \to \R$ by
+  \[
+    g(x) = \begin{cases}
+      1 & \text{if } x \ge b,\\
+      \frac{1}{b-a}(x - a) & \text{if } a \le x < b,\\
+      0 & \text{if } x < a,
+    \end{cases}
+  \]
+  which is continuous (it is piecewise linear and the pieces agree at the
+  breakpoints $a, b$). Let $f(x) = 1 - \prod_{i=1}^{\ell}(1 - g(x[i]))$. By
+  Lemma~\ref{lem:continuity-closure}, $f$ is continuous (a finite product and
+  difference of continuous maps). If $x[i] \ge b$ for all $i$ then every
+  $g(x[i]) = 1$, so the product is $0$ and $f(x) = 1$. If $x[i] < a$ for all $i$
+  then every $g(x[i]) = 0$, so the product is $1$ and $f(x) = 0$.
+\end{proof}
+
+\begin{lemma}[Continuous coordinate-appending MLP, Lemma D.2]
+  \label{lem:mlp-append}
+  \uses{lem:continuity-closure}
+  There exists a continuous function $f : \R^{\ell} \to \R^{\ell+1}$ such that
+  \[
+    f(x) = \begin{cases}
+      (x, 1) & \text{if } x[\ell] \le 1,\\
+      (0, x) & \text{otherwise.}
+    \end{cases}
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{lem:continuity-closure}
+  Define $g : \R \to \R$ by $g(x) = 1$ if $x \le 1$, $g(x) = 2 - x$ if
+  $1 < x \le 2$, and $g(x) = 0$ if $x > 2$, which is continuous. Let
+  $f_1(x) = (x, 1)$ and $f_2(x) = (0, x)$ in $\R^{\ell+1}$, both continuous. Set
+  \[
+    f(x) = g(x[\ell])\cdot f_1(x) + (1 - g(x[\ell]))\cdot f_2(x).
+  \]
+  By Lemma~\ref{lem:continuity-closure}, $f$ is continuous, and one checks
+  directly that it equals $(x,1)$ when $x[\ell] \le 1$ and $(0,x)$ when
+  $x[\ell] > 2$ (and interpolates continuously in between).
+\end{proof}
+
+\begin{lemma}[Continuous normalizing MLP, Lemma D.3]
+  \label{lem:mlp-normalize}
+  \uses{lem:continuity-closure, lem:mlp-append}
+  There exists a continuous function $f : \R^{\ell} \to \R^{\ell+1}$ such that
+  \[
+    f(x) = \begin{cases}
+      \left(\frac{x}{\norm{x}_1}, 1\right) & \text{if } x[d] \le 1,\\
+      \left(0, \frac{x}{\norm{x}_1}\right) & \text{otherwise.}
+    \end{cases}
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{lem:mlp-append, lem:continuity-closure, def:l2norm}
+  Let $g$ be the same continuous function as in Lemma~\ref{lem:mlp-append}, and
+  let $f_1(x) = \left(\frac{x}{\norm{x}_1}, 1\right)$ and $f_2(x) =
+  \left(0, \frac{x}{\norm{x}_1}\right)$, both continuous on the relevant domain
+  (nonzero inputs). Then
+  \[
+    f(x) = g(x[\ell])\cdot f_1(x) + (1 - g(x[\ell]))\cdot f_2(x)
+  \]
+  is continuous by Lemma~\ref{lem:continuity-closure} and satisfies the required
+  piecewise definition.
+\end{proof}

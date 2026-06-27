@@ -1,0 +1,8 @@
+# Per-blueprint metadata. `name` MUST match the folder name; it is
+# used as the URL subpath (the blueprint is published at site/<name>/).
+name: gradient-coding
+title: "Approximate Gradient Coding with Optimal Decoding"
+description: "Approximate gradient codes from expander graphs with optimal decoding coefficients, and convergence bounds for random and adversarial stragglers."
+build_pdf: false        # if true, also build + link a PDF (requires TeX in CI)
+home: "https://arxiv.org/abs/2006.09638"                # optional URL shown as a "home" link on the landing card
+github: ""              # optional repo URL shown as a "GitHub" link on the landing card

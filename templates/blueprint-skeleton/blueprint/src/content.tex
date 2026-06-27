@@ -1,0 +1,32 @@
+% Put the actual mathematical content of your blueprint here.
+% This file is shared by the web build and the PDF build, so it must NOT
+% contain \begin{document}.
+%
+% The starter content below defines two linked nodes so the dependency graph
+% renders immediately after scaffolding. Replace it with your own material.
+%
+% Useful annotations on theorem-like environments:
+%   \uses{label, ...}  declare dependencies (these create graph edges)
+%   \leanok            mark the statement/proof as formalized (renders green)
+%   \notready          mark the statement as not ready to formalize (orange)
+%   \lean{Decl.Name}   link to a Lean declaration (no Lean needed to build)
+
+\chapter{Introduction}
+
+\begin{definition}[Example object]
+  \label{def:example}
+  Replace this with your first definition.
+\end{definition}
+
+\begin{theorem}
+  \label{thm:example}
+  \uses{def:example}
+  \leanok
+  Replace this with your first theorem. It depends on
+  Definition~\ref{def:example}, which is why the dependency graph draws an edge
+  between them.
+\end{theorem}
+\begin{proof}
+  \uses{def:example}
+  Replace this with the proof.
+\end{proof}

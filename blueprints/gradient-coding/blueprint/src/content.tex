@@ -1,0 +1,1270 @@
+% Blueprint for "Approximate Gradient Coding with Optimal Decoding"
+% (Margalit Glasgow, Mary Wootters), arXiv:2006.09638v4.
+% Two-kind model: library facts are dark-green leaves (\mathlibok), the paper's
+% own results are full nodes with complete proofs and \uses edges.
+% Math is in $...$ / \[...\]. No \begin{document} here.
+
+\chapter{Preliminaries: settled library facts}
+
+% These statements already exist in Mathlib (linear algebra, probability,
+% convexity). They are recalled as leaves so the paper's results can depend on
+% them. No proofs are given.
+
+\begin{lemma}[Cyclic property of trace]
+  \label{lem:trace-cyclic}
+  \lean{Matrix.trace_mul_comm}
+  \mathlibok
+  For real matrices $A \in \R^{n \times m}$ and $B \in \R^{m \times n}$ we have
+  $\Tr(AB) = \Tr(BA)$. (The paper calls this the ``circular law of trace''.)
+\end{lemma}
+
+\begin{lemma}[Markov's inequality]
+  \label{lem:markov}
+  \mathlibok
+  % TODO: confirm Lean decl name (e.g. ProbabilityTheory / measure_mul_le_lintegral)
+  If $X \ge 0$ is a nonnegative random variable and $a > 0$, then
+  $\Pr[X \ge a] \le \E[X]/a$.
+\end{lemma}
+
+\begin{lemma}[Jensen's inequality]
+  \label{lem:jensen}
+  \mathlibok
+  % TODO: confirm Lean decl name (ConvexOn.map_integral_le / inner_le_..)
+  If $\varphi$ is convex and $X$ is an integrable random variable, then
+  $\varphi(\E[X]) \le \E[\varphi(X)]$.
+\end{lemma}
+
+\begin{lemma}[Multiplicative Chernoff bound for Bernoulli sums]
+  \label{lem:chernoff}
+  \mathlibok
+  % TODO: confirm Lean decl name (e.g. measure-theoretic Chernoff/Hoeffding)
+  Let $X_1, \dots, X_t$ be i.i.d. Bernoulli random variables with mean $q$ and
+  let $\delta \in (0,1)$. Then
+  \[
+    \Pr\!\left[\sum_{i=1}^t X_i \le (1-\delta)\, qt\right]
+      \le \exp\!\left(-\tfrac{\delta^2 qt}{2}\right).
+  \]
+\end{lemma}
+
+\begin{lemma}[Stirling's formula bound]
+  \label{lem:stirling}
+  \mathlibok
+  % TODO: confirm Lean decl name (Stirling.* in Mathlib)
+  For every positive integer $k$, $\left(\dfrac{k!}{2^{k/2}(k/2)!}\right)^{1/k}
+  \le \sqrt{k}$.
+\end{lemma}
+
+\begin{definition}[Convex, strongly convex, and Lipschitz-gradient functions]
+  \label{def:convexity}
+  \lean{StrongConvexOn}
+  \mathlibok
+  % TODO: confirm Lean decl names for ConvexOn / LipschitzWith gradient
+  A differentiable function $f : \R^k \to \R$ is \emph{convex} if
+  $f(y) \ge f(x) + \langle \nabla f(x), y - x\rangle$ for all $x,y$; it is
+  \emph{$\mu$-strongly convex} if $f - \tfrac{\mu}{2}|\cdot|_2^2$ is convex; and
+  it has an \emph{$L$-Lipschitz gradient} if
+  $|\nabla f(x) - \nabla f(y)|_2 \le L|x-y|_2$ for all $x,y$.
+\end{definition}
+
+\begin{lemma}[Trace inequality for PSD matrices]
+  \label{lem:trace-psd}
+  \notready
+  If $A$ and $B$ are positive semidefinite matrices, then
+  $\Tr(AB) \le |A|_2 \,\Tr(B)$, where $|A|_2$ is the operator norm.
+\end{lemma}
+% TODO: cited in the paper as Lemma E.1, attributed to [Kleinman--Athans 1968]
+% with no proof; reconstruct or cite. Likely not in Mathlib.
+
+\begin{lemma}[Co-coercivity of smooth convex functions]
+  \label{lem:cocoercivity}
+  \notready
+  For a convex function $f$ whose gradient has Lipschitz constant $L$,
+  \[
+    |\nabla f(x) - \nabla f(y)|_2^2 \le L\,\langle x - y,\ \nabla f(x) - \nabla f(y)\rangle .
+  \]
+\end{lemma}
+% TODO: cited in the paper as Lemma E.2 ("co-coercivity lemma in [Needell et al.]")
+% with no proof. Standard; reconstruct or locate the Mathlib decl if present.
+
+\begin{lemma}[Expander Mixing Lemma]
+  \label{lem:expander-mixing}
+  \uses{def:spectral-expander}
+  \notready
+  Let $G$ be a $d$-regular graph on $n$ vertices with spectral expansion
+  $\lambda$ (Definition~\ref{def:spectral-expander}). For any sets of vertices
+  $S$ and $T$,
+  \[
+    |E(S,T)| \ \ge\ d\frac{|S||T|}{n}
+      - (d-\lambda)\sqrt{|S||T|\Big(1-\tfrac{|S|}{n}\Big)\Big(1-\tfrac{|T|}{n}\Big)} ,
+  \]
+  where $E(S,T)$ denotes the set of edges between $S$ and $T$.
+\end{lemma}
+% TODO: well-known (paper cites [Hoory-Linial-Wigderson]); stated without proof.
+% Not currently in Mathlib; reconstruct from the spectral decomposition or cite.
+
+\chapter{Introduction and problem setup}
+
+\begin{definition}[Assignment matrix]
+  \label{def:assignment-matrix}
+  An \emph{assignment matrix} for $N$ data points distributed over $m$ worker
+  machines is a matrix $A \in \R^{N \times m}$ with $A_{ij} \neq 0$ if and only
+  if the $i$th data point is held by machine $j$. Writing
+  $f_i(\theta) := L(x_i, y_i; \theta)$ for the per-point loss, each
+  non-straggling machine $j$ returns the single vector
+  $g_j := \sum_{i=1}^N A_{ij} \nabla f_i(\theta)$ to the parameter server.
+\end{definition}
+
+\begin{definition}[Replication factor {[Definition I.1]}]
+  \label{def:replication-factor}
+  \uses{def:assignment-matrix}
+  The \emph{replication factor} of an assignment matrix $A \in \R^{N \times m}$
+  is the average number of times a data point is replicated, that is, the number
+  of non-zero entries of $A$ divided by $N$.
+\end{definition}
+
+\begin{definition}[Coded gradient descent update]
+  \label{def:coded-gd}
+  \uses{def:assignment-matrix}
+  At each round $t$ the parameter server broadcasts $\theta_t$, each
+  non-straggling machine $j$ returns $g_j$, and the server picks a
+  \emph{decoding coefficient vector} $w \in \R^m$ with $w_j = 0$ whenever
+  machine $j$ straggles, and updates
+  \[
+    \theta_{t+1} \leftarrow \theta_t - \gamma \sum_{j=1}^m w_j g_j
+      = \theta_t - \gamma \sum_{i=1}^N \alpha_i \nabla f_i(\theta_t),
+    \qquad \alpha := Aw .
+  \]
+  If a scheme can always achieve $\alpha = \ones$ (the all-ones vector) it
+  recovers full-batch gradient descent; otherwise we are in the regime of
+  \emph{approximate} gradient coding.
+\end{definition}
+
+\begin{definition}[Optimal decoding coefficients]
+  \label{def:optimal-decoding}
+  \uses{def:coded-gd}
+  Given an assignment matrix $A$ and a set of straggling machines, the
+  \emph{optimal decoding} coefficient vector is any
+  \[
+    w^* \in \arg\min_{w :\ w_j = 0 \text{ if machine } j \text{ straggles}}
+      \ |Aw - \ones|_2 ,
+  \]
+  and we write $\alpha^* := Aw^*$. Here $|\cdot|_2$ is the Euclidean norm. The
+  vector $w^*$ need not be unique but $\alpha^*$ is.
+\end{definition}
+
+\begin{definition}[Moore--Penrose form of $\alpha^*$]
+  \label{def:alpha-pseudoinverse}
+  \uses{def:optimal-decoding}
+  For a straggler rate $p$, let $A(p)$ be the random matrix obtained from $A$ by
+  replacing each column independently with the zero column with probability $p$
+  (a straggling machine). Then $\alpha^*$ is the orthogonal projection of
+  $\ones$ onto the column space of $A(p)$,
+  \[
+    \alpha^* = A(p)\big(A(p)^T A(p)\big)^{\dagger} A(p)^T \ones ,
+  \]
+  where $M^{\dagger}$ denotes the Moore--Penrose pseudoinverse of $M$.
+\end{definition}
+
+\begin{definition}[Decoding error under random stragglers {[Definition I.2]}]
+  \label{def:random-error}
+  \uses{def:optimal-decoding}
+  Given an assignment matrix $A \in \R^{N \times m}$, the \emph{random decoding
+  error} under a $p$ fraction of random stragglers is
+  \[
+    \E_S\!\left[\,|\alpha^* - \ones|_2^2\,\right]
+      = \E_S\!\left[\ \min_{w \in \R^m,\ w_j = 0\ \forall j \in S} |Aw - \ones|_2^2\ \right],
+  \]
+  where $S \subseteq [m]$ is a random subset including each index independently
+  with probability $p$. We drop the subscript and write $\E$ for the expectation
+  over the random straggler set.
+\end{definition}
+
+\begin{definition}[Decoding error under adversarial stragglers {[Definition I.3]}]
+  \label{def:adversarial-error}
+  \uses{def:optimal-decoding}
+  Given $A \in \R^{N \times m}$, the \emph{adversarial decoding error} under a
+  $p$ fraction of adversarial stragglers is
+  \[
+    \max_{S \subset [m] :\ |S| \le pm}\ \big[\,|\alpha^* - \ones|_2^2\,\big]
+      = \max_{S \subset [m] :\ |S| \le pm}
+        \ \left[\ \min_{w \in \R^m,\ w_j = 0\ \forall j \in S} |Aw - \ones|_2^2\ \right].
+  \]
+\end{definition}
+
+\begin{definition}[Unbiased coding scheme and the normalization $\overline{\alpha}$]
+  \label{def:unbiased}
+  \uses{def:coded-gd}
+  A coding scheme is \emph{unbiased} if $\E[\alpha] = c\ones$ for some constant
+  $c$ (so that $\E\sum_i \alpha_i \nabla f_i(\theta) = c\nabla f(\theta)$ where
+  $f := \sum_i f_i$). For an unbiased scheme we define the normalized vector
+  $\overline{\alpha} := \alpha/c$, so that $\E[\overline{\alpha}] = \ones$.
+\end{definition}
+
+\chapter{Our construction: graph assignment schemes}
+
+\begin{definition}[Spectral expansion of a graph]
+  \label{def:spectral-expander}
+  Let $G = (V,E)$ be a $d$-regular graph with adjacency matrix
+  $\mathcal{A}(G)$, whose eigenvalues are
+  $\lambda_1(\mathcal{A}(G)) = d \ge \lambda_2(\mathcal{A}(G)) \ge \cdots$. The
+  \emph{spectral expansion} (spectral gap) of $G$ is
+  $\lambda := \lambda_1(\mathcal{A}(G)) - \lambda_2(\mathcal{A}(G))
+   = d - \lambda_2(\mathcal{A}(G))$.
+  $G$ is a \emph{$\lambda$-spectral expander} if its spectral expansion is at
+  least $\lambda$.
+\end{definition}
+
+\begin{definition}[Vertex-transitive graph]
+  \label{def:vertex-transitive}
+  For a graph $G = (V,E)$ let $\Aut(G) \subset \mathcal{S}_{|V|}$ be its group of
+  automorphisms. $G$ is \emph{vertex transitive} if for all $u, v \in V$ there
+  is an automorphism $\sigma \in \Aut(G)$ with $\sigma(u) = v$.
+\end{definition}
+
+\begin{definition}[Graph assignment scheme {[Definition II.2]}]
+  \label{def:graph-assignment}
+  \uses{def:assignment-matrix, def:replication-factor}
+  A \emph{graph assignment scheme} corresponding to a graph $G$ with $n$ vertices
+  and $m$ edges is the matrix $A \in \{0,1\}^{n \times m}$ with $A_{ij} = 1$ iff
+  the $j$th edge of $G$ has vertex $i$ as an endpoint. Here the $n$ vertices are
+  the data blocks and the $m$ edges are the machines, so each machine holds
+  exactly two data blocks. Each block consists of $\tfrac{dN}{2m}$ data points,
+  the number of blocks is $n = \tfrac{2m}{d}$, the computational load (points per
+  machine) is $\ell = \tfrac{dN}{m}$, and the replication factor is
+  $d = \tfrac{2m}{n}$, independent of block size. Results are stated in terms of
+  the $n \times m$ block-to-machine matrix.
+\end{definition}
+
+\chapter{Characterization of $\alpha^*$}
+
+% G(p): random sparsification of G where each edge is deleted with prob p.
+% w* assigns one weight w*_e per edge in G(p); alpha*_v is the sum of weights of
+% edges incident to v.
+
+\begin{definition}[Random sparsification $G(p)$]
+  \label{def:sparsification}
+  \uses{def:graph-assignment}
+  For a graph assignment scheme on $G = (V,E)$ and straggler probability $p$,
+  let $G(p)$ be the random subgraph in which each edge of $G$ is deleted
+  independently with probability $p$ (a straggling machine). The decoding vector
+  $w^*$ has one (possibly nonzero) coordinate $w^*_e$ per edge $e$ of $G(p)$, and
+  $\alpha^*_v = \sum_{e \ni v} w^*_e$ is the sum of weights of edges incident to
+  $v$.
+\end{definition}
+
+\begin{lemma}[Edge-sum identity {[Equation (4)]}]
+  \label{lem:alpha-edge-sum}
+  \uses{def:sparsification, def:optimal-decoding}
+  For any edge $e = (u,v)$ of $G(p)$, the optimal $\alpha^*$ satisfies
+  $\alpha^*_u + \alpha^*_v = 2$.
+\end{lemma}
+\begin{proof}
+  \uses{def:optimal-decoding}
+  At the optimum, the gradient of $|\ones - Aw|_2^2$ with respect to the free
+  coordinates of $w$ vanishes: $0 = A^T(\ones - Aw^*) = A^T(\ones - \alpha^*)$.
+  The row of $A^T$ indexed by edge $e = (u,v)$ has ones exactly in coordinates
+  $u$ and $v$, so $(1 - \alpha^*_u) + (1 - \alpha^*_v) = 0$, i.e.
+  $\alpha^*_u + \alpha^*_v = 2$.
+\end{proof}
+
+\begin{lemma}[Constancy of $1-\alpha^*$ on a component]
+  \label{lem:component-constant}
+  \uses{lem:alpha-edge-sum}
+  For all vertices $v$ in a single connected component of $G(p)$, the value
+  $|1 - \alpha^*_v|$ is the same.
+\end{lemma}
+\begin{proof}
+  \uses{lem:alpha-edge-sum}
+  For an edge $(u,v)$,
+  Lemma~\ref{lem:alpha-edge-sum} gives $1 - \alpha^*_u = -(1 - \alpha^*_v)
+  = \alpha^*_v - 1$. Thus $|1-\alpha^*_u| = |1-\alpha^*_v|$ across every edge,
+  and this relationship extends through the whole connected component.
+\end{proof}
+
+\begin{lemma}[Non-bipartite components give $\alpha^* = 1$]
+  \label{lem:nonbipartite-one}
+  \uses{lem:alpha-edge-sum, lem:component-constant}
+  If a connected component of $G(p)$ contains an odd cycle (is not bipartite),
+  then $\alpha^*_v = 1$ for all vertices $v$ in that component.
+\end{lemma}
+\begin{proof}
+  \uses{lem:alpha-edge-sum, lem:component-constant}
+  By Lemma~\ref{lem:alpha-edge-sum} the sign of $1 - \alpha^*_v$ alternates along
+  every edge of the component. Traversing an odd cycle returns to the starting
+  vertex with the opposite sign, which is a contradiction unless
+  $1 - \alpha^*_v = 0$ at every vertex of the cycle. By
+  Lemma~\ref{lem:component-constant} the magnitude $|1-\alpha^*_v|$ is constant on
+  the component, hence equals $0$ everywhere, i.e. $\alpha^*_v = 1$.
+\end{proof}
+
+\begin{lemma}[Bipartite components: balance formula]
+  \label{lem:bipartite-balance}
+  \uses{lem:alpha-edge-sum, lem:component-constant}
+  If a connected component $C = L \cup R$ of $G(p)$ is bipartite with
+  $|L| \ge |R|$, then $\alpha^*_u = 1 + \tfrac{|L|-|R|}{|L|+|R|}$ for $u \in R$
+  and $\alpha^*_v = 1 - \tfrac{|L|-|R|}{|L|+|R|}$ for $v \in L$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:alpha-edge-sum, lem:component-constant, def:sparsification}
+  Each edge weight contributes to exactly one vertex in $L$ and one in $R$, so
+  $\sum_{u \in R} \alpha^*_u = \sum_{v \in L} \alpha^*_v$ (both equal the total
+  edge weight). By Lemma~\ref{lem:component-constant}, $1 - \alpha^*_v$ has
+  constant magnitude on $C$; by Lemma~\ref{lem:alpha-edge-sum} it has one sign on
+  $L$ and the opposite on $R$. Writing $\alpha^*_u = 1 + \delta$ on $R$ and
+  $\alpha^*_v = 1 - \delta$ on $L$ and equating the two sums,
+  $|R|(1+\delta) = |L|(1-\delta)$, which gives
+  $\delta = \tfrac{|L|-|R|}{|L|+|R|}$.
+\end{proof}
+
+\begin{lemma}[Linear-time computation of $w^*$]
+  \label{lem:linear-time-decode}
+  \uses{lem:nonbipartite-one, lem:bipartite-balance, def:sparsification}
+  \notready
+  Given the set of non-straggling machines, $w^*$ can be computed in $O(m)$ time:
+  perform a breadth-first search of $G(p)$ to find connected components and the
+  sides $L,R$ of any bipartite component; set $\alpha^*_v$ on each component using
+  Lemmas~\ref{lem:nonbipartite-one}--\ref{lem:bipartite-balance}; then a
+  depth-first search labels each edge with $w^*_e$ so that the incident edge
+  weights sum to $\alpha^*_v$.
+\end{lemma}
+% TODO: algorithmic claim stated without a formal proof in the paper.
+
+\chapter{The decoding error under random stragglers}
+
+\begin{theorem}[Random straggler error {[Theorem IV.1]}]
+  \label{thm:random-main}
+  \uses{def:graph-assignment, def:spectral-expander, def:vertex-transitive, def:random-error, thm:sparsification, cor:nonbipartite-giant, lem:moment-bound}
+  Let $G = (V,E)$ be any vertex-transitive graph with $n$ vertices, $m$ edges,
+  and spectral expansion $\lambda$, and let $A$ be the graph assignment matrix of
+  $G$. Suppose for some positive $\epsilon$:
+  \begin{enumerate}
+    \item $\lambda > 1.5$;
+    \item $(\tfrac{\lambda}{2}+1)(1 - p e^{1/\lambda}) \ge 1 + \epsilon$;
+    \item $\Big(1 - \tfrac{e^2 p^{\lambda(1-\frac{1}{3+\epsilon})}}{(1-pe^{1/\lambda})^2}\Big)
+      \Big(\lambda - (2d-\lambda)\tfrac{e^2 p^{\lambda(1-\frac{1}{3+\epsilon})}}{(1-pe^{1/\lambda})^2}\Big) \ge \epsilon$;
+    \item $\tfrac{n}{\log(n)^2} \ge \tfrac{4(1+\epsilon)}{\epsilon^2}
+      \big(2 - 2\log(\epsilon) + 2\log(1+\epsilon) - \log(1 - pe^{1/\lambda})\big)$.
+  \end{enumerate}
+  If each machine straggles independently with probability $p$, then
+  \begin{enumerate}
+    \item $\E[\alpha^*] = r\ones$ for some $r \ge 1 - \tfrac{6}{n} - t$;
+    \item for all $i$, $\E[(\alpha^*_i - r)^2] \le \tfrac{6}{n} + t$;
+    \item $\big|\E[(\alpha^* - r\ones)(\alpha^* - r\ones)^T]\big|_2
+      \le 2k^2\big(t + \tfrac{6}{n}\big)^2 + 24$,
+  \end{enumerate}
+  where $t = \tfrac{e^2 p^{\lambda(1-\frac{1}{3+\epsilon})}}{(1-pe^{1/\lambda})^2}$
+  and $k = \tfrac{2(1+\epsilon)}{\epsilon^2}
+  \big(2\log(n) - 2\log(\epsilon) + 2\log(1+\epsilon) - \log(1-p)\big)$, and all
+  expectations are over the random stragglers.
+\end{theorem}
+\begin{proof}
+  \uses{cor:nonbipartite-giant, lem:moment-bound}
+  Because $G$ is vertex-transitive, the distribution of $\alpha^*_i$ is the same
+  for every $i$, so $\E[\alpha^*]$ is a multiple of $\ones$. By
+  Corollary~\ref{cor:nonbipartite-giant}, with probability at least
+  $1 - \tfrac{6}{n}$ at least $(1-t)n$ vertices lie in non-bipartite components,
+  where $t$ is as above; by Lemma~\ref{lem:nonbipartite-one} those vertices have
+  $\alpha^*_i = 1$.
+
+  \emph{First statement.} Since $\alpha^*_i \ge 0$,
+  \[
+    \E[\alpha^*_i] \ge \Pr[\alpha^*_i = 1] \ge \Pr[\text{vertex } i
+      \text{ in a non-bipartite component}] \ge 1 - \tfrac{6}{n} - t .
+  \]
+
+  \emph{Second statement.} Using $|1 - \alpha^*_i| \le 1$ always,
+  \[
+    \E[(\alpha^*_i - \E[\alpha^*_i])^2] \le \E[(\alpha^*_i - 1)^2]
+      \le 1 - \Pr[\alpha^*_i = 1] \le \tfrac{6}{n} + t .
+  \]
+
+  \emph{Third statement.} This is Lemma~\ref{lem:moment-bound}.
+\end{proof}
+
+\begin{lemma}[Covariance norm bound {[Lemma IV.5 / Lemma C.1]}]
+  \label{lem:moment-bound}
+  \uses{cor:nonbipartite-giant, def:vertex-transitive, lem:claim-set-components}
+  Under the assumptions of Theorem~\ref{thm:random-main},
+  \[
+    \big|\E[(\alpha^* - r\ones)(\alpha^* - r\ones)^T]\big|_2
+      \le 2k^2\big(t + \tfrac{6}{n}\big)^2 + 24,
+  \]
+  where $r, t, k$ are as in Theorem~\ref{thm:random-main}.
+\end{lemma}
+\begin{proof}
+  \uses{def:vertex-transitive, lem:claim-set-components, cor:nonbipartite-giant, lem:claim-component-size}
+  Bound the operator norm by the sum of absolute entries of a row:
+  \[
+    \big|\E[(\alpha - r\ones)(\alpha - r\ones)^T]\big|_2
+      \le \sum_j \big|\E[\alpha_i \alpha_j] - \E[\alpha_i]\E[\alpha_j]\big| .
+  \]
+  For $S \subset V$ let $E_S$ be the event that $S$ is exactly a connected
+  component of $G(p)$, let $\mathcal{E}(i) = \{E_S : i \in S\}$, and for
+  $E \in \mathcal{E}(i)$ let $\alpha_i(E)$ be the value of $\alpha_i$ conditioned
+  on $E$. Since $1 - \alpha_i$ is determined by which component contains $i$ and
+  whether it is bipartite,
+  \begin{align*}
+    \big|\E[\alpha_i \alpha_j] - \E[\alpha_i]\E[\alpha_j]\big|
+      &= \Big| \sum_{E_S \in \mathcal{E}(i),\, E_T \in \mathcal{E}(j)}
+        (\Pr[E_S \cap E_T] - \Pr[E_S]\Pr[E_T])(1 - \alpha_i(E_S))(1 - \alpha_j(E_T)) \Big| \\
+      &\le \sum_{E_S, E_T :\ \alpha_i(E_S) \neq 1,\, \alpha_j(E_T) \neq 1}
+        |\Pr[E_S \cap E_T] - \Pr[E_S]\Pr[E_T]| \\
+      &\le 2 \sum_{\substack{E_S, E_T :\ \alpha_i(E_S) \neq 1,\, \alpha_j(E_T) \neq 1 \\
+        \Pr[E_S]\Pr[E_T] > \Pr[E_S \cap E_T]}} \Pr[E_S]\Pr[E_T] ,
+  \end{align*}
+  where the second line uses $|1-\alpha_i| \le 1$. Note
+  $\Pr[E_S]\Pr[E_T] > \Pr[E_S \cap E_T]$ exactly when the two events are
+  incompatible, i.e. $S \neq T$ and $S \cap T \neq \emptyset$; define
+  $I(S,T) = 1$ in that case and $0$ otherwise.
+
+  Using vertex transitivity, for a fixed $i$ with $|S| \le k$ one rewrites, with
+  $A_j \subset \Aut(G)$ the automorphisms sending $j \mapsto 1$ and using
+  $\Pr[E_T] = \Pr[E_{\sigma(T)}]$,
+  \[
+    \sum_{j}\sum_{\substack{E_T \in \mathcal{E}(j),\, |T| \le k}} \Pr[E_T] I(S,T)
+      = n \sum_{\substack{E_T \in \mathcal{E}(1),\, |T| \le k}}
+        \Pr[E_T]\, \E_{\sigma \sim \Aut(G)}[I(S, \sigma(T))] .
+  \]
+  Bounding $I(S,\sigma(T)) \le \mathbf{1}[S \cap \sigma(T) \neq \emptyset]$ and
+  using that $\sigma(u)$ is uniform on $V$ (vertex transitivity), so
+  $\E_{\sigma}[|S \cap \sigma(T)|] = \tfrac{|S||T|}{n}$, gives
+  \[
+    \sum_{j}\sum_{E_T} \Pr[E_T] I(S,T)
+      \le n \sum_{E_T} \Pr[E_T]\tfrac{|S||T|}{n}
+      \le k|S|\Pr[|C(1)| \le k]
+      \le k|T|\big(t + \tfrac{6}{n}\big),
+  \]
+  the last step using Corollary~\ref{cor:nonbipartite-giant} (a vertex is in a
+  giant component of size $> n/2$ with probability $\ge 1 - t - \tfrac{6}{n}$).
+  Summing over all $j$, splitting into pairs with $\max(|S|,|T|) \le k$ and
+  $\max(|S|,|T|) > k$, and applying Claim~\ref{lem:claim-set-components} for the
+  large pairs,
+  \[
+    \sum_j \big|\E[\alpha_i\alpha_j] - \E[\alpha_i]\E[\alpha_j]\big|
+      \le 2 k^2 \big(t + \tfrac{6}{n}\big)^2 + 4n\cdot\tfrac{6}{n}
+      \le 2k^2\big(t + \tfrac{6}{n}\big)^2 + 24 . \qedhere
+  \]
+\end{proof}
+
+\begin{theorem}[Giant component of a sparsified expander {[Theorem IV.3]}]
+  \label{thm:sparsification}
+  \uses{def:spectral-expander, def:sparsification, lem:expander-mixing, lem:claim-component-size, lem:claim-small-components}
+  Let $G$ be any $d$-regular $\lambda$-spectral expander on $n$ vertices and
+  suppose for some positive $\epsilon$:
+  (1) $\lambda > 1.5$;
+  (2) $(\tfrac{\lambda}{2}+1)(1-p) \ge 1 + \epsilon$;
+  (3) $\tfrac{n}{\log(n)^2} \ge \tfrac{2(3+\epsilon)(1+\epsilon)}{\epsilon^2}
+   \big(2 - 2\log(\epsilon) + 2\log(1+\epsilon) - \log(1-p)\big)$.
+  Let $G(p)$ be the random sparsification deleting each edge with probability
+  $p$. With probability at least $1 - \tfrac{5}{n}$:
+  \begin{enumerate}
+    \item $G(p)$ has a giant component of size at least
+      $n\Big(1 - \tfrac{e p^{\lambda(1-\frac{1}{3+\epsilon})}}{(1-p)^2}\Big)$;
+    \item every vertex is either in a component of size at most $k$, where $k$ is
+      as in Theorem~\ref{thm:random-main}, or in a component of size greater than
+      $n/2$.
+  \end{enumerate}
+\end{theorem}
+\begin{proof}
+  \uses{lem:claim-component-size, lem:claim-small-components, lem:expander-mixing}
+  Consider the growing process of Algorithm~\ref{alg:growing} (a generalization
+  of the standard component-exploration process), started from a vertex set
+  $V_0$: it reveals edges of $G$ one at a time, including an edge in $G(p)$ with
+  probability $1-p$ (variable $X_t$), maintaining the explored vertices $V_t$, the
+  explored $G(p)$-edges $S_t$, the explored non-$G(p)$ edges $B_t$, and the
+  frontier $F_t = \partial(V_t)\setminus B_t$ of unexplored edges. Since the
+  explored $G(p)$-edges form a forest, $|V_t| = |V_0| + |S_t|$ and
+  $|B_t| = t - |S_t|$. Claim~\ref{lem:claim-frontier} lower bounds the frontier
+  size, and Claim~\ref{lem:claim-component-size} shows every vertex is in a
+  component of size $\le k$ or $> n/2$ with probability $1 - \tfrac{4}{n}$. Since
+  there is at most one component of size $> n/2$, all such vertices lie in one
+  giant component. Claim~\ref{lem:claim-small-components} bounds the number of
+  vertices in small components, yielding the giant-component size bound and the
+  failure probability $1 - \tfrac{5}{n}$.
+\end{proof}
+
+\begin{lemma}[Growing process {[Algorithm 1]}]
+  \label{alg:growing}
+  \uses{def:sparsification}
+  The \emph{growing process} on input vertex set $V_0$ explores
+  $\bigcup_{v \in V_0} C_v$ (the $G(p)$-components of $V_0$) as follows.
+  Initialize $t \leftarrow 0$, $S_0, B_0 \leftarrow \emptyset$,
+  $F_0 \leftarrow \partial(V_0)$. While $|F_t| > 0$: pick $e \in F_t$
+  arbitrarily; set $t \leftarrow t+1$ and draw $X_t \sim \mathrm{Bernoulli}(1-p)$.
+  If $X_t = 1$ then $S_t \leftarrow S_{t-1} \cup e$,
+  $V_t \leftarrow V_{t-1} \cup \delta(e)$, $B_t \leftarrow B_{t-1}$; else
+  $B_t \leftarrow B_{t-1}\cup e$, $S_t \leftarrow S_{t-1}$,
+  $V_t \leftarrow V_{t-1}$. Update $F_t \leftarrow \partial(V_t) \setminus B_t$.
+  Return $V_t$. Here $S_t$ are the explored edges in $G(p)$, $V_t$ the explored
+  vertices, $B_t$ the explored edges not in $G(p)$, and $F_t$ the frontier.
+\end{lemma}
+
+\begin{lemma}[Frontier lower bound {[Claim IV.7]}]
+  \label{lem:claim-frontier}
+  \uses{alg:growing, lem:expander-mixing}
+  At the end of any step $t$ with $|V_t| \le n/2$,
+  \[
+    |F_t| \ge \sum_{i=1}^t (X_i(\alpha_t + 1) - 1) + |V_0|\alpha_t,
+    \qquad \alpha_t = \lambda \max\!\Big(\tfrac12,\ 1 - \tfrac{t+|V_0|}{n}\Big).
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{lem:expander-mixing, alg:growing}
+  By the Expander Mixing Lemma (Lemma~\ref{lem:expander-mixing}) applied to
+  $V_t$ and its complement,
+  $|\partial(V_t)| \ge \lambda|V_t|\big(1 - \tfrac{|V_t|}{n}\big) \ge \alpha_t|V_t|$.
+  Hence, using $|F_t| = |\partial(V_t)\setminus B_t| \ge \alpha_t|V_t| - |B_t|$,
+  $|V_t| = |S_t| + |V_0|$ and $|B_t| = t - |S_t|$,
+  \[
+    |F_t| \ge \alpha_t(|S_t| + |V_0|) - (t - |S_t|)
+      = (\alpha_t + 1)|S_t| + |V_0|\alpha_t - t
+      = \sum_{i=1}^t (X_i(\alpha_t+1) - 1) + |V_0|\alpha_t,
+  \]
+  since $|S_t| = \sum_{i=1}^t X_i$.
+\end{proof}
+
+\begin{lemma}[Dichotomy of component sizes {[Claim IV.8]}]
+  \label{lem:claim-component-size}
+  \uses{lem:claim-frontier, lem:chernoff, alg:growing}
+  With probability at least $1 - \tfrac{4}{n}$, simultaneously for all vertices
+  $v$, either the component of $v$ has size less than $k$ or has size strictly
+  greater than $n/2$, where $k = \tfrac{2(1+\epsilon)}{\epsilon^2}
+  (2\log(n) - 2\log(\epsilon) + 2\log(1+\epsilon) - \log(1-p))$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:claim-frontier, lem:chernoff, alg:growing}
+  Conditioned on $v$ in a component of size $\ge k$, the growing process on
+  $\{v\}$ takes at least $k(1+\alpha_k)$ steps. By the third assumption,
+  $k \le \tfrac{n}{(3+\epsilon)\log n}$, so $\alpha_t \le \tfrac12$ for the
+  relevant $t$. Using the frontier bound (Lemma~\ref{lem:claim-frontier}) the
+  component stays $\le n/2$ only if the random walk
+  $\sum_{i=1}^t(X_i(\alpha_t+1)-1)$ becomes nonpositive, so
+  \[
+    \Pr[|C(v)| \le n/2 \mid |C(v)| \ge k]
+      \le \sum_{t = k(1+\alpha_k)}^{\infty}
+        \Pr\Big[\sum_{i=1}^t(X_i(\alpha_t+1) - 1) \le -\alpha_t\Big].
+  \]
+  By the Chernoff bound (Lemma~\ref{lem:chernoff}) for Bernoulli$(1-p)$
+  variables,
+  \[
+    \Pr\Big[\sum_{i=1}^t(X_i(\alpha_t+1)-1) \le -\alpha_t\Big]
+      \le \exp\!\Big(-\tfrac{(1-p)t}{2}\big(1 - \tfrac{1}{(\alpha_t+1)(1-p)}\big)^2\Big).
+  \]
+  Summing the geometric series and using the second assumption and the definition
+  of $k$ bounds the total by
+  $\dfrac{\exp(-k\epsilon^2/(2(1+\epsilon)))}{\frac{1-p}{4}(1-\frac{1}{1+\epsilon})^2}
+    = \tfrac{4}{n^2}$. A union bound over the $n$ vertices gives the claim.
+\end{proof}
+
+\begin{lemma}[Few vertices in small components {[Claim IV.9]}]
+  \label{lem:claim-small-components}
+  \uses{lem:claim-component-size, lem:claim-set-components, prop:binomial-moment, lem:markov}
+  Let $I_v = \mathbf{1}[|C_v| \le k]$ and $Y = \sum_v I_v$. Then
+  \[
+    \Pr\!\left[Y \ge \frac{en\, p^{\lambda(1-\frac{1}{3+\epsilon})}}{(1-p)^2}\right]
+      \le \frac{1}{n}.
+  \]
+  Consequently, with probability $\ge 1 - \tfrac{4}{n} - \tfrac1n$, there is a
+  giant component of size
+  $\ge n\big(1 - \tfrac{e p^{\lambda(1-\frac{1}{3+\epsilon})}}{(1-p)^2}\big)$ and
+  no vertices in components of size between $k$ and $n/2$ (establishing
+  Theorem~\ref{thm:sparsification}).
+\end{lemma}
+\begin{proof}
+  \uses{lem:claim-set-components, prop:binomial-moment, lem:markov, lem:claim-component-size}
+  By Claim~\ref{lem:claim-set-components}, the first $\log(n)$ moments of $Y$ are
+  upper bounded by those of $\mathrm{Binomial}(n,q)$ with
+  $q = \tfrac{p^{\lambda(1-\frac{1}{3+\epsilon})}}{(1-p)^2}$. By
+  Proposition~\ref{prop:binomial-moment} and Markov's inequality
+  (Lemma~\ref{lem:markov}) applied to the $\log(n)$-th centralized moment,
+  \[
+    \Pr[Y \ge enq]
+      = \Pr[(Y - \E[Y])^{\log n} \ge (neq - nq)^{\log n}]
+      \le \frac{(2q\sqrt{n\log n})^{\log n}}{(nq(e-1))^{\log n}}
+      \le \Big(\tfrac1e\Big)^{\log n} = \tfrac1n . \qedhere
+  \]
+\end{proof}
+
+\begin{lemma}[Random-walk extinction probability {[Lemma IV.10]}]
+  \label{lem:rw-extinction}
+  Let $S(\alpha) = \sum_{i=1}^{\infty} X_i$ be a random walk where
+  $X_i = \alpha$ with probability $1-p$ and $X_i = -1$ with probability $p$. Let
+  $S^{(\beta)}(\alpha) = \beta + S(\alpha)$. If $\alpha > 1$, then for any
+  positive integer $c$ the probability that $S^{(c\alpha)}(\alpha)$ ever goes
+  below zero is at most $\Big(\tfrac{p^{\alpha}}{(1-p)^2}\Big)^c$.
+\end{lemma}
+\begin{proof}
+  For $\beta$ let $d_\beta(\alpha)$ be the extinction probability of
+  $S^{(\beta)}(\alpha)$. We compare $S^{(\beta)}(\alpha)$ with the integer walk
+  $S(\lfloor \alpha\rfloor)$: $d_\beta(\alpha) \le d_{\lceil\beta\rceil}(\lfloor\alpha\rfloor)
+  = d_1(\lfloor\alpha\rfloor)^{\lceil\beta\rceil}$, and a first-step analysis
+  gives $d_1(\lfloor\alpha\rfloor) = p + (1-p)d_1(\lfloor\alpha\rfloor)^{\lfloor\alpha\rfloor+1}$,
+  whence $d_1(\lfloor\alpha\rfloor) \le \tfrac{p}{(1-p)^{1/\lfloor\alpha\rfloor}}$.
+  Therefore for any positive integer $c$,
+  \[
+    d_{c\alpha}(\alpha) \le d_{c\alpha}(\lfloor\alpha\rfloor)
+      \le \Big(\tfrac{p}{(1-p)^{1/\lfloor\alpha\rfloor}}\Big)^{\lceil c\alpha\rceil}
+      \le \Big(\tfrac{p^{\alpha}}{(1-p)^{\frac{\alpha}{\lfloor\alpha\rfloor}}}\Big)^c
+      \le \Big(\tfrac{p^{\alpha}}{(1-p)^2}\Big)^c . \qedhere
+  \]
+\end{proof}
+
+\begin{lemma}[Moment control of small-component sets {[Claim IV.11]}]
+  \label{lem:claim-set-components}
+  \uses{lem:rw-extinction, alg:growing, lem:claim-component-size}
+  For any set $S$ of $c \le \log(n)$ vertices, the probability that every vertex
+  of $S$ lies in a component of size at most $k$ is at most
+  $\Big(\tfrac{p^{\lambda(1-\frac{1}{3+\epsilon})}}{(1-p)^2}\Big)^c$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:rw-extinction, alg:growing}
+  We have $\Pr[\max_{v\in S}|C_v| \le k] \le \Pr[|\bigcup_{v\in S}C_v| \le ck]$.
+  This is the probability that the growing process started at $V_0 = S$
+  terminates before reaching size $ck$. From $k \le n(1 - \tfrac{1}{3+\epsilon})$
+  (for $c \le \log n$), the process terminates early only if the random walk
+  $\sum_{i=1}^{\infty}\big(X_i(\lambda(1-\tfrac1{3+\epsilon})+1) - 1\big)
+   + c\lambda(1-\tfrac1{3+\epsilon})$ becomes extinct. Since
+  $\lambda(1-\tfrac1{3+\epsilon}) > 1$ by the first assumption,
+  Lemma~\ref{lem:rw-extinction} (with $\alpha = \lambda(1-\tfrac1{3+\epsilon})$,
+  $\beta = c\alpha$) gives the stated bound.
+\end{proof}
+
+\begin{proposition}[Centered binomial moment bound {[Proposition IV.12]}]
+  \label{prop:binomial-moment}
+  \uses{lem:jensen, lem:stirling}
+  For any $n$, $q$ and $c \le \log(n)$,
+  \[
+    \E\big[(\mathrm{Binomial}(n,q) - nq)^c\big] \le \big(2q\sqrt{nc}\big)^c .
+  \]
+\end{proposition}
+\begin{proof}
+  \uses{lem:jensen, lem:stirling}
+  Let $X_i, Y_i$ be i.i.d. Bernoulli$(q)$. By Jensen's inequality
+  (Lemma~\ref{lem:jensen}) applied to the convex map $x \mapsto x^c$,
+  \[
+    \E[(\mathrm{Binomial}(n,q) - nq)^c]
+      = \E\Big[\big(\sum_i X_i - \sum_i \E[Y_i]\big)^c\Big]
+      \le \E\Big[\big(\sum_i (X_i - Y_i)\big)^c\Big].
+  \]
+  Write $X_i - Y_i = r_i Z_i$ with $r_i$ i.i.d. Rademacher and
+  $Z_i \sim \mathrm{Bernoulli}(2q(1-q))$. Since even moments of a standard
+  Gaussian $g_i$ dominate those of a Rademacher and odd moments vanish for both,
+  $\E[(\sum_i r_i Z_i)^c] \le \E[(\sum_i g_i Z_i)^c]$. As
+  $\E[Z_i^k] = 2q(1-q)$ for all $k \ge 1$, comparing moments gives
+  $\sum_i g_i Z_i \sim 2q(1-q)\sum_i g_i \sim 2q(1-q)\mathcal{N}(0,n)$, so
+  \[
+    \E\Big[\big(\sum_i g_i Z_i\big)^c\Big]
+      = (4nq^2(1-q)^2)^{c/2}\frac{c!}{2^{c/2}(c/2)!}
+      \le (4nq^2(1-q)^2 c)^{c/2}
+      \le (2q\sqrt{nc})^c ,
+  \]
+  where the first inequality uses Stirling (Lemma~\ref{lem:stirling}).
+\end{proof}
+
+\begin{corollary}[Non-bipartite giant component {[Corollary IV.4]}]
+  \label{cor:nonbipartite-giant}
+  \uses{thm:sparsification, lem:expander-mixing, def:spectral-expander}
+  Let $G$ be any $d$-regular $\lambda$-spectral expander on $n$ vertices and
+  suppose for some positive $\epsilon$ assumptions (1)--(4) of
+  Theorem~\ref{thm:random-main} hold. Then with probability at least
+  $1 - \tfrac{6}{n}$:
+  \begin{enumerate}
+    \item $G(p)$ has a non-bipartite giant component of size at least
+      $n\Big(1 - \tfrac{e^2 p^{\lambda(1-\frac{1}{3+\epsilon})}}{(1-pe^{1/\lambda})^2}\Big)$;
+    \item every vertex is either in a component of size at most $k$ (with $k$ as
+      in Theorem~\ref{thm:random-main}) or in a component of size $> n/2$.
+  \end{enumerate}
+\end{corollary}
+\begin{proof}
+  \uses{thm:sparsification, lem:expander-mixing}
+  Use ``edge sprinkling'': let $q = pe^{1/\lambda}$. Create $G(p)$ in two steps:
+  Step~1 forms $G(q)$ by deleting edges with probability $q$; Step~2 adds back
+  each absent edge of $G$ with probability $1 - \tfrac{p}{q}$. By
+  Theorem~\ref{thm:sparsification} applied with $q$, with probability
+  $\ge 1 - \tfrac5n$ the graph $G(q)$ has a giant component $C$ of size
+  $n(1-s)$, $s = \tfrac{e^2 p^{\lambda(1-\frac1{3+\epsilon})}}{(1-pe^{1/\lambda})^2}$.
+  If $C$ were bipartite with sides $L \supseteq R$, $r = |R|/n \ge \tfrac{1-s}{2}$,
+  then by the Expander Mixing Lemma (Lemma~\ref{lem:expander-mixing}) there are at
+  least $n(dr^2 - (d-\lambda)r(1-r))$ edges of $G$ inside $R$; assumption (3)
+  makes this $\ge \tfrac{n\epsilon}{4}$. The probability Step~2 adds no edge
+  inside $R$ is at most $(p/q)^{n\epsilon/4} \le \exp(-\tfrac{n\epsilon}{4\lambda})
+  \le \tfrac1n$. Hence with probability $\ge 1 - \tfrac5n - \tfrac1n$ there is a
+  non-bipartite giant component, and the second statement follows from
+  Theorem~\ref{thm:sparsification}.
+\end{proof}
+
+\begin{proposition}[Lower bound on random error $\geq p^d/(1-p^d)$ {[Remark IV.2]}]
+  \label{prop:random-lower-remark}
+  \uses{def:random-error, def:graph-assignment}
+  \notready
+  For a graph assignment scheme with replication factor $d$,
+  $\tfrac1n\E[|\overline{\alpha^*} - \ones|_2^2] \ge p^d$, because $p^d$ is the
+  probability that a fixed data block is stored only at straggling machines.
+  Theorem~\ref{thm:random-main} therefore implies the variance of $\alpha^*$
+  shrinks exponentially in $d$; for Ramanujan graphs ($\lambda \ge d - 2\sqrt{d-1}$)
+  the bound is tight up to factors in the exponent.
+\end{proposition}
+% TODO: stated as a remark with a one-line justification; the matching lower
+% bound is made precise in Proposition A.3 (\ref{prop:any-lower}).
+
+\chapter{The decoding error under adversarial stragglers}
+
+\begin{proposition}[Adversarial error via singular values {[Proposition V.1]}]
+  \label{prop:adversarial-svd}
+  \uses{def:adversarial-error, def:optimal-decoding}
+  Let $A \in \R^{N \times m}$ be any assignment matrix on $N$ data points in
+  which each data point is replicated exactly $d$ times and each machine holds
+  exactly $\ell$ data points. Let $\sigma_2$ be the second largest singular value
+  of $A$. For any set $S$ of $s$ stragglers there exist decoding coefficients
+  $w = w(S)$ such that
+  \[
+    \tfrac1N|\alpha - \ones|_2^2
+      \le \tfrac1N\Big(\tfrac{\sigma_2}{d}\Big)^2 \tfrac{sm}{m-s}.
+  \]
+\end{proposition}
+\begin{proof}
+  \uses{def:optimal-decoding}
+  For the straggler set $S$ choose $w_i = \tfrac{m}{d(m-s)}$ for $i \notin S$ and
+  $w_i = 0$ for $i \in S$. Then with $z := w - \tfrac1d\ones$,
+  \[
+    |\alpha - \ones|_2^2 = \big|Aw - \tfrac1d A\ones\big|_2^2 = |Az|_2^2,
+  \]
+  using $A\ones = d\ones$ (each column has $\ell$ ones... more precisely
+  $\tfrac1d A\ones = \ones$ since each row of $A$ has $d$ ones). The matrix $A$
+  has top singular value $\sigma_1 = \sqrt{\ell d}$ with top right singular vector
+  $\ones/\sqrt m$ (since $A^TA$ has top eigenvector $\ones/\sqrt m$ and top
+  eigenvalue $\ell d$). Because $z \perp \ones$ and
+  $|z|_2^2 = \tfrac1{d^2}\big(s + (m-s)\tfrac{s^2}{(m-s)^2}\big)
+   = \tfrac{ms}{(m-s)d^2}$, we get
+  \[
+    |Az|_2^2 \le \sigma_2^2|z|_2^2 \le \Big(\tfrac{\sigma_2}{d}\Big)^2\tfrac{sm}{m-s},
+  \]
+  as desired.
+\end{proof}
+
+\begin{corollary}[Adversarial error for graph schemes {[Corollary V.2]}]
+  \label{cor:adversarial-graph}
+  \uses{prop:adversarial-svd, def:graph-assignment, def:spectral-expander, def:adversarial-error}
+  Let $A$ be a graph assignment scheme for a $d$-regular graph $G$ with spectral
+  expansion $\lambda$. For any set of $\lfloor pm\rfloor$ stragglers there exist
+  decoding coefficients $w$ with
+  \[
+    \tfrac1n|\alpha - \ones|_2^2 \le \tfrac{2d-\lambda}{2d}\cdot\tfrac{p}{1-p}.
+  \]
+\end{corollary}
+\begin{proof}
+  \uses{prop:adversarial-svd, def:spectral-expander}
+  With $\mathcal{A}(G)$ the adjacency matrix, $\lambda_1(\mathcal{A}(G)) = d$ and
+  $\lambda_2(\mathcal{A}(G)) = d - \lambda$. Since each column of $A$ has exactly
+  two ones, $A^TA = \mathcal{A}(G) + dI$, so
+  $\sigma_2(A) = \sqrt{\lambda_2(A^TA)} = \sqrt{2d - \lambda}$. Applying
+  Proposition~\ref{prop:adversarial-svd} with $s = \lfloor pm\rfloor$ and
+  $\sigma_2^2 = 2d - \lambda$,
+  \[
+    \tfrac1n|\alpha - \ones|_2^2
+      \le \tfrac1n\,\tfrac{2d-\lambda}{d^2}\,\tfrac{p}{1-p}\,m
+      = \tfrac{2d-\lambda}{2d}\cdot\tfrac{p}{1-p},
+  \]
+  using $d = 2m/n$.
+\end{proof}
+
+\begin{corollary}[Adversarial error for good expanders {[Corollary V.3]}]
+  \label{cor:adversarial-expander}
+  \uses{cor:adversarial-graph}
+  Let $A$ be a graph assignment scheme for a $d$-regular graph $G$ with spectral
+  gap $\lambda = d - o(d)$. For any set of $\lfloor pm\rfloor$ stragglers there
+  exist decoding coefficients $w$ with
+  \[
+    \tfrac1n|\alpha - \ones|_2^2 \le \tfrac{1+o(1)}{2}\cdot\tfrac{p}{1-p}.
+  \]
+\end{corollary}
+\begin{proof}
+  \uses{cor:adversarial-graph}
+  Plugging $\lambda = d - o(d)$ into Corollary~\ref{cor:adversarial-graph} gives
+  $\tfrac{2d-\lambda}{2d}\cdot\tfrac{p}{1-p} = \tfrac{1+o(1)}{2}\cdot\tfrac{p}{1-p}$.
+\end{proof}
+
+\begin{proposition}[Tightness of the adversarial bound {[Remark V.4]}]
+  \label{prop:adversarial-tight}
+  \uses{def:adversarial-error, def:graph-assignment}
+  For any graph assignment scheme with $\lfloor pm\rfloor$ stragglers and
+  replication factor $d$, the stragglers can be chosen so that at least
+  $\tfrac{mp}{d}$ data blocks are held only at straggling machines, whence for
+  any decoding coefficients, $\tfrac1n|\alpha - \ones|_2^2 \ge \tfrac{mp}{dn}
+  = \tfrac{p}{2}$, using $nd = 2m$.
+\end{proposition}
+\begin{proof}
+  \uses{def:adversarial-error, def:graph-assignment}
+  Choosing the $\lfloor pm\rfloor$ straggling edges greedily leaves at least
+  $\tfrac{mp}{d}$ vertices (blocks) with no incident non-straggling edge; for
+  such a block $i$, no choice of $w$ supported on non-straggling machines can make
+  $\alpha_i$ nonzero, so $\alpha_i = 0$ contributes $1$ to $|\alpha - \ones|_2^2$.
+  Hence $|\alpha - \ones|_2^2 \ge \tfrac{mp}{d}$ and dividing by $n$ with
+  $nd = 2m$ gives the bound.
+\end{proof}
+
+\chapter{Convergence with random stragglers}
+
+\begin{definition}[GCOD: gradient coding with optimal decoding {[Algorithm 2]}]
+  \label{alg:gcod}
+  \uses{def:graph-assignment, def:optimal-decoding}
+  Algorithm GCOD$(A, p, \theta_0, \gamma, \{f_i\}, k)$: in the distribution
+  phase draw a uniform permutation $\rho \sim \mathrm{Uniform}(\mathcal{S}_n)$ and
+  send $f_{\rho(i)}$ to all machines $j$ with $A_{ij} \neq 0$. In the computation
+  phase, for $t = 1,\dots,k$: the server sends $x_{t-1}$; each machine $j$
+  straggles with $B_j \sim \mathrm{Bernoulli}(p)$ and, if not straggling, returns
+  $g_j = \sum_i A_{ij}\nabla f_{\rho(i)}(\theta_{t-1})$; the server computes
+  $w^* \in \arg\min_{w :\ w_j = 0 \text{ if } B_j = 0}|Aw - \ones|_2$ and updates
+  $\theta_t = \theta_{t-1} - \gamma\sum_{j : B_j = 1} w^*_j g_j$.
+\end{definition}
+
+\begin{definition}[SGD-ALG: stochastically equivalent SGD {[Algorithm 3]}]
+  \label{alg:sgd-alg}
+  \uses{alg:gcod, def:alpha-pseudoinverse, def:unbiased}
+  Algorithm SGD-ALG$(P_\beta, \theta_0, \gamma, \{f_i\}, k)$: draw a uniform
+  permutation $\rho$; for $t = 1,\dots,k$, draw $\beta \sim P_\beta$ and update
+  $\theta_t = \theta_{t-1} - \gamma\sum_i \beta_i \nabla f_{\rho(i)}(\theta_{t-1})$.
+  For an unbiased scheme with $\alpha^* = A(p)(A(p)^TA(p))^{\dagger}A(p)^T\ones$
+  (Definition~\ref{def:alpha-pseudoinverse}) and $P_{\overline{\alpha^*}}$ the
+  distribution of the normalized $\overline{\alpha^*}$, the algorithm
+  GCOD$(A,p,x_0,\gamma,\{f_i\},k)$ is stochastically equivalent to
+  SGD-ALG$(P_{\overline{\alpha^*}}, x_0, \gamma\E[\alpha_1], \{f_i\}, k)$.
+\end{definition}
+
+\begin{proposition}[Convergence of SGD-ALG {[Proposition VI.1]}]
+  \label{prop:convergence-random}
+  \uses{alg:sgd-alg, def:convexity, lem:claim-E3, lem:claim-E4}
+  Let $f = \sum_{i=1}^n f_i$ be $\mu$-strongly convex with $L$-Lipschitz
+  gradient, each $f_i$ convex with $L'$-Lipschitz gradient, and let $x^*$ be the
+  minimizer. Run SGD-ALG$(P_\beta, x_0, \gamma, \{f_i\}, k)$ from $x_0$ for $k$
+  iterations with step size $\gamma \le \tfrac{1}{sL'+L}$ and a distribution
+  $P_\beta$ with $\E[\beta] = \ones$. Let
+  $\sigma^2 = \sum_i|\nabla f_i(x^*)|_2^2$,
+  $r = \tfrac1n\E[|\beta - \ones|_2^2]$, and
+  $s = |\E[(\beta - \ones)(\beta - \ones)^T]|_2$. Then
+  \[
+    \E[|x_k - x^*|_2^2]
+      \le (1 - 2\gamma\mu(1 - \gamma(sL'+L)))^k |x_0 - x^*|_2^2
+        + \frac{\gamma r(1 + \tfrac1{n-1})\sigma^2}{\mu(1 - \gamma(sL'+L))},
+  \]
+  the expectation being over $\rho$ and $\{\beta^{(j)} : j < k\}$.
+\end{proposition}
+\begin{proof}
+  \uses{lem:claim-E3, lem:claim-E4, def:convexity, lem:trace-cyclic, lem:trace-psd, lem:cocoercivity}
+  Write $g_i(x) = \nabla f_i(x)$, let $G(x)$ be the matrix with $i$th column
+  $g_i(x)$, and $y_k = x_k - x^*$. With $\rho$ uniform and $\beta \sim P_\beta$,
+  expanding the update,
+  \[
+    |y_{k+1}|_2^2 = |y_k|_2^2 - 2\gamma y_k^T G(x_k)\rho^{-1}(\beta)
+      + \gamma^2|G(x_k)\rho^{-1}(\beta)|_2^2 .
+  \]
+  Adding and subtracting $G(x^*)$ inside the last term,
+  $|y_{k+1}|_2^2 \le |y_k|_2^2 - 2\gamma y_k^T G(x_k)\rho^{-1}(\beta)
+   + 2\gamma^2|(G(x_k) - G(x^*))\rho^{-1}(\beta)|_2^2
+   + 2\gamma^2|G(x^*)\rho^{-1}(\beta)|_2^2$.
+  Taking $\E_\beta$ (with $\E[\beta] = \ones$) and using
+  Claim~\ref{lem:claim-E3} for the third term and strong convexity
+  ($y_k^T\nabla f(x_k) \ge \mu|y_k|^2$) plus $\gamma \le \tfrac1{sL'+L}$,
+  \[
+    \E_{\beta^{(k)}}[|y_{k+1}|^2 \mid \rho]
+      \le |y_k|^2(1 - 2\gamma\mu(1 - \gamma(sL'+L)))
+        + 2\gamma^2\E_{\beta^{(k)}}\big[|G(x^*)\rho^{-1}(\beta)|_2^2 \mid \rho\big].
+  \]
+  Bounding the second term in expectation over $\rho$ by
+  Claim~\ref{lem:claim-E4} ($\E_{\rho,\beta}[|G(x^*)\rho^{-1}(\beta)|_2^2]
+  \le r(1+\tfrac1{n-1})\sigma^2$) and recursively applying the contraction,
+  summing the geometric series, yields the proposition.
+\end{proof}
+
+\begin{lemma}[Cross-term bound {[Claim E.3]}]
+  \label{lem:claim-E3}
+  \uses{def:convexity, lem:trace-cyclic, lem:trace-psd, lem:cocoercivity}
+  For any permutation $\rho \in \mathcal{S}_n$, with $G(x)$ as above,
+  \[
+    \E_\beta\big[|(G(x_k) - G(x^*))\rho^{-1}(\beta)|_2^2\big]
+      \le (sL' + L)\, y_k^T\nabla f(x_k).
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{lem:trace-cyclic, lem:trace-psd, lem:cocoercivity, def:convexity}
+  Using $\E[\beta] = \ones$, the cyclic property of trace
+  (Lemma~\ref{lem:trace-cyclic}) and the PSD trace inequality
+  (Lemma~\ref{lem:trace-psd}), with $M = G(x_k) - G(x^*)$,
+  \[
+    \E_\beta[|M\rho^{-1}(\beta)|_2^2]
+      = \Tr\big(\E_\beta[(\rho^{-1}(\beta)-\ones)(\rho^{-1}(\beta)-\ones)^T]\,M^TM\big)
+        + |\nabla f(x_k) - \nabla f(x^*)|_2^2
+      \le s\sum_i|g_i(x_k) - g_i(x^*)|^2 + |\nabla f(x_k) - \nabla f(x^*)|_2^2 .
+  \]
+  By co-coercivity (Lemma~\ref{lem:cocoercivity}) and convexity of the $f_i$,
+  $\sum_i|g_i(x_k) - g_i(x^*)|^2 \le L'\sum_i\langle y_k, g_i(x_k) - g_i(x^*)\rangle
+   = L'\langle y_k, \nabla f(x_k) - \nabla f(x^*)\rangle$, and similarly
+  $|\nabla f(x_k) - \nabla f(x^*)|_2^2 \le L\langle y_k, \nabla f(x_k) -
+  \nabla f(x^*)\rangle$. Since $\nabla f(x^*) = 0$, combining gives the claim.
+\end{proof}
+
+\begin{lemma}[Noise-term bound {[Claim E.4]}]
+  \label{lem:claim-E4}
+  \uses{lem:trace-cyclic}
+  With $\sigma^2 = \sum_i|\nabla f_i(x^*)|_2^2$ and $r,s$ as above,
+  \[
+    \E_{\rho \sim \mathcal{S}_n, \beta}\big[|G(x^*)\rho^{-1}(\beta)|_2^2\big]
+      \le r\Big(1 + \tfrac1{n-1}\Big)\sigma^2 .
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{lem:trace-cyclic}
+  Since $x^*$ is optimal, $G(x^*)\ones = 0$, so
+  $|G(x^*)\rho^{-1}(\beta)|_2^2 = \Tr(\rho^{-1}(\beta)\rho^{-1}(\beta)^T
+   G(x^*)^TG(x^*))$. Because $\rho$ is uniform, the matrix
+  $\E_{\rho,\beta}[\rho^{-1}(\beta)\rho^{-1}(\beta)^T]$ has all diagonal entries
+  equal to $1 + r$ and all off-diagonal entries equal to some $b \ge 1 - \tfrac{r}{n-1}$,
+  hence equals $aI + b\ones\ones^T$ with $a \le r(1 + \tfrac1{n-1})$. Plugging in
+  and using $G(x^*)\ones = 0$ and $\Tr(G(x^*)^TG(x^*)) = \sigma^2$,
+  \[
+    \E[|G(x^*)\rho^{-1}(\beta)|_2^2]
+      = a\Tr(G(x^*)^TG(x^*)) + b|G(x^*)\ones|_2^2
+      \le r\Big(1 + \tfrac1{n-1}\Big)\sigma^2 . \qedhere
+  \]
+\end{proof}
+
+\begin{corollary}[Step size and iteration count {[Corollary VI.2 / E.5]}]
+  \label{cor:stepsize-random}
+  \uses{prop:convergence-random}
+  For any desired accuracy $\epsilon$, choosing
+  $\gamma = \tfrac{\mu\epsilon}{2\mu\epsilon(sL'+L) + 2r(1+\frac1{n-1})\sigma^2}$
+  gives, after
+  \[
+    k = 2\log(2\epsilon_0/\epsilon)\Big(\tfrac{sL'}{\mu} + \tfrac{L}{\mu}
+      + \tfrac{r(1+\frac1{n-1})\sigma^2}{\mu^2\epsilon}\Big)
+  \]
+  steps, $\E[|x_k - x^*|_2^2] \le \epsilon$, where $\epsilon_0 = |x_0 - x^*|^2$.
+\end{corollary}
+\begin{proof}
+  \uses{prop:convergence-random}
+  Plug $\gamma$ into the convergence bound of
+  Proposition~\ref{prop:convergence-random}. The choice makes the noise summand
+  $\le \tfrac\epsilon2$; requiring the contraction term $\le \tfrac\epsilon2$
+  needs $k \ge \tfrac{\log(\epsilon/2\epsilon_0)}{\log(1 - 2\gamma\mu(1-\gamma(sL'+L)))}$.
+  Since $\gamma < \tfrac1{2(sL'+L)} \le \tfrac1{2\mu}$, we have
+  $2\gamma\mu(1-\gamma(sL'+L)) \in (0,1)$; using $\log(1-x) \le -x$ and
+  substituting $\gamma$ bounds the denominator, giving the stated $k$.
+\end{proof}
+
+\begin{proposition}[Convergence of coded GD with graph schemes {[Proposition VI.3]}]
+  \label{prop:convergence-graph}
+  \uses{prop:convergence-random, thm:random-main, alg:gcod, cor:stepsize-random}
+  Let $f = \sum_{i=1}^n f_i$ be $\mu$-strongly convex with $L$-Lipschitz
+  gradient, each $f_i$ convex with $L'$-Lipschitz gradient, $\theta^*$ the
+  minimizer, and $\sigma^2 = \sum_i|\nabla f_i(\theta^*)|_2^2$. Perform gradient
+  coding with optimal decoding (Algorithm~\ref{alg:gcod}) with an assignment
+  matrix for a $d$-regular vertex-transitive graph of spectral gap $d - o(d)$, so
+  $m = \tfrac{nd}{2}$, and machine straggling probability $p$. Then for any
+  accuracy $\epsilon$ there is a step size $\gamma$ such that after
+  \[
+    k = 2\log(\epsilon_0/\epsilon)\Big(\tfrac{L}{\mu}
+      + \log^2(n)p^{2d - o(d)}\tfrac{L'}{\mu}
+      + \tfrac{p^{d-o(d)}\sigma^2}{\mu^2\epsilon}\Big)
+  \]
+  steps, $\E[|\theta_k - \theta^*|_2^2] \le \epsilon$, where
+  $\epsilon_0 = |\theta_0 - \theta^*|^2$.
+\end{proposition}
+\begin{proof}
+  \uses{prop:convergence-random, thm:random-main, cor:stepsize-random}
+  By the stochastic equivalence of Algorithm~\ref{alg:gcod} and
+  Algorithm~\ref{alg:sgd-alg}, apply Corollary~\ref{cor:stepsize-random} with
+  $\beta = \overline{\alpha^*}$. Theorem~\ref{thm:random-main} controls the two
+  statistics: $r = \tfrac1n\E[|\overline{\alpha^*} - \ones|_2^2] = O(p^{d-o(d)})$
+  and $s = |\E[(\overline{\alpha^*} - \ones)(\overline{\alpha^*}-\ones)^T]|_2
+  = O(\log^2(n)p^{2d-o(d)})$. Substituting these into the iteration count of
+  Corollary~\ref{cor:stepsize-random} yields the result.
+\end{proof}
+
+\chapter{Convergence with adversarial stragglers}
+
+\begin{proposition}[Convergence to a noise floor {[Proposition VII.1]}]
+  \label{prop:convergence-adversarial}
+  \uses{def:adversarial-error, def:convexity, lem:adversarial-contraction}
+  Let $f = \sum_i f_i$ be $\mu$-strongly convex with $L$-Lipschitz gradient,
+  each $f_i$ convex with $L'$-Lipschitz gradient, $x^*$ the minimizer, and
+  $\sigma^2 = \sum_i|\nabla f_i(x^*)|_2^2$. Perform gradient descent with
+  $x_{k+1} = x_k - \gamma\sum_i \alpha_i^{(k)}\nabla f_i(x_k)$ where at each
+  iteration $|\alpha^{(k)} - \ones|_2^2 \le r^2$. Let $a = 1 - \tfrac{r\sqrt{L'}}{\sqrt\mu}$
+  and suppose $a > 0$. For any $0 < \epsilon \le 1$, with constant step size
+  $\gamma = \tfrac{\epsilon a\mu}{4(L^2 + 2rLL' + 4r^2(L')^2)}$, after
+  \[
+    k \le \frac{4(1+\epsilon)(L^2 + 2rLL' + 4r^2(L')^2)
+      \log\big(\tfrac{2a^2\mu^2|x_0 - x_*|_2^2}{(1+\epsilon)^2 r^2\sigma^2}\big)}
+      {3a^2\mu^2\epsilon^2}
+  \]
+  iterations, $|x_k - x_*|_2 \le (1 + \epsilon)\tfrac{r\sigma}{a\mu}$.
+\end{proposition}
+\begin{proof}
+  \uses{lem:adversarial-contraction, def:convexity}
+  Define $y_t = x_t - x^*$. Assume the convergence criterion has not been met,
+  i.e. $|y_t|_2^2 > (1+\epsilon)^2\tfrac{r^2\sigma^2}{a^2\mu^2}$. Using
+  $\gamma L < \tfrac{\epsilon a}{6}$ one gets
+  $|y_t|_2(2\gamma r\sigma)(1 + \gamma L) \le |y_t|_2^2(\tfrac{2\gamma a\mu}{1+\epsilon})(\tfrac{6+\epsilon a}{6})$.
+  Plugging the contraction of Lemma~\ref{lem:adversarial-contraction} and using
+  $a \le 1$, $\epsilon \le 1$,
+  \[
+    |y_{t+1}|_2^2 \le |y_t|_2^2\Big(1 - a\gamma\mu\tfrac{3\epsilon}{2(1+\epsilon)}\Big)
+      + 4\gamma^2 r^2\sigma^2 .
+  \]
+  Iterating $k$ times, either the criterion is met or
+  $|y_k|_2^2 \le |y_0|_2^2(1 - a\gamma\mu\tfrac{3\epsilon}{2(1+\epsilon)})^k
+   + \tfrac{4\gamma^2 r^2\sigma^2}{a\mu\frac{3\epsilon}{2(1+\epsilon)}}$.
+  Plugging the value of $\gamma$ shows the second (noise) term equals
+  $\tfrac12(1+\epsilon)^2\tfrac{r^2\sigma^2}{a^2\mu^2}$, and for $k$ at least the
+  stated bound the first term is $\le \tfrac12(1+\epsilon)^2\tfrac{r^2\sigma^2}{a^2\mu^2}$,
+  giving $|x_k - x_*|_2 \le (1+\epsilon)\tfrac{r\sigma}{a\mu}$.
+\end{proof}
+
+\begin{lemma}[Per-step contraction {[Lemma F.1]}]
+  \label{lem:adversarial-contraction}
+  \uses{def:convexity, def:adversarial-error, lem:claim-F2, lem:claim-F3, lem:claim-F4}
+  In the setting of Proposition~\ref{prop:convergence-adversarial}, for any step
+  size $\gamma$,
+  \[
+    |x_{k+1} - x^*|_2^2 \le |x_k - x^*|_2^2\Big(1 - \big(2 - \tfrac{\gamma(L^2 + 2rLL' + 4r^2(L')^2)}{a\mu}\big)a\gamma\mu\Big)
+      + |x_k - x^*|_2(2\gamma r\sigma)(1 + \gamma L) + 4\gamma^2 r^2\sigma^2 .
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{lem:claim-F2, lem:claim-F3, lem:claim-F4, def:convexity}
+  Let $g_i(x) = \nabla f_i(x)$, $G = G(x_k)$ the matrix with $i$th column
+  $g_i(x_k)$, $y_k = x_k - x^*$. The gradient step gives
+  $|y_{k+1}|_2^2 \le \max_{\beta : |\beta|_2 \le r}|y_k - \gamma G(\ones + \beta)|_2^2$
+  (since $\alpha^{(k)} = \ones + \beta$ with $|\beta|_2 \le r$). By Lagrange
+  multipliers the maximizing $\beta_*$ satisfies
+  $\beta_* = \gamma(\lambda I + \gamma^2 G^TG)^{-1}G^T(y_k - \gamma G\ones)$ for
+  some negative $\lambda$ with $|\beta_*|_2 = r$, leading to
+  \[
+    \max_{\beta : |\beta|_2 \le r}|y_k - \gamma G(\ones+\beta)|_2^2
+      \le |y_k - \gamma G\ones|_2^2 + 2\gamma^2 r^2\sigma_1(G^TG)
+        + 2\gamma r|G^T(y_k - \gamma G\ones)|_2 .
+  \]
+  Bounding the three quantities by Claims~\ref{lem:claim-F2},
+  \ref{lem:claim-F3}, \ref{lem:claim-F4}, expanding
+  $|y_k - \gamma G\ones|_2^2 = |y_k|^2 - 2\gamma y_k^T G\ones + \gamma^2|G\ones|_2^2$,
+  using $a = 1 - \tfrac{r\sqrt{L'}}{\sqrt\mu}$ so that
+  $-1 + \tfrac{r\sqrt{L'}|y_k|_2}{\sqrt{y_k^T G\ones}} \le -a$ (from
+  $y_k^T G\ones \ge \mu|y_k|^2$), collects to the stated contraction.
+\end{proof}
+
+\begin{lemma}[Bound on $|G^TG\ones|$ {[Claim F.2]}]
+  \label{lem:claim-F2}
+  \uses{def:convexity}
+  With $G = G(x_k)$, $|G^TG\ones|_2 \le LL'|y_k|_2^2 + L\sigma|y_k|_2$.
+\end{lemma}
+\begin{proof}
+  \uses{def:convexity}
+  Split $|G^TG\ones|_2 \le |(G(x_k) - G(x_*))^TG\ones|_2 + |G(x_*)^TG\ones|_2$.
+  For the first,
+  $|(G(x_k) - G(x_*))^TG\ones|_2^2 = \sum_i((g_i(x_k) - g_i(x_*))^T G\ones)^2
+   \le |G\ones|_2^2\sum_i|g_i(x_k) - g_i(x_*)|_2^2 \le |G\ones|_2^2|y_k|_2^2(L')^2
+   \le L^2(L')^2|y_k|_2^4$, using $|G\ones|_2 = |\nabla f(x_k)|_2 \le L|y_k|_2$ and
+  $L'$-Lipschitzness of each $g_i$. For the second,
+  $|G(x_*)^TG\ones|_2^2 = \sum_i(g_i(x_*)^TG\ones)^2 \le |G\ones|_2^2\sigma^2
+   \le L^2|y_k|_2^2\sigma^2$. Taking square roots and summing gives the claim.
+\end{proof}
+
+\begin{lemma}[Bound on $|G^T(y_k - \gamma G\ones)|$ {[Claim F.3]}]
+  \label{lem:claim-F3}
+  \uses{def:convexity, lem:claim-F2}
+  With $G = G(x_k)$,
+  \[
+    |G^T(y_k - \gamma G\ones)|_2 \le |y_k|_2\big(\sigma + \sqrt{L'\ones^TG^Ty_k}\big)
+      + \gamma\big(LL'|y_k|_2^2 + L\sigma|y_k|_2\big).
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{def:convexity, lem:claim-F2}
+  $|G^T(y_k - \gamma G\ones)|_2 \le |(G(x_k) - G(x_*))^Ty_k|_2
+   + |G(x_*)^Ty_k|_2 + \gamma|G^TG\ones|_2$. Now
+  $|G(x_*)^Ty_k|_2^2 \le |G(x_*)|_2^2|y_k|_2^2 \le \Tr(G(x_*)G(x_*)^T)|y_k|_2^2
+   = \sigma^2|y_k|_2^2$, and
+  $|(G(x_k)-G(x_*))^Ty_k|_2^2 = \sum_i((g_i(x_k) - g_i(x_*))^Ty_k)^2
+   \le L'|y_k|_2^2\sum_i(g_i(x_k) - g_i(x_*))^Ty_k = |y_k|_2^2(L'\ones^TG^Ty_k)$,
+  using convexity of each $f_i$ and $\sum_i g_i(x_*) = 0$. Combining with
+  Claim~\ref{lem:claim-F2} gives the bound.
+\end{proof}
+
+\begin{lemma}[Bound on $\sigma_1(G^TG)$ {[Claim F.4]}]
+  \label{lem:claim-F4}
+  \uses{def:convexity}
+  With $G = G(x_k)$, $\sigma_1(G^TG) \le 2|y_k|_2^2(L')^2 + 2\sigma^2$.
+\end{lemma}
+\begin{proof}
+  \uses{def:convexity}
+  $\sigma_1(G^TG) \le \Tr(G^TG) = \sum_i|g_i|_2^2
+   \le 2\sum_i|g_i(x_k) - g_i(x_*)|_2^2 + 2\sum_i|g_i(x_*)|_2^2
+   \le 2|y_k|_2^2(L')^2 + 2\sigma^2$, using $L'$-Lipschitzness and the definition
+  of $\sigma^2$.
+\end{proof}
+
+\begin{corollary}[Noise floor with $\epsilon = 1$ {[Corollary VII.2]}]
+  \label{cor:noise-floor}
+  \uses{prop:convergence-adversarial, cor:adversarial-expander}
+  Let $f, f_i, x^*, \sigma^2$ be as in
+  Proposition~\ref{prop:convergence-adversarial}. Perform
+  $\theta_{k+1} = \theta_k - \gamma\sum_i \alpha_i^{(k)}\nabla f_i$ with
+  $|\alpha^{(k)} - \ones|_2^2 \le r$ at each iteration and assume
+  $\mu > rL'$. Then there is a step size $\gamma$ such that after
+  \[
+    k \le \frac{3(L + 2\sqrt r L')^2\log\big(\tfrac{\mu^2\epsilon_0}{2r\sigma^2}\big)}
+      {(\mu - \sqrt{\mu rL'})^2}
+  \]
+  steps, $|\theta_k - \theta^*|_2^2 \le \tfrac{4r\sigma^2}{(\mu - \sqrt{\mu rL'})^2}$,
+  where $\epsilon_0 = |\theta_0 - \theta^*|^2$. Combining with the adversarial
+  error bound of Corollary~\ref{cor:adversarial-expander}, coded gradient descent
+  converges to a noise floor of
+  $\tfrac{4\sigma^2 n(2d-\lambda)p}{\mu(\sqrt{2d(1-p)} - \sqrt{n(2d-\lambda)pL'})^2}$.
+\end{corollary}
+\begin{proof}
+  \uses{prop:convergence-adversarial, cor:adversarial-expander}
+  Set $\epsilon = 1$ in Proposition~\ref{prop:convergence-adversarial} and
+  substitute $r$ for $r^2$ (renaming the adversarial-error bound); the
+  $(1+\epsilon)\tfrac{r\sigma}{a\mu}$ floor squares to the stated value with
+  $a = 1 - \sqrt{rL'/\mu}$. Plugging Corollary~\ref{cor:adversarial-expander}'s
+  bound $\tfrac1n|\alpha^* - \ones|_2^2 \le \tfrac{2d-\lambda}{2d}\tfrac{p}{1-p}$
+  for the adversarial decoding error gives the explicit noise floor.
+\end{proof}
+
+\chapter{Appendix A: Lower bounds for random stragglers}
+
+\begin{proposition}[Fixed-decoding lower bound {[Proposition A.1]}]
+  \label{prop:fixed-lower}
+  \uses{def:unbiased, def:replication-factor, lem:trace-cyclic}
+  Consider any assignment scheme $A$ with $m$ machines, $n$ data blocks, and
+  $n \le \nnz(A) \le dn$. Suppose a fixed decoding scheme is used that yields an
+  unbiased gradient: (1) for some $\hat w$, $w_j = \hat w_j$ if machine $j$ does
+  not straggle and $0$ otherwise; (2) $\E[\alpha] = c\ones$. Then
+  \[
+    \tfrac1n\E[|\overline{\alpha} - \ones|_2^2] \ge \tfrac{p}{d(1-p)},
+    \qquad
+    |\E[(\overline{\alpha} - \ones)(\overline{\alpha} - \ones)^T]|_2 \ge \tfrac{n}{m}\tfrac{p}{1-p}.
+  \]
+  (For graph schemes $m = dn/2$, so the second bound is
+  $\ge \tfrac{2p}{d(1-p)}$.)
+\end{proposition}
+\begin{proof}
+  \uses{lem:trace-cyclic, def:unbiased}
+  Assume WLOG $\hat w = \ones$ (scale columns of $A$ by $\hat w_j$) and $c = 1$.
+  By independence of machine failures,
+  \[
+    \E[(\alpha - \E[\alpha])(\alpha - \E[\alpha])^T]
+      = A\,\Cov(w)\,A^T = A(p(1-p)I)A^T = p(1-p)AA^T .
+  \]
+  By the cyclic property of trace (Lemma~\ref{lem:trace-cyclic}),
+  $\E[|\alpha - \ones|_2^2] = \Tr(p(1-p)AA^T) = p(1-p)|A|_F^2$. Now
+  $\ones^TA\ones = \ones^TA\tfrac{\E[w]}{1-p}\cdot(1-p) = \tfrac{\ones^T\E[\alpha]}{1-p}(1-p)\cdot\!\ldots$
+  more directly $\ones^TA\hat w = \tfrac{\ones^T\E[\alpha]}{1-p} = \tfrac{n}{1-p}$,
+  so to minimize $|A|_F$ under this constraint all nonzero entries equal
+  $\tfrac1{d(1-p)}$, giving $|A|_F^2 = \tfrac{n}{d(1-p)^2}$ and
+  $\E[|\alpha - \ones|_2^2] \ge \tfrac{pn}{d(1-p)}$. Also
+  $|AA^T|_2 \ge \tfrac1m\ones^TA^TA\ones = \tfrac1m\tfrac{n}{(1-p)^2}$, and since
+  $\Cov(\alpha) = p(1-p)AA^T$ the covariance bound follows.
+\end{proof}
+
+\begin{proposition}[Lower bound for any decoding algorithm {[Proposition A.3]}]
+  \label{prop:any-lower}
+  \uses{def:unbiased, def:replication-factor}
+  Consider any assignment scheme $A$ with $m$ machines, $n$ data blocks and
+  $n \le \nnz(A) \le dn$. Suppose a decoding algorithm yields an unbiased
+  gradient, $\E[\alpha] = c\ones$. Then
+  \[
+    \tfrac1n\E[|\overline{\alpha} - \ones|_2^2] \ge \tfrac{p^d}{1 - p^d}.
+  \]
+\end{proposition}
+\begin{proof}
+  \uses{def:unbiased}
+  WLOG scale so $\E[\alpha] = \ones$. For each block $i$ with replication factor
+  $d_i$, with probability at least $p^{d_i}$ all machines holding block $i$
+  straggle, forcing $\alpha_i = 0$. Since $\E[\alpha_i] = 1$,
+  \[
+    \E[(\alpha_i - 1)^2] \ge p^{d_i} + (1 - p^{d_i})\Big(\tfrac1{1 - p^{d_i}} - 1\Big)^2
+      = \tfrac{p^{d_i}}{1 - p^{d_i}} .
+  \]
+  Hence $\sum_i \E[\alpha_i] \ge \sum_i \tfrac{p^{d_i}}{1-p^{d_i}}
+  = n - \sum_i\tfrac1{1-p^{d_i}}$. Subject to $\sum_i d_i \le dn$, this is
+  minimized when all $d_i = d$, giving
+  $\tfrac1n\E[|\overline\alpha - \ones|_2^2] \ge \tfrac{p^d}{1-p^d}$.
+\end{proof}
+
+\begin{proposition}[Lower bound robustness {[Remark A.4]}]
+  \label{prop:lower-robust}
+  \uses{prop:any-lower}
+  \notready
+  The lower bound of Proposition~\ref{prop:any-lower} holds even if the
+  distributed algorithm uses a more complicated coding strategy than the linear
+  scheme of the introduction, including non-linear or coordinate-wise coding of
+  the gradients (e.g. multiplying gradients by a matrix).
+\end{proposition}
+% TODO: stated as a remark; the argument is that the per-block "all machines
+% straggle" event forces a zero contribution regardless of decoding. Make precise.
+
+\chapter{Appendix B: Convergence with biased schemes}
+
+\begin{proposition}[Debiasing a biased scheme {[Proposition B.1]}]
+  \label{prop:debias}
+  \uses{def:unbiased, def:random-error, def:replication-factor}
+  Suppose there is an assignment matrix $A$ with computational load $\ell$ on
+  $m$ machines and $N$ data blocks, and a decoding strategy $w$ with $\alpha$
+  such that $\E[|\alpha - \ones|_2^2] \le \epsilon N$. Then there exists an
+  assignment matrix $\hat A$ with computational load at most $2\ell$ on $m$
+  machines and $N$ data blocks, and a decoding strategy $\hat w$ with $\hat\alpha$
+  such that
+  \[
+    \E[|\hat\alpha - \ones|_2^2] \le \tfrac{2\epsilon}{(1 - \sqrt{2\epsilon})^2}N
+    \qquad\text{and}\qquad \E[\hat\alpha] = \ones .
+  \]
+\end{proposition}
+\begin{proof}
+  \uses{def:unbiased, def:random-error}
+  Let $\delta = 1 - \sqrt{2\epsilon}$ and $S = \{i \in [N] : \E[\alpha_i] \ge \delta\}$.
+  By $\E[|\alpha - \ones|_2^2] \le \epsilon N$ and Markov-type counting,
+  $|S| \ge N(1 - \tfrac{\epsilon}{(1-\delta)^2}) = \tfrac N2$. Let $s = |S|$,
+  $t = N - s$, WLOG $S = [s]$. Let $A_S$ be the rows of $A$ in $S$, $D$ the
+  $s \times s$ diagonal matrix with $D_{ii} = \tfrac1{\E[A_S w]_i}$, and define
+  $\hat A := [(DA_S)^T \mid (DA_S)^T[:,1{:}t]]^T$, i.e. $DA_S$ with its first $t$
+  rows duplicated, so $\E[\hat A w] = \ones$. The replication factor of $\hat A$
+  is at most $d$, but duplication at most doubles the load to $2\ell$. For each
+  straggler pattern set $\hat w = w$, $\hat\alpha = \hat A\hat w$. For $i \in S$,
+  \[
+    \E[(\hat\alpha_i - 1)^2]
+      = \Big(\tfrac1{\E[\alpha_i]}\Big)^2\E[(\alpha_i - \E[\alpha_i])^2]
+      \le \tfrac1{\delta^2}\E[(\alpha_i - 1)^2],
+  \]
+  so $\sum_{i\in[N]}\E[(\hat\alpha_i - 1)^2] \le 2\tfrac1{\delta^2}N\epsilon
+  = \tfrac{2\epsilon}{(1-\sqrt{2\epsilon})^2}N$, as desired.
+\end{proof}
+
+\begin{proposition}[Convergence with a debiased scheme {[Proposition B.2]}]
+  \label{prop:convergence-biased}
+  \uses{prop:debias, prop:convergence-random, def:convexity}
+  Let $f = \sum_{i=1}^N f_i$ be $\mu$-strongly convex with $L$-Lipschitz
+  gradient, each $f_i$ convex with $L'$-Lipschitz gradient, $\theta^*$ the
+  minimizer, $\sigma^2 = \sum_i|\nabla f_i(\theta^*)|_2^2$. Suppose a possibly
+  biased coding scheme with computational load $\ell$ has
+  $\tfrac1N\E[|\alpha - \ones|_2^2] \le \zeta$ for some $\zeta \le \tfrac14$.
+  Debias it via Proposition~\ref{prop:debias} (load $\le 2\ell$) and run gradient
+  coding as in Algorithm~\ref{alg:gcod} with $w$ from the original scheme, with
+  straggling probability $p$. Then for any $\epsilon$ there is a step size
+  $\gamma$ such that after
+  \[
+    k = 2\log(\epsilon/\epsilon_0)\Big(\tfrac{L}{\mu} + 8n\zeta\tfrac{L'}{\mu}
+      + \tfrac{\zeta\sigma^2}{\mu^2\epsilon}\Big)
+  \]
+  steps, $\E[|\theta_k - \theta^*|_2^2] \le \epsilon$, where
+  $\epsilon_0 = |\theta_0 - \theta^*|^2$.
+\end{proposition}
+\begin{proof}
+  \uses{prop:debias, prop:convergence-random}
+  Apply Proposition~\ref{prop:debias} to obtain an unbiased scheme with
+  $\tfrac1N\E[|\hat\alpha - \ones|_2^2] = O(\zeta)$ and $\E[\hat\alpha] = \ones$,
+  hence $r = O(\zeta)$ and $s = O(n\zeta)$ in the notation of
+  Proposition~\ref{prop:convergence-random}. Substituting into the iteration
+  count (Corollary~\ref{cor:stepsize-random}, equivalently
+  Proposition~\ref{prop:convergence-random}) gives the stated $k$.
+\end{proof}

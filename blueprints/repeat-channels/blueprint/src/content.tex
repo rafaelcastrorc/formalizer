@@ -1,0 +1,730 @@
+% Blueprint for "Efficient Near-Optimal Codes for General Repeat Channels"
+%   Francisco Pernice, Ray Li, Mary Wootters (arXiv:2201.12746v2).
+%
+% Two-kind model:
+%   * LEAF nodes  (\mathlibok, no proof): facts already in Mathlib/cslib.
+%   * FULL nodes  (statement + complete proof, no \leanok/\mathlibok): the
+%     paper's novel content, plus folklore/external results the libraries lack
+%     (those external results carry \notready where the paper gives no proof).
+%
+% This file must NOT contain \begin{document}.
+
+\chapter{Preliminaries}
+
+% =====================================================================
+% Settled library prerequisites (Mathlib leaves).
+% =====================================================================
+
+\begin{definition}[Expectation $\mu(\Dcal)$]
+  \label{def:mean}
+  \lean{ProbabilityTheory....}     % TODO: confirm Lean decl name (integral / expectation)
+  \mathlibok
+  For a probability distribution $\Dcal$ over $\Reals$, $\mu(\Dcal) := \E[\Dcal]$
+  denotes its expectation (mean). When $\Dcal$ is clear from context we write
+  $\mu$. (Standard; recalled so later nodes may depend on it.)
+\end{definition}
+
+\begin{definition}[Variance $\sigma^2(\Dcal)$]
+  \label{def:variance}
+  \uses{def:mean}
+  \lean{ProbabilityTheory.variance}   % TODO: confirm exact decl name
+  \mathlibok
+  For a probability distribution $\Dcal$ over $\Reals$,
+  $\sigma^2(\Dcal) := \E\big[(\Dcal-\mu(\Dcal))^2\big]$ is its variance; written
+  $\sigma^2$ when $\Dcal$ is understood.
+\end{definition}
+
+\begin{definition}[Hamming weight]
+  \label{def:hamming-weight}
+  \lean{hammingNorm}                 % TODO: confirm decl name
+  \mathlibok
+  For $x \in \bits^*$, the Hamming weight $\wt(x) \in \Nat$ is the number of ones
+  in $x$.
+\end{definition}
+
+\begin{definition}[Edit distance via insertions and deletions]
+  \label{def:edit-distance}
+  \lean{Nat.levenshtein}             % TODO: confirm decl name (indel edit distance)
+  \mathlibok
+  For $x \in \bits^n$, $b \in \bits$ and an index $j \in [n]$, an
+  \emph{insertion} is the transformation $x \mapsto x_1^j b\, x_{j+1}^n$ and a
+  \emph{deletion} is $x \mapsto x_1^{j-1} x_{j+1}^n$ (Definition 2.8 of the
+  paper). The \emph{edit distance} between $x,y \in \bits^*$ is the minimum
+  number of insertions and/or deletions needed to convert $x$ into $y$.
+\end{definition}
+
+\begin{theorem}[Chebyshev's inequality]
+  \label{thm:chebyshev}
+  \uses{def:mean, def:variance}
+  \lean{ProbabilityTheory.meas_ge_le_variance_div_sq}
+  \mathlibok
+  For a random variable $X$ with finite variance and any $c>0$,
+  $\Prob\big(|X-\E X| \ge c\big) \le \Var[X]/c^2$.
+\end{theorem}
+
+\begin{theorem}[Union bound]
+  \label{thm:union-bound}
+  \lean{MeasureTheory.measure_biUnion_finset_le}   % TODO: confirm decl name
+  \mathlibok
+  For events $A_1,\dots,A_t$, $\Prob\big(\bigcup_i A_i\big) \le \sum_i \Prob(A_i)$.
+\end{theorem}
+
+\begin{definition}[Binomial distribution]
+  \label{def:binomial}
+  \lean{ProbabilityTheory.binomial}  % TODO: confirm decl name
+  \mathlibok
+  $\mathrm{Binomial}(t,p)$ is the distribution of the number of successes in $t$
+  independent trials each succeeding with probability $p$.
+\end{definition}
+
+\begin{theorem}[Chernoff / Hoeffding concentration bound]
+  \label{thm:chernoff}
+  \uses{def:binomial}
+  \lean{...}                         % TODO: confirm decl name (Hoeffding/Chernoff)
+  \mathlibok
+  Let $Z \sim \mathrm{Binomial}(t,p)$. For any $a > p\,t$ there is a constant
+  $c>0$ with $\Prob(Z \ge a) \le e^{-c\,t}$; in particular, a $\mathrm{Binomial}(t,p)$
+  exceeds $\tfrac{a}{t}\cdot t$ for $a/t > p$ only with probability $e^{-\Omega(t)}$.
+\end{theorem}
+
+\begin{definition}[Entropy]
+  \label{def:entropy}
+  \lean{...}                         % TODO: confirm decl name (Shannon entropy)
+  \mathlibok
+  For a discrete random variable $X$, $H(X) := -\sum_x \Prob(X=x)\log_2 \Prob(X=x)$
+  is its (base-2) Shannon entropy. All logs in this blueprint are base 2.
+\end{definition}
+
+\begin{definition}[Conditional entropy]
+  \label{def:cond-entropy}
+  \uses{def:entropy}
+  \lean{...}                         % TODO: confirm decl name (conditional entropy)
+  \mathlibok
+  For discrete random variables $X,Y$, $H(X\mid Y) := H(X,Y) - H(Y)$ is the
+  conditional entropy of $X$ given $Y$.
+\end{definition}
+
+\begin{definition}[Mutual information]
+  \label{def:mutual-info}
+  \uses{def:entropy, def:cond-entropy}
+  \lean{...}                         % TODO: confirm decl name (mutual information)
+  \mathlibok
+  For discrete random variables $X,Y$, the mutual information is
+  $\II(X;Y) := H(X) - H(X\mid Y) = H(Y) - H(Y\mid X)$. Conditional mutual
+  information $\II(X;Y\mid Z)$ is defined analogously.
+\end{definition}
+
+\begin{lemma}[Chain rule for entropy / mutual information]
+  \label{lem:entropy-chain-rule}
+  \uses{def:entropy, def:cond-entropy, def:mutual-info}
+  \lean{...}                         % TODO: confirm decl name
+  \mathlibok
+  $H(X,Y) = H(Y) + H(X\mid Y)$, and more generally the chain rule
+  $\II(X;Y,Z) = \II(X;Z) + \II(X;Y\mid Z)$ holds.
+\end{lemma}
+
+\begin{theorem}[Birkhoff's pointwise ergodic theorem]
+  \label{thm:birkhoff}
+  \lean{...}                         % TODO: confirm decl name (ergodic_birkhoffAverage)
+  \mathlibok
+  For an ergodic measure-preserving system and every $f \in L^1$, the time
+  averages converge almost surely:
+  $\lim_{n\to\infty} \tfrac1n \sum_{j=1}^n f(X_j) = \E f(X_1)$ a.s.
+\end{theorem}
+
+% =====================================================================
+% Paper-specific definitions (novel: definition nodes, no proof).
+% =====================================================================
+
+\begin{definition}[Binary communication channel (Def. 2.1)]
+  \label{def:channel}
+  For $\Omega$ a probability space, a \emph{binary communication channel} is a
+  map $\Ch : \Omega \times \bits^* \to \bits^*$. For $x \in \bits^*$ we write
+  $\Ch\,x$ for the random variable $\omega \mapsto \Ch(\omega,x)$. Here
+  $\bits^n$ is the set of bit strings of length $n$ (for $n\in\Nat\cup\{\infty\}$),
+  $\bits^* = \bigcup_{n\in\Nat}\bits^n$, $x_j^k$ denotes the substring of $x$ from
+  index $j$ to $k$ inclusive (and $x_i := x_i^i$), $[n] := \{1,\dots,n\}$,
+  $|x|$ is the length of $x$, $xy$ is concatenation, and $(x)^k$ is the $k$-fold
+  self-concatenation with $(x)^0$ the empty string.
+\end{definition}
+
+\begin{definition}[Square-integrable binary $\Dcal$-repeat channel (Def. 2.2)]
+  \label{def:repeat-channel}
+  \uses{def:channel, def:mean, def:variance}
+  For a probability distribution $\Dcal$ over $\Nat$, let $\Omega = \Nat^\infty$
+  with the infinite product measure $\Dcal^\infty$. The \emph{binary
+  $\Dcal$-repeat channel} is
+  \[
+    \RC_\Dcal(\omega,x) = (x_1)^{\omega_1}(x_2)^{\omega_2}\cdots(x_n)^{\omega_n}
+    \qquad (x \in \bits^n),
+  \]
+  i.e.\ the $i$-th input bit is repeated $\omega_i \sim \Dcal$ times,
+  independently. It is \emph{square-integrable} if $\mu(\Dcal)<\infty$ and
+  $\sigma^2(\Dcal)<\infty$. The origin (input index) of the $j$-th output bit is
+  well defined as $\min\{i \ge 1 : \sum_{k=1}^i \omega_k \ge j\}$. Special cases:
+  the binary deletion channel ($\Dcal=\mathrm{Bernoulli}$), the Poisson repeat
+  channel ($\Dcal=\mathrm{Poisson}$), and sticky channels.
+\end{definition}
+
+\begin{definition}[Code and rate (Def. 2.3, part 1)]
+  \label{def:code}
+  \uses{def:channel}
+  A \emph{code} is a family $\Ccal = \{\Ccal_n\}_{n\ge1}$ of subsets
+  $\Ccal_n \subseteq \bits^n$; its \emph{rate} is $R_n := \tfrac1n \log|\Ccal_n|$,
+  and $R = R(\Ccal) := \lim_{n\to\infty} R_n$.
+\end{definition}
+
+\begin{definition}[Encoder, decoder, soundness (Def. 2.3, part 2)]
+  \label{def:sound}
+  \uses{def:code, def:channel}
+  An \emph{encoding algorithm} for $\Ccal$ is a family of maps
+  $\Enc : \bits^{nR_n} \to \Ccal_n$, and a \emph{decoding algorithm} is a family
+  $\Dec : \bits^* \to \bits^{nR_n}$. The code $\Ccal$ is \emph{sound} with respect
+  to a channel $\Ch$ if there exist $\Enc,\Dec$ such that
+  $\Prob\big(\Dec(\Ch\,\Enc(X)) \ne X\big) \to 0$ as $n\to\infty$, where $X$ is
+  uniform on $\bits^{nR_n}$.
+\end{definition}
+
+\begin{definition}[Capacity (Def. 2.4)]
+  \label{def:capacity}
+  \uses{def:sound}
+  Fix a channel $\Ch$ and let $\mathcal{S}$ be the collection of all codes sound
+  with respect to $\Ch$. The \emph{capacity} of $\Ch$ is
+  $\Cap(\Ch) := \sup_{\Ccal\in\mathcal{S}} R(\Ccal)$.
+\end{definition}
+
+\begin{definition}[Trimming repeat channel (Def. 2.5)]
+  \label{def:trim}
+  \uses{def:repeat-channel}
+  Let $\TRIM$ be the deterministic channel acting on $x\in\bits^n$ by deleting
+  the longest all-zero prefix and suffix:
+  \[
+    \TRIM\,x = x_{\min\{i\in[n]:x_i=1\}}^{\max\{i\in[n]:x_i=1\}}
+  \]
+  (the empty string if $x$ is all zeros). The \emph{trimming $\Dcal$-repeat
+  channel} is the composition $\TRC_\Dcal := \TRIM \circ \RC_\Dcal$.
+\end{definition}
+
+\begin{definition}[Stationary ergodic process (Def. 2.6)]
+  \label{def:stationary-ergodic}
+  \uses{thm:birkhoff}
+  A stochastic process $\{X_j\}_{j\ge1}$ is \emph{stationary} if for every
+  $j,N\in\Nat$, $(X_1,\dots,X_N) \overset{\Dcal}{=} (X_{j+1},\dots,X_{j+N})$. It
+  is \emph{stationary ergodic} if, in addition, Birkhoff's pointwise ergodic
+  theorem (Theorem~\ref{thm:birkhoff}) holds: for every $f\in L^1$, almost surely
+  $\E f(X_1) = \lim_{n\to\infty}\tfrac1n\sum_{j=1}^n f(X_j)$.
+\end{definition}
+
+% =====================================================================
+% External cited results that the paper builds on (statements only).
+% =====================================================================
+
+\begin{theorem}[Generalized Shannon's Theorem, Dobrushin (Thm. 2.7)]
+  \label{thm:gen-shannon}
+  \uses{def:channel, def:capacity, def:mutual-info, def:stationary-ergodic}
+  \notready
+  Consider a channel $\Ch$ that acts independently on each input bit and appends
+  the corresponding outputs, i.e.\ $\Ch\,x \overset{\Dcal}{=}
+  (\Ch\,x_1)(\Ch\,x_2)\cdots(\Ch\,x_n)$ for $x\in\bits^n$, and suppose
+  $\E|\Ch\,b|<\infty$ for $b\in\bits$. Then
+  \[
+    \Cap(\Ch) = \lim_{n\to\infty}\frac1n \sup_{X^n} \II(X^n;Y^n),
+  \]
+  the supremum over random variables $X^n$ supported on $\bits^n$ with
+  $Y^n=\Ch\,X^n$. Moreover the capacity is attained by a stationary ergodic input
+  process. When the right-hand limit exists for a channel not necessarily
+  satisfying these hypotheses (e.g.\ a trimming repeat channel), it is called the
+  \emph{information rate} of the channel.
+\end{theorem}
+% TODO: external result (Dobrushin 1967); proof not in this paper. Cite or reconstruct.
+
+\begin{theorem}[Worst-case insertion/deletion outer codes, HS17/HRS19 (Thm. 2.9)]
+  \label{thm:outer-code}
+  \uses{def:edit-distance, def:code}
+  \notready
+  For every $\varepsilon,\delta\in(0,1)$ there exists a family of codes $\Ccal_n$
+  of rate $1-\delta-\varepsilon$ over an alphabet $\Sigma$ of size $O_\varepsilon(1)$
+  that can deterministically correct insertion/deletion (worst-case) errors of
+  edit distance at most $\delta n$. Moreover the $\Ccal_n$ have encoding and
+  decoding algorithms running in linear and quasi-linear time, respectively.
+\end{theorem}
+% TODO: external result (Haeupler-Shahrabi 2017; Haeupler-Rubinstein-Shahrabi 2019);
+% proof not in this paper. Cite or reconstruct.
+
+
+\chapter{Main Result: codes for square-integrable repeat channels}
+
+\begin{theorem}[Main theorem (Thm. 3.1)]
+  \label{thm:main}
+  \uses{def:repeat-channel, def:sound, def:capacity}
+  Fix a square-integrable repeat channel $\RC_\Dcal$. For every $\varepsilon>0$
+  there exists a sound code $\Ccal$ with rate $R$ for the $\RC_\Dcal$ such that
+  $R \ge \Cap(\RC_\Dcal)-\varepsilon$, with linear-time encoding and
+  quasi-linear-time decoding. Moreover the decoder has probability of failure
+  $e^{-\Omega(n)}$.
+\end{theorem}
+\begin{proof}
+  \uses{def:construction, lem:trim-rate, prop:approx-balance, thm:outer-code,
+        thm:chebyshev, thm:chernoff, def:binomial, thm:union-bound}
+  Use the construction $(\Enc,\Dec)$ of Definition~\ref{def:construction}, whose
+  rate is $R = km/(\Cap(\RC_\Dcal)-\psi(\varepsilon,\delta,\eta,k,m))$ with
+  $\psi\to0$ as $\varepsilon,\delta,\eta\to0$ and $k,m\to\infty$; by
+  Lemma~\ref{lem:trim-rate} the information rate of $\TRC_\Dcal$ equals
+  $\Cap(\RC_\Dcal)$, and by Proposition~\ref{prop:approx-balance} an
+  approximately balanced inner code of rate $\ge \Cap(\RC_\Dcal)-\varepsilon$
+  exists, so choosing $\varepsilon,\delta,\eta$ small and $m$ large makes
+  $R \ge \Cap(\RC_\Dcal)-\varepsilon$.
+
+  It remains to show the decoder $\Dec$ of Definition~\ref{def:construction}
+  succeeds with high probability for a suitable inner blocklength $m$. There are
+  four sources of error; the first three concern identifying the all-zero buffers
+  $0^b$ ($b=\eta m$), the fourth is inner-code failure.
+  \begin{enumerate}
+    \item For a sent buffer $0^b$, fewer than $\tfrac{b}{2}=\tfrac{\eta m}{2}$
+      zeros survive, so the buffer is not identified as such.
+    \item All ones in an inner codeword are deleted, merging two adjacent buffers.
+    \item A received substring longer than $\tfrac{n}{2}\eta m$ arrives all-zero,
+      creating a spurious buffer.
+    \item For a correctly identified received inner word, the inner code decoding
+      fails.
+  \end{enumerate}
+  Translated to the outer alphabet $\Sigma$, error (1) (merging two codewords
+  into one) costs edit distance $3$ (a deletion plus an insertion of a third
+  letter), error (2) costs $1$ (a deletion), error (3) costs $3$ (one deletion,
+  two insertions), and error (4) costs $2$ (a substitution). If each error type
+  occurs at most $k\delta/9$ times, the total edit distance is at most
+  $\tfrac{k\delta}{9}(3+1+3+2)=k\delta$, which the outer code of
+  Theorem~\ref{thm:outer-code} corrects. So it suffices to show each error type
+  occurs more than $k\delta/9$ times only with vanishing probability.
+
+  \emph{Error (1).} By Chebyshev's inequality (Theorem~\ref{thm:chebyshev}),
+  $\Prob(|\RC_\Dcal\,0^{m\eta}| < \tfrac{\eta}{2}m) = O(m^{-1})$, so for $m$ a
+  large constant this is $<\delta/10$; since these events are independent across
+  the $k-1$ buffers, the number of failing buffers is
+  $\mathrm{Binomial}(k-1,p)$ with $p\le\delta/10$
+  (Definition~\ref{def:binomial}), and by concentration
+  (Theorem~\ref{thm:chernoff}) the probability of more than $k\delta/9$ errors
+  vanishes as $k\to\infty$.
+
+  \emph{Error (2).} By Proposition~\ref{prop:approx-balance} each inner codeword
+  has $\ge\gamma m$ ones for some $\gamma>0$ independent of $m$, so error (2)
+  occurs with probability $d^{\gamma m}$ (where $d=\Prob(\Dcal=0)$); taking $m$
+  large so that $d^{\gamma m}<\delta/10$ and concentrating
+  (Theorem~\ref{thm:chernoff}) gives $>k\delta/9$ errors with vanishing
+  probability.
+
+  \emph{Error (3).} Suppose a received all-zero string $s$ with
+  $|s|\ge\tfrac{n}{2}\eta m$ arises from a codeword $x\in\Ccal_{in}$. Then either
+  (a) some substring $\widetilde s$ of length $>\tfrac14\eta m$ of the input had
+  all its ones deleted, or (b) some substring $\widetilde s$ of length
+  $\le\tfrac14\eta m$ at the input gave rise to an output of length
+  $\ge\tfrac12\mu\eta m$. For (a): by
+  Proposition~\ref{prop:approx-balance} with $\zeta=\tfrac12\mu\eta$ we have
+  $\wt(\widetilde s)\ge\gamma\zeta m$, so the probability such an $s$ exists is
+  $<d^{\gamma\zeta m}$, and by a union bound (Theorem~\ref{thm:union-bound}) over
+  the $O(1)$ choices of initial substring $s$ this is $<\delta/20$ for $m$ large.
+  For (b): if $Z=X_1+\cdots+X_t$ with $t=\tfrac14\eta m$ and $X_j\sim\Dcal$, then
+  by Chebyshev's inequality (Theorem~\ref{thm:chebyshev})
+  \[
+    \Prob\big(Z\ge\tfrac12\mu\eta m\big)
+      \le \Prob\big(|Z-\E Z|\ge\tfrac14\mu\eta m\big)
+      \le \frac{t\sigma^2}{(\tfrac14\mu\eta m)^2}
+      = \frac{\sigma^2}{\tfrac14\mu\eta m}
+      = O(m^{-1}),
+  \]
+  and a union bound (Theorem~\ref{thm:union-bound}) over $O(1)$ initial
+  substrings makes this $\le\delta/20$ for $m$ large. Hence error (3) occurs with
+  probability $\le\delta/10$ per word, and by concentration
+  (Theorem~\ref{thm:chernoff}) more than $k\delta/9$ such errors occur with
+  vanishing probability.
+
+  \emph{Error (4).} The probability of an inner decoding failure goes to $0$ as
+  $m\to\infty$ by soundness of the inner code for the $\TRC_\Dcal$
+  (Proposition~\ref{prop:approx-balance}); for $m$ large this is $<\delta/10$,
+  and as above $>k\delta/9$ failures occur with vanishing probability.
+
+  Finally, the failure probability is $e^{-\Omega(n)}$: the frequency of each
+  error type is a $\mathrm{Binomial}(t,p)$ variable with $t=k-1$ or $t=k$ and
+  $p\le\delta/10$, so by the Chernoff bound (Theorem~\ref{thm:chernoff}) and a
+  union bound (Theorem~\ref{thm:union-bound}) over the four types, the probability
+  of edit distance $>k\delta/9$ is $e^{-\Omega(n)}$. The encoding of
+  Definition~\ref{def:construction} runs in linear time (the outer code runs in
+  linear time and each inner block in $O(1)$ time) and the decoding in
+  quasi-linear time (buffer identification is linear; the outer decoder of
+  Theorem~\ref{thm:outer-code} is quasi-linear).
+\end{proof}
+
+% --------------------------- 3.1 Construction ---------------------------
+
+\begin{definition}[Construction: encoder $\Enc$ and decoder $\Dec$ (Sec. 3.1)]
+  \label{def:construction}
+  \uses{thm:outer-code, prop:approx-balance, def:repeat-channel, def:trim}
+  Fix the inner blocklength $m=O(1)$, set $|\Sigma|=2^m$, and let
+  $\Ccal_{in}\subseteq\bits^m$ be an approximately balanced inner code for the
+  $\TRC_\Dcal$ of rate $R-\varepsilon$ with (not necessarily efficient) encoder
+  $\Encin$ and decoder $\Decin$ (existence by
+  Proposition~\ref{prop:approx-balance}; the $O(1)$-size code is found by
+  exhaustive search in $O(1)$ time). The encoder
+  $\Enc:\bits^{km}\to\bits^n$ acts on $x\in\bits^{km}$ as follows.
+  \begin{enumerate}
+    \item Split $x$ into $x_1,\dots,x_k$ with $|x_j|=m$, viewing each $x_j$ as a
+      letter of $\Sigma$, so $x\in\Sigma^k$. Apply the outer encoder $\Encout$ of
+      Theorem~\ref{thm:outer-code} to get
+      $\widetilde x=\Encout(x)\in\Sigma^{k/(1-\delta-\varepsilon)}$.
+    \item Split $\widetilde x$ into $\widetilde x_1,\dots,\widetilde x_{k'}$ with
+      $k'=k/(1-\delta-\varepsilon)$, view each $\widetilde x_j\in\bits^m$, and
+      encode it with the inner code to get
+      $\widehat x_j=\Encin(\widetilde x_j)\in\bits^{m/(R-\varepsilon)}$ (the inner
+      rate is $R-\varepsilon$ for $m$ large).
+    \item Concatenate the $\widehat x_j$ with all-zero buffers $0^b$, $b=b(m)=\eta m$:
+      \[
+        \Enc(x) = \widehat x_1\,0^b\,\widehat x_2\,0^b\cdots0^b\,\widehat x_{k'},
+      \]
+      where $b$ is a constant independent of $n=k'\cdot(\tfrac{m}{R-\varepsilon}+b)
+      = km/(\Cap(\RC_\Dcal)-\psi(\varepsilon,\delta,\eta,k,m))$ with $\psi\to0$.
+  \end{enumerate}
+  The decoder $\Dec$ on a received string $y\in\bits^*$ reverses the steps:
+  \begin{enumerate}
+    \item Identify buffers: interpret any maximal contiguous block of
+      $\ge\tfrac{n}{2}\eta m$ zeros as a buffer; remove buffers to get the
+      received inner strings $y_1,\dots,y_\ell$.
+    \item Decode each $y_j$ with the inner code:
+      $\widetilde y_j=\Decin(y_j)\in\bits^m$ for $j\le\ell$.
+    \item Interpret each $\widetilde y_j$ as a letter of $\Sigma$ and decode the
+      concatenation $\widetilde y=\widetilde y_1\cdots\widetilde y_\ell\in\Sigma^\ell$
+      with the outer decoder: $\Dec(y)=\Decout(\widetilde y)\in\bits^{km}$.
+  \end{enumerate}
+\end{definition}
+
+% --------------------------- 3.3 Proof of correctness ---------------------------
+
+\begin{lemma}[Trimming preserves the rate (Lemma 3.2)]
+  \label{lem:trim-rate}
+  \uses{def:trim, def:repeat-channel, def:capacity, thm:gen-shannon}
+  Let $\RC_\Dcal$ be a square-integrable repeat channel. Then the information
+  rate of the $\TRC_\Dcal$ is $\Cap(\RC_\Dcal)$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:claim-mutual-info, lem:info-rate-coupling, thm:gen-shannon,
+        thm:chebyshev, thm:union-bound, def:trim, def:mutual-info}
+  Let $X$ be supported on $\bits^n$ and $Y=\RC_\Dcal\,X$. Let $L=\ell(Y)$,
+  $R=r(Y)$ be the (random) indices that mark the all-zero substrings TRIM would
+  delete from $Y$, and let $\widetilde L,\widetilde R$ be the indices of the bits
+  in $X$ that pass through to indices $L,R$ in $Y$. By the Generalized Shannon's
+  Theorem (Theorem~\ref{thm:gen-shannon}) it suffices to prove
+  Claim~\ref{lem:claim-mutual-info}, which gives both
+  $|\II(X;Y)-\II(X;Y\mid\widetilde L,\widetilde R)|=o(n)$ and
+  $\lim_n\tfrac1n\sup_X \II(X;Y\mid\widetilde L,\widetilde R)
+   = \lim_n\tfrac1n\sup_X \II(X;Y')$ where $Y'=\TRC_\Dcal\,X$.
+
+  We may assume $\Dcal$ has support bounded linearly in $n$: there is a
+  deterministic $B>0$ with $R\le Bn$ a.s.\ for $R\sim\Dcal$. If $\Dcal$ has
+  unbounded support, replace it by its truncation $\Dcal_n$ at $Bn$ (renormalize
+  the mass on $\{0,\dots,Bn\}$). For each $x\in\bits^n$, $\TRC_{\Dcal_n}\,x
+  \overset{\Dcal}{=}\TRC_\Dcal\,x$ and $\RC_{\Dcal_n}\,x\overset{\Dcal}{=}
+  \RC_\Dcal\,x$ outside the event $\bigcup_{i=1}^n\{R_i>Bn\}$, which by
+  Chebyshev's inequality (Theorem~\ref{thm:chebyshev}) and a union bound
+  (Theorem~\ref{thm:union-bound}) has probability $O(n^{-1})\to0$. By
+  Lemma~\ref{lem:info-rate-coupling} the information rates of $\TRC_{\Dcal_n}$ and
+  $\TRC_\Dcal$ (and of $\RC_{\Dcal_n}$ and $\RC_\Dcal$) coincide. This reduces the
+  lemma to the bounded case, which is Claim~\ref{lem:claim-mutual-info}; combining
+  with Theorem~\ref{thm:gen-shannon} finishes the proof.
+\end{proof}
+
+\begin{lemma}[Conditioning on the trimmed indices is cheap (Claim 3.3)]
+  \label{lem:claim-mutual-info}
+  \uses{def:repeat-channel, def:trim, def:mutual-info}
+  Assume $\Dcal$ is bounded by $Bn$. Let $Y=\RC_\Dcal\,X$ and $Y'=\TRC_\Dcal\,X$,
+  and let $\widetilde L,\widetilde R$ be as in Lemma~\ref{lem:trim-rate}. Then
+  \begin{align}
+    |\II(X;Y)-\II(X;Y\mid\widetilde L,\widetilde R)| &= o(n), \\
+    \lim_{n\to\infty}\frac1n\sup_X \II(X;Y\mid\widetilde L,\widetilde R)
+      &= \lim_{n\to\infty}\frac1n\sup_X \II(X;Y').
+  \end{align}
+\end{lemma}
+\begin{proof}
+  \uses{def:entropy, def:cond-entropy, lem:entropy-chain-rule, def:mutual-info,
+        def:trim}
+  \emph{First equation.} Write
+  $\II(X;Y\mid\widetilde L,\widetilde R)=H(X\mid\widetilde L,\widetilde R)
+   -H(X\mid Y,\widetilde L,\widetilde R)$. Since $H(X\mid\widetilde L,\widetilde R)
+   \le H(X)$ and, by the chain rule (Lemma~\ref{lem:entropy-chain-rule}),
+  $H(X\mid\widetilde L,\widetilde R)=H(X,\widetilde L,\widetilde R)
+   -H(\widetilde L,\widetilde R)\ge H(X)-H(\widetilde L,\widetilde R)$, we get
+  $|H(X)-H(X\mid\widetilde L,\widetilde R)|\le H(\widetilde L,\widetilde R)$, and
+  similarly $|H(X\mid Y)-H(X\mid Y,\widetilde L,\widetilde R)|\le
+  H(\widetilde L,\widetilde R)$. By the triangle inequality
+  $|\II(X;Y)-\II(X;Y\mid\widetilde L,\widetilde R)|\le 2H(\widetilde L,\widetilde R)
+   \le 4\log n=o(n)$, since $(\widetilde L,\widetilde R)$ is supported on $[n]^2$.
+
+  \emph{Second equation.} By the chain rule (Lemma~\ref{lem:entropy-chain-rule}),
+  splitting $Y$ into its prefix $Y_1^L$, middle $Y_{L+1}^{R-1}$ and suffix
+  $Y_R^n$,
+  \begin{align*}
+    \II(X;Y\mid\widetilde L,\widetilde R)
+      &= \II\big(X_1^{\widetilde L},X_{\widetilde L+1}^{\widetilde R-1},X_{\widetilde R}^n;
+          Y_1^L,Y_{L+1}^{R-1},Y_R^n\big)\\
+      &= \II\big(X_1^{\widetilde L},X_{\widetilde L+1}^{\widetilde R-1},X_{\widetilde R}^n;
+          Y_{L+1}^{R-1}\big)
+       + \II\big(X_1^{\widetilde L},X_{\widetilde L+1}^{\widetilde R-1},X_{\widetilde R}^n;
+          Y_1^L,Y_R^n\big)\\
+      &\le \II\big(X;Y_{L+1}^{R-1}\mid\widetilde L,\widetilde R\big)+H(Y_1^L,Y_R^n)\\
+      &\le \II\big(X;Y_{L+1}^{R-1}\mid\widetilde L,\widetilde R\big)+H(L,R,|Y|)\\
+      &= \II\big(X;Y_{L+1}^{R-1}\mid\widetilde L,\widetilde R\big)+o(n),
+  \end{align*}
+  where the penultimate inequality holds because $Y_1^L$ and $Y_R^n$ are all-zero
+  strings, uniquely determined once $|Y|,L,R$ are given, and the last because
+  $(L,R,|Y|)$ is supported on $[Bn]^3$ so its entropy is $O(\log n)$. By the same
+  argument as for the first equation, $|\II(X;Y_{L+1}^{R-1}\mid\widetilde L,\widetilde R)
+   -\II(X;Y_{L+1}^{R-1})|=o(n)$, and since $Y_{L+1}^{R-1}=\TRIM\,Y$ we have
+  $Y_{L+1}^{R-1}=Y'$, giving
+  $|\II(X;Y\mid\widetilde L,\widetilde R)-\II(X;Y')|=o(n)$, hence the claimed
+  equality of the normalized suprema.
+\end{proof}
+
+\begin{lemma}[Coupled channels have equal information rate (Lemma A.1)]
+  \label{lem:info-rate-coupling}
+  \uses{def:channel, def:mutual-info}
+  Let $\Ch_1,\Ch_2:\Omega\times\bits^*\to\bits^*$ be two channels. Suppose there
+  is a sequence $p_n\ge0$ with $p_n\to1$ such that for every $x\in\bits^n$ there
+  is a set $A_x\subseteq\Omega$ with: conditioned on $A_x$, the distributions of
+  $\Ch_1\,x$ and $\Ch_2\,x$ are the same, and $\Prob(A_x)\ge p_n$. Then the
+  information rates of $\Ch_1$ and $\Ch_2$ are equal.
+\end{lemma}
+\begin{proof}
+  \uses{def:mutual-info, lem:entropy-chain-rule, def:entropy, def:cond-entropy}
+  Let $Y_1=\Ch_1\,X$, $Y_2=\Ch_2\,X$ and let $\mathbf{1}_{A_X}$ be the indicator
+  of $A_X$. By the chain rule (Lemma~\ref{lem:entropy-chain-rule}),
+  \[
+    \II(X;Y_i)\le \II(X,\mathbf{1}_{A_X};Y_i)
+      = \II(\mathbf{1}_{A_X};Y_i)+\II(X;Y_i\mid\mathbf{1}_{A_X})
+      \le \II(X;Y_i\mid\mathbf{1}_{A_X})+\log 2,
+  \]
+  and likewise $\II(X,\mathbf{1}_{A_X};Y_i)=\II(X;Y_i)+\II(\mathbf{1}_{A_X};Y_i\mid X)$
+  gives $\II(X;Y_i)=\II(X;Y_i\mid\mathbf{1}_{A_X})+\II(\mathbf{1}_{A_X};Y_i)
+   -\II(\mathbf{1}_{A_X};Y_i\mid X)\ge \II(X;Y_i\mid\mathbf{1}_{A_X})-2\log 2$. So
+  $|\II(X;Y_i)-\II(X;Y_i\mid\mathbf{1}_{A_X})|\le 2\log 2=o(n)$, and it suffices to
+  show $\lim_n\tfrac1n \II(X;Y_1\mid\mathbf{1}_{A_X})=\lim_n\tfrac1n
+  \II(X;Y_2\mid\mathbf{1}_{A_X})$. But
+  \begin{align*}
+    \lim_{n}\tfrac1n \II(X;Y_1\mid\mathbf{1}_{A_X})
+      &= \lim_n\tfrac1n\big[\Prob(A_X)\II(X;Y_1\mid A_X)
+          +\Prob(A_X^c)\II(X;Y_1\mid A_X^c)\big]\\
+      &= \lim_n\tfrac1n\Prob(A_X)\II(X;Y_1\mid A_X)
+       = \lim_n\tfrac1n\Prob(A_X)\II(X;Y_2\mid A_X)\\
+      &= \lim_n\tfrac1n \II(X;Y_2\mid\mathbf{1}_{A_X}),
+  \end{align*}
+  where the dropped terms vanish because $0\le \II(X;Y_i\mid A_X^c)\le n$ and
+  $\Prob(A_X^c)\to0$, and the middle equality is the hypothesis (conditioned on
+  $A_X$, $Y_1$ and $Y_2$ have the same distribution). This proves equality of the
+  information rates.
+\end{proof}
+
+\begin{proposition}[Approximately balanced capacity-achieving inner code (Prop. 3.4)]
+  \label{prop:approx-balance}
+  \uses{def:repeat-channel, def:trim, def:hamming-weight, def:capacity}
+  Fix a square-integrable $\Dcal$-repeat channel $\Ch=\RC_\Dcal$, or its trimming
+  version $\Ch=\TRC_\Dcal$, with information rate $\mathcal{I}$. For every
+  $\zeta,\varepsilon\in(0,1)$ there exists $\gamma\in(0,\tfrac12)$ and a family of
+  codes $\Ccal_n\subseteq\bits^n$ for $\Ch$ with rate
+  $R\ge\mathcal{I}-\varepsilon$ such that for every codeword $c\in\Ccal_n$ and
+  every $i\in[n-\zeta n]$,
+  \[
+    \gamma\zeta n \le \wt\big(c_i^{i+\zeta n}\big) \le (1-\gamma)\zeta n,
+  \]
+  i.e.\ every length-$\zeta n$ substring of every codeword is approximately
+  balanced.
+\end{proposition}
+\begin{proof}
+  \uses{thm:gen-shannon, thm:birkhoff, lem:trim-rate, def:stationary-ergodic,
+        thm:union-bound, def:hamming-weight}
+  By the Generalized Shannon's Theorem (Theorem~\ref{thm:gen-shannon}) the
+  information rate $\mathcal{I}$ is achieved by a stationary ergodic input process
+  $\{X_j\}_{j\ge0}$ (for the trimming channel, Lemma~\ref{lem:trim-rate} shows the
+  same statement holds), i.e.\ $\mathcal{I}=\lim_n\tfrac1n \II(X_1^n;Y^n)$ with
+  $Y^n=\Ch\,X_1^n$. Let $P:=\Prob(X_1=1)$. By stationarity $P\in(0,1)$ (else
+  $\{X_j\}$ is trivial and does not achieve the rate). By Birkhoff's pointwise
+  ergodic theorem (Theorem~\ref{thm:birkhoff}, via
+  Definition~\ref{def:stationary-ergodic}), almost surely
+  $P=\lim_{t}\tfrac1t\sum_{j=1}^t\mathbf{1}\{X_j=1\}=\lim_t\tfrac1t\wt(X_1^t)$.
+
+  Setting $t=\zeta n$: for any $\delta>0$, with probability $p_n\to1$ we have
+  $(P-\delta)\zeta n\le\wt(X_1^{\zeta n})\le(P+\delta)\zeta n$. Picking
+  $\delta,\gamma$ small enough ensures $\gamma\zeta n\le\wt(X_1^{\zeta n})
+   \le(1-\gamma)\zeta n$ with probability $p_n$. To extend to all substrings:
+  by stationarity $X_{i\zeta n+1}^{(i+1)\zeta n}\overset{\Dcal}{=}X_1^{\zeta n}$
+  for all $i\in[1/\zeta]$, so by a union bound (Theorem~\ref{thm:union-bound})
+  over the constant $1/\zeta$ disjoint blocks, with probability
+  $\widetilde p_n\to1$ all blocks are balanced simultaneously. Each substring
+  $x_i^{i+3\zeta n}$ contains at least one block substring of the form
+  $x_{j\zeta n+1}^{(j+1)\zeta n}$, so
+  $\tfrac{\gamma}{3}\cdot3\zeta n\le\wt(x_i^{i+3\zeta n})\le(1-\tfrac{\gamma}{3})
+   \cdot3\zeta n$ for all $i\in[n-\zeta n]$ with probability $\widetilde p_n$;
+  re-setting $\overline\zeta=3\zeta$ and $\overline\gamma=\gamma/3$ yields the
+  property of the lemma with probability $\widetilde p_n$.
+
+  Finally, we may extract a family of codes $\widehat\Ccal_n$ of rate
+  $R\ge\lim_n\tfrac1n \II(X_1^n;Y^n)-\varepsilon=\mathcal{I}-\varepsilon$ from
+  $\{X_j\}$ by sampling, as in the standard proof of Shannon's theorem (Dobrushin;
+  also Cover--Thomas Thm.\ 7.7.1). Since with high probability the sampled process
+  satisfies the balance condition, we discard from $\widehat\Ccal_n$ any codewords
+  that fail it, obtaining $\Ccal_n$ of the same rate.
+\end{proof}
+
+
+\chapter{Extensions to More General Channels}
+
+\begin{definition}[Dobrushin channel (Def. 4.1)]
+  \label{def:dobrushin}
+  \uses{def:channel}
+  Fix probability distributions $\Dcal_0,\Dcal_1$ over $\bits^*$. A
+  \emph{$(\Dcal_0,\Dcal_1)$-Dobrushin channel} $\DChan_{\Dcal_0,\Dcal_1}$ acts
+  independently on each input bit by $(\DChan\,0)\sim\Dcal_0$ and
+  $(\DChan\,1)\sim\Dcal_1$, and concatenates the outputs. It is
+  \emph{square-integrable} if for $Y_i\sim\Dcal_i$ we have $\E|Y_i|^2<\infty$,
+  $i=0,1$. Repeat channels are the special case where $\Dcal_0$ is supported on
+  all-zero strings, $\Dcal_1$ on all-one strings, with matching induced length
+  distributions.
+\end{definition}
+
+\begin{definition}[Biased Dobrushin channel (Def. 4.2)]
+  \label{def:biased-dobrushin}
+  \uses{def:dobrushin, def:hamming-weight, def:mean}
+  A Dobrushin channel $\DChan_{\Dcal_0,\Dcal_1}$ is \emph{biased} if for
+  $Y_0\sim\Dcal_0$, $Y_1\sim\Dcal_1$ we have $\E|Y_0|=\E|Y_1|<\infty$ and
+  $\E[\wt(Y_0)]<\tfrac12\E|Y_0|$ and $\E[\wt(Y_1)]>\tfrac12\E|Y_1|$. The
+  expected fraction of ones in the output of a long zero-run is
+  $f:=\E[\wt(Y_0)]/\E|Y_0|<\tfrac12$.
+\end{definition}
+
+\begin{definition}[Trimming Dobrushin channel (Def. 4.4)]
+  \label{def:trim-dobrushin}
+  \uses{def:dobrushin, def:trim}
+  Given $n$ and distributions $\mathcal{T}_\ell,\mathcal{T}_r$ over $\Nat$ (may
+  depend on $n$), let $\TRIM_{\mathcal{T}_\ell,\mathcal{T}_r}$ act on $x\in\bits^n$
+  by $\TRIM_{\mathcal{T}_\ell,\mathcal{T}_r}\,x=x_{t_\ell}^{n-t_r}$ where
+  $t_\ell\sim\mathcal{T}_\ell$, $t_r\sim\mathcal{T}_r$ are independent (the empty
+  string if $t_2<t_1$). For a Dobrushin channel
+  $\DChan=\DChan_{\Dcal_0,\Dcal_1}$, the
+  \emph{$(\mathcal{T}_\ell,\mathcal{T}_r)$-trimming Dobrushin channel} is
+  $\TDChan_{\Dcal_0,\Dcal_1,\mathcal{T}_\ell,\mathcal{T}_r}
+   :=\TRIM_{\mathcal{T}_\ell,\mathcal{T}_r}\circ\DChan$.
+\end{definition}
+
+\begin{lemma}[Trimming preserves the Dobrushin rate (Lemma 4.5 / A.3)]
+  \label{lem:tdc-rate}
+  \uses{def:trim-dobrushin, def:dobrushin, def:capacity}
+  \notready
+  Let $\DChan$ be a square-integrable Dobrushin channel and let
+  $\TDChan_{\mathcal{T}_\ell,\mathcal{T}_r}$ be the trimming version with
+  $\mathcal{T}_\ell,\mathcal{T}_r$ each bounded by $\nu\eta m$ for inputs of
+  length $m$. Then the information rate of $\TDChan_{\mathcal{T}_\ell,\mathcal{T}_r}$
+  is at least $\Cap(\DChan)-2\nu\eta$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:trim-rate, lem:claim-mutual-info, def:mutual-info, def:entropy,
+        lem:entropy-chain-rule}
+  Following the proof of Lemma~\ref{lem:trim-rate}, let $T_\ell\sim\mathcal{T}_\ell$,
+  $T_r\sim\mathcal{T}_r$ be the numbers of bits trimmed off the left and right of
+  the output $Y=\DChan\,X$ (with $X$ on $\bits^m$), and set $L=T_\ell$,
+  $R=m-T_r$. We prove the analogue of Claim~\ref{lem:claim-mutual-info} with the
+  modified second part
+  \[
+    \lim_{m\to\infty}\frac1m\sup_X \II(X;Y\mid\widetilde L,\widetilde R)
+      \le \lim_{m\to\infty}\frac1m\sup_X \II(X;Y')+2\nu\eta,
+  \]
+  $Y'=\TDChan_{\mathcal{T}_\ell,\mathcal{T}_r}\,X$. The proof of the first
+  equation is identical to Claim~\ref{lem:claim-mutual-info}. For the second, by
+  the same chain-rule argument (Lemma~\ref{lem:entropy-chain-rule}) we reach
+  $\II(X;Y\mid\widetilde L,\widetilde R)\le \II(X;Y_{L+1}^{R-1}\mid\widetilde L,
+   \widetilde R)+H(Y_1^L,Y_R^m)$, but now the trimmed ends are no longer all-zero,
+  so we can only bound $H(Y_1^L,Y_R^m)\le\log((2^{m\nu\eta})^2)=2m\nu\eta$. The
+  rest of the argument proceeds as in Lemma~\ref{lem:trim-rate}, giving the stated
+  bound.
+\end{proof}
+% TODO: proof sketch in Appendix A.3 of the paper; the "rest proceeds as before"
+% step is not written out. Reconstruct fully before marking ready.
+
+\begin{lemma}[Received buffers stay zero-heavy (Lemma A.2)]
+  \label{lem:buffer-balance}
+  \uses{def:biased-dobrushin, def:hamming-weight}
+  \notready
+  Let $c$ be a codeword of length $m$ from the near-capacity-achieving code for a
+  biased square-integrable Dobrushin channel $\DChan=\DChan_{\Dcal_0,\Dcal_1}$
+  (the analogue of Proposition~\ref{prop:approx-balance}). The probability that
+  any length-$\nu\eta m$ substring of $\DChan\,c$ has a fraction of zeros less
+  than $f+\kappa$ (where $f=\E[\wt(Y_0)]/\E|Y_0|$, $Y_0\sim\Dcal_0$) vanishes as
+  $m\to\infty$, for any $\nu,\eta>0$ and all $\kappa>0$ small enough.
+\end{lemma}
+\begin{proof}
+  \uses{prop:approx-balance, thm:chebyshev, def:hamming-weight}
+  Let $Y^1,\dots,Y^t$ be the outputs of $\DChan$ on the individual bits of $c$
+  fully contained in the first $\nu\eta m$ output bits. Up to $o(m)$ leftover bits
+  (negligible with high probability), the window equals
+  $Y^1Y^2\cdots Y^t$, and by a union bound over $O(1/\nu\eta)$ blocks it suffices
+  to treat this prefix window. We must show
+  \[
+    \Prob\Big(\frac{\sum_{j=1}^t \wt(Y^j)}{\sum_{j=1}^t|Y^j|}<f+\kappa\Big)
+      = \Prob\Big((f+\kappa)\sum_{j=1}^t|Y^j|-\sum_{j=1}^t \wt(Y^j)>0\Big)\to0.
+  \]
+  Conditioning on $t$ and using $\E|Y_0|=\E|Y_1|$,
+  \[
+    \E\Big[(f+\kappa)\sum_j|Y^j|-\sum_j \wt(Y^j)\Big]
+      = (f+\kappa)(\E t)\E|Y_0|-\E\Big[\sum_j \E[\wt(Y^j)]\Big].
+  \]
+  By the balance property of $c$ (analogue of
+  Proposition~\ref{prop:approx-balance}), each long substring of $c$ has at least
+  a $\gamma$-fraction of ones, so for $t\ge\tfrac12\E t$ (whp),
+  \[
+    (f+\kappa)(\E t)\E|Y_0|-\big(\gamma(\E t)\E[\wt(Y_1)]+(1-\gamma)(\E t)\E[\wt(Y_0)]\big)
+      \le (\E t)\E|Y_0|\,\big(f+\kappa-(\gamma/2+(1-\gamma)f)\big).
+  \]
+  Since $f<\tfrac12$ and $\gamma>0$, choosing $\kappa$ small makes this $-C\,\E t$
+  for a constant $C>0$, i.e.\ $-\Omega(m)$. By concentration (variances are $o(m^2)$,
+  via Chebyshev's inequality, Theorem~\ref{thm:chebyshev}), the probability
+  vanishes as $m\to\infty$.
+\end{proof}
+% TODO: Appendix A.2 gives a proof sketch (leftover bits "o(m)", variances "o(m^2)
+% by standard arguments"); fill these in before marking ready. Claim (1) of the
+% paper -- buffers stay zero-heavy -- follows by an easier version of this argument.
+
+\begin{theorem}[Codes for biased Dobrushin channels (Thm. 4.3)]
+  \label{thm:dobrushin-main}
+  \uses{def:biased-dobrushin, def:sound, def:capacity}
+  \notready
+  Fix a biased square-integrable Dobrushin channel $\DChan$. For every
+  $\varepsilon>0$ there exists a sound code $\Ccal$ with rate $R$ for the
+  $\DChan$ with $R\ge\Cap(\DChan)-\varepsilon$ and linear-time encoding,
+  quasi-linear-time decoding. Moreover the decoder has probability of failure
+  $e^{-\Omega(n)}$.
+\end{theorem}
+\begin{proof}
+  \uses{def:construction, lem:tdc-rate, lem:buffer-balance, prop:approx-balance,
+        thm:chernoff, thm:union-bound}
+  We adapt the construction of Definition~\ref{def:construction}, changing only
+  buffer identification: declare any contiguous block of $\nu\eta m$ bits with a
+  fraction of ones less than $f+\kappa$ to be part of a buffer (implemented with a
+  running window of size $\nu\eta m$; a buffer starts when the fraction drops
+  below $f+\kappa$ and ends when it rises above). The rate is as in
+  Theorem~\ref{thm:main} except $n=km/(\Cap(\DChan)-\nu\eta
+   -\psi(\varepsilon,\delta,\nu,k,m))$ with $\psi\to0$; using
+  Lemma~\ref{lem:tdc-rate} (information rate of the trimming Dobrushin channel is
+  $\ge\Cap(\DChan)-2\nu\eta$) and taking $\varepsilon,\delta,\eta,\nu$ small and
+  $m$ large makes $R\ge\Cap(\DChan)-\varepsilon$.
+
+  The error analysis mirrors the proof of Theorem~\ref{thm:main}; two additional
+  claims are needed: (1) the probability that any length-$\nu\eta m$ substring of
+  a received \emph{buffer} has a fraction of ones \emph{higher} than $f+\kappa$
+  vanishes as $m\to\infty$ (an easier version of
+  Lemma~\ref{lem:buffer-balance}, with $\nu$ small enough to identify buffers whp),
+  and (2) the probability that any length-$\nu\eta m$ substring of a received
+  \emph{codeword} has a fraction of ones \emph{lower} than $f+\kappa$ vanishes
+  (Lemma~\ref{lem:buffer-balance}). As in Theorem~\ref{thm:main} each error type's
+  frequency is a binomial variable, so by the Chernoff bound
+  (Theorem~\ref{thm:chernoff}) and a union bound (Theorem~\ref{thm:union-bound})
+  the failure probability is $e^{-\Omega(n)}$. Encoding is linear and buffer
+  identification (running window) is $O(n)$, so decoding is quasi-linear.
+\end{proof}
+% TODO: Theorem 4.3 is proved by a "proof sketch" in Section 4; the intermediate
+% (half-buffer/half-codeword) cases are stated to be unnecessary but not analyzed.
+% Fill in fully before marking ready.

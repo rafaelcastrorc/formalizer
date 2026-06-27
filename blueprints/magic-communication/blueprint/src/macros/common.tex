@@ -1,0 +1,70 @@
+% In this file you should put all LaTeX macros and settings to be used both by
+% the pdf version and the web version.
+% This should be most of your macros.
+
+% The theorem-like environments defined below are those that appear by default
+% in the dependency graph. See the README of leanblueprint if you need help to
+% customize this.
+% The configuration below use the theorem counter for all those environments
+% (this is what the [theorem] arguments mean) and never resets it.
+% If you want for instance to number them within chapters then you can add
+% [chapter] at the end of the next line.
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{construction}[theorem]{Construction}
+\newtheorem{remark}[theorem]{Remark}
+
+% ----------------------------------------------------------------------------
+% Shared notation for "Magic and communication complexity".
+% Keep braket simple so plasTeX + MathJax render it.
+% ----------------------------------------------------------------------------
+
+% Dirac notation.
+\newcommand{\ket}[1]{\lvert #1\rangle}
+\newcommand{\bra}[1]{\langle #1\rvert}
+\newcommand{\ketbra}[2]{\lvert #1\rangle\langle #2\rvert}
+\newcommand{\Tr}{\operatorname{Tr}}
+
+% Communication models (simultaneous message passing). The parallel bars are
+% the paper's notation for simultaneous protocols.
+\newcommand{\Dpar}{\mathsf{D}\|}
+\newcommand{\Rpar}{\mathsf{R}\|}
+\newcommand{\Qpar}{\mathsf{Q}\|}
+\newcommand{\Rparpub}{\mathsf{R}\|^{\mathsf{pub}}}
+\newcommand{\Qparpub}{\mathsf{Q}\|^{\mathsf{pub}}}
+\newcommand{\Rpars}{\mathsf{R}\|^{*}}
+\newcommand{\Qpars}{\mathsf{Q}\|^{*}}
+\newcommand{\Rtwo}{\mathsf{R}}
+
+% Private simultaneous message models.
+\newcommand{\PSM}{\mathsf{PSM}}
+\newcommand{\PSMs}{\mathsf{PSM}^{*}}
+\newcommand{\PSQM}{\mathsf{PSQM}}
+\newcommand{\PSQMs}{\mathsf{PSQM}^{*}}
+
+% Magic-count and T-count cost measures.
+\newcommand{\Mu}{\mathcal{M}^{\mathrm{unitary}}}
+\newcommand{\Mmix}{\mathcal{M}^{\mathrm{mixed}}}
+\newcommand{\Mad}{\mathcal{M}^{\mathrm{adaptive}}}
+\newcommand{\Tcu}{\mathcal{T}^{\mathrm{unitary}}}
+\newcommand{\Tcmix}{\mathcal{T}^{\mathrm{mixed}}}
+
+% Parity decision tree complexities.
+\newcommand{\PDTna}{\mathsf{PDT}^{\mathrm{na}}}
+\newcommand{\RPDTna}{\mathsf{RPDT}^{\mathrm{na}}}
+
+% Miscellaneous.
+\newcommand{\GH}{\mathrm{GH}}
+\newcommand{\Toffoli}{\mathrm{Toffoli}}
+\newcommand{\Multiplex}{\mathrm{Multiplex}}
+\newcommand{\Index}{\mathrm{Index}}
+\newcommand{\Equal}{\mathrm{Equal}}
+\newcommand{\forr}{\mathrm{forr}}
+\newcommand{\Sim}{\mathrm{Sim}}
+\newcommand{\dnorm}[1]{\lVert #1 \rVert_{\diamond}}
+\newcommand{\onenorm}[1]{\lVert #1 \rVert_{1}}

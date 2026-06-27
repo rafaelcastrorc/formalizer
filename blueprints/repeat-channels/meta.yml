@@ -1,0 +1,8 @@
+# Per-blueprint metadata. `name` MUST match the folder name; it is
+# used as the URL subpath (the blueprint is published at site/<name>/).
+name: repeat-channels
+title: "Efficient Near-Optimal Codes for General Repeat Channels"
+description: "Explicit capacity-approaching codes for all square-integrable D-repeat channels, encodable and decodable in linear / quasi-linear time."
+build_pdf: false        # if true, also build + link a PDF (requires TeX in CI)
+home: "https://arxiv.org/abs/2201.12746"                # optional URL shown as a "home" link on the landing card
+github: ""              # optional repo URL shown as a "GitHub" link on the landing card

@@ -1,0 +1,1251 @@
+% Blueprint for:
+%   "When Do Low-Rate Concatenated Codes Approach the Gilbert-Varshamov Bound?"
+%   Dean Doron, Jonathan Mosheiff, Mary Wootters. arXiv:2405.08584v3.
+%
+% Two-kind model:
+%   * Standard facts already in Mathlib/cslib are LEAF nodes (\mathlibok, no proof).
+%   * Everything novel (the paper's results and folklore the libraries lack) is a
+%     FULL node with a complete proof.
+% No \begin{document} here: web.tex / print.tex supply it.
+
+\chapter{Introduction and Setup}
+
+This blueprint formalises the paper of Doron, Mosheiff and Wootters on when a
+low-rate concatenated code $\Ccode = \Cout \circ \Cin$, built from a fixed (or
+random) inner code $\Cin$ and an outer code $\Cout$, attains the
+Gilbert--Varshamov (GV) bound. The central objects are linear codes over finite
+fields, their dual codes, Hamming weight, the binary entropy function, and a
+Fourier-analytic moment method.
+
+We collect the basic definitions in Chapter~\ref{chap:prelim}, set up the moment
+framework in Chapter~\ref{chap:moment}, and then prove the three main results:
+that \emph{most} outer codes work (Chapter~\ref{chap:most}, Theorem~4.2), a
+soft-decoding sufficient condition (Chapter~\ref{chap:soft}, Theorem~5.1), and a
+min-entropy sufficient condition (Chapter~\ref{chap:entropy}, Theorem~6.2).
+
+\chapter{Preliminaries}
+\label{chap:prelim}
+
+\section{Codes and basic parameters}
+
+\begin{definition}[Code]
+  \label{def:code}
+  For a finite alphabet $\Sigma$ and $n \in \N$, a \emph{code} of length $n$ is a
+  subset $\Ccode \subseteq \Sigma^n$. We also view $\Ccode$ as an encoding map
+  $\Ccode : \Sigma^k \to \Sigma^n$ where $k = \log_{|\Sigma|}|\Ccode|$.
+\end{definition}
+
+\begin{definition}[Linear code]
+  \label{def:linear-code}
+  \uses{def:code}
+  For a finite field $\F$, a code $\Ccode \subseteq \F^n$ is \emph{linear} if it
+  is an $\F$-linear subspace of $\F^n$. Its \emph{dimension} is its dimension as
+  a subspace.
+\end{definition}
+
+\begin{definition}[Hamming distance]
+  \label{def:hamming-distance}
+  \lean{hammingDist}
+  \mathlibok
+  For $x,y \in \Sigma^n$, the \emph{Hamming distance} $\dist(x,y)$ is the number
+  of coordinates $\alpha \in [n]$ on which $x_\alpha \neq y_\alpha$. (Standard;
+  recalled so later nodes may depend on it.)
+\end{definition}
+
+\begin{definition}[Hamming weight]
+  \label{def:weight}
+  \lean{hammingNorm}
+  \mathlibok
+  \uses{def:hamming-distance}
+  For $x \in \F^n$, the \emph{Hamming weight} $\wt(x)$ is the number of nonzero
+  coordinates of $x$, i.e.\ $\wt(x) = \dist(x,0)$.
+\end{definition}
+
+\begin{definition}[Rate]
+  \label{def:rate}
+  \uses{def:code}
+  For a code $\Ccode \subseteq \Sigma^n$, the \emph{rate} is
+  $R = \frac{\log_{|\Sigma|}|\Ccode|}{n} = \frac{k}{n}$, where $k =
+  \log_{|\Sigma|}|\Ccode|$.
+\end{definition}
+
+\begin{definition}[Relative distance]
+  \label{def:relative-distance}
+  \uses{def:hamming-distance}
+  For a code $\Ccode \subseteq \Sigma^n$ with $|\Ccode| \geq 2$, the
+  \emph{(relative) distance} is
+  $\delta = \frac{1}{n}\min_{c \neq c' \in \Ccode} \dist(c,c')$. For a linear
+  code this equals $\frac{1}{n}\min_{0 \neq c \in \Ccode}\wt(c)$.
+\end{definition}
+
+\begin{definition}[Random linear code]
+  \label{def:random-linear-code}
+  \uses{def:linear-code}
+  A code $\Ccode \subseteq \Ftwo^n$ is a \emph{random linear code} of dimension
+  $k$ if it is chosen uniformly among all subspaces of $\Ftwo^n$ of dimension
+  $k$. (More generally over $\Fq$.)
+\end{definition}
+
+\section{The field trace and inner products}
+
+\begin{definition}[Field trace]
+  \label{def:trace}
+  \lean{Algebra.trace}
+  \mathlibok
+  Let $q = 2^{k_0}$ and $\Fq$ be the field with $q$ elements, viewed as a degree
+  $k_0$ extension of $\Ftwo$. The \emph{field trace} is
+  $\Tr(x) = x + x^2 + \cdots + x^{2^{k_0-1}}$. It is $\Ftwo$-linear with image
+  $\Ftwo$.
+  % TODO: confirm exact Mathlib decl name for the absolute finite field trace.
+\end{definition}
+
+\begin{lemma}[Self-dual trace basis]
+  \label{lem:self-dual-basis}
+  \uses{def:trace}
+  \notready
+  For $q = 2^{k_0}$ there exists a \emph{self-dual basis} $\nu_1,\dots,\nu_{k_0}$
+  of $\Fq$ over $\Ftwo$, i.e.\ $\Tr(\nu_i \nu_j) = \mathbf{1}[i=j]$.
+  % TODO: paper cites [SL80, JMV90] without proof; cite or reconstruct.
+\end{lemma}
+
+\begin{definition}[Inner products]
+  \label{def:inner-product}
+  \uses{def:trace, lem:self-dual-basis}
+  For $x,y \in \Ftwo^N$ set $\inner{x}{y} = \sum_{\alpha=1}^N x_\alpha y_\alpha
+  \in \Ftwo$. For $\Fq$ with $q > 2$ a power of $2$ and $x,y \in \Fq^n$ set
+  $\inner{x}{y} = \Tr\!\left(\sum_\alpha x_\alpha y_\alpha\right)$. Fixing a
+  self-dual basis (Lemma~\ref{lem:self-dual-basis}) to identify $\Fq$ with
+  $\Ftwo^{k_0}$, these agree: $\Tr(\alpha\cdot\beta) = \inner{\alpha}{\beta}$ for
+  $\alpha,\beta \in \Fq \cong \Ftwo^{k_0}$.
+\end{definition}
+
+\begin{lemma}[Trace as a dot product]
+  \label{lem:trace-inner-product}
+  \uses{def:trace, lem:self-dual-basis, def:inner-product}
+  Fix a self-dual basis $\nu_1,\dots,\nu_{k_0}$. If
+  $\alpha = \sum_i \alpha_i \nu_i$ and $\beta = \sum_j \beta_j \nu_j$ with
+  $\alpha_i,\beta_j \in \Ftwo$, then
+  $\Tr(\alpha\cdot\beta) = \inner{(\alpha_1,\dots,\alpha_{k_0})}{(\beta_1,\dots,\beta_{k_0})}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:trace, lem:self-dual-basis}
+  By $\Ftwo$-bilinearity of $(\alpha,\beta) \mapsto \Tr(\alpha\beta)$,
+  \[
+    \Tr(\alpha\cdot\beta) = \sum_{i,j} \alpha_i \beta_j \Tr(\nu_i\nu_j)
+      = \sum_{i,j}\alpha_i\beta_j\,\mathbf{1}[i=j] = \sum_i \alpha_i\beta_i
+      = \inner{\alpha}{\beta},
+  \]
+  using the self-dual property $\Tr(\nu_i\nu_j) = \mathbf{1}[i=j]$.
+\end{proof}
+
+\begin{definition}[Dual code]
+  \label{def:dual-code}
+  \uses{def:linear-code, def:inner-product}
+  For a linear code $\Ccode \subseteq \F^n$ the \emph{dual code} is
+  \[
+    \Ccode^\perp = \Big\{ g \in \F^n : \sum_{\alpha \in [n]} g_\alpha c_\alpha = 0
+      \ \ \forall c \in \Ccode \Big\}.
+  \]
+  Over $\Fq$ this uses the trace pairing of Definition~\ref{def:inner-product}.
+\end{definition}
+
+\section{The Gilbert--Varshamov bound and the goal}
+
+\begin{definition}[Binary entropy function]
+  \label{def:binary-entropy}
+  \lean{Real.binEntropy}
+  \mathlibok
+  The \emph{binary entropy function} is
+  $\htwo(x) = x\log_2(1/x) + (1-x)\log_2(1/(1-x))$ for $x \in (0,1)$, with
+  $\htwo(0)=\htwo(1)=0$.
+  % TODO: confirm Mathlib uses log base 2 vs. natural log normalisation.
+\end{definition}
+
+\begin{theorem}[GV bound, Theorem 2.1]
+  \label{thm:gv-bound}
+  \uses{def:linear-code, def:relative-distance, def:binary-entropy, def:rate}
+  \notready
+  Let $\delta \in [0,1/2]$ and $\eta \in (0, 1 - \htwo(\delta))$. Then for any
+  $n > 1/\eta$ there exists a linear code $\Ccode \subseteq \Ftwo^n$ with rate
+  $R \geq 1 - \htwo(\delta) - \eta$ and relative distance at least $\delta$.
+  % TODO: classical result [Gil52, Var57], stated without proof in the paper.
+  % Reconstruct via the greedy/volume bound or cite a library entry.
+\end{theorem}
+
+\begin{definition}[Approaching the GV bound at low rate, Goal 1]
+  \label{def:approaching-gv}
+  \uses{thm:gv-bound, def:rate, def:relative-distance}
+  Since $1 - \htwo(1/2 - \varepsilon) = \Theta(\varepsilon^2)$ as
+  $\varepsilon \to 0$, we say a family of low-rate codes
+  $\Ccode_{N,\varepsilon} \subseteq \Ftwo^N$ \emph{approaches the GV bound} if
+  $\Ccode_{N,\varepsilon}$ has rate $\Omega(\varepsilon^2)$ and relative distance
+  $1/2 - O(\varepsilon)$, the asymptotics being as $\varepsilon \to 0$ and
+  $N \to \infty$.
+\end{definition}
+
+\section{Concatenated codes and default parameters}
+
+\begin{definition}[Concatenated code]
+  \label{constr:concatenation}
+  \uses{def:linear-code, def:rate}
+  Throughout, $\Cout \subseteq \Fq^n$ and $\Cin \subseteq \Ftwo^{n_0}$ are linear
+  codes of rate $\varepsilon$, with $q = 2^{k_0}$, $k = \varepsilon n$,
+  $k_0 = \varepsilon n_0 = \log_2 q$, $N = n_0 n$ and $K = k_0 k$. Identifying
+  $\Fq \cong \Ftwo^{k_0}$, the \emph{concatenated code}
+  $\Ccode = \Cout \circ \Cin \subseteq \Ftwo^N$ is the encoding map
+  $\Ccode : \Ftwo^K \to \Ftwo^N$ given, for a message $m$ interpreted in
+  $\Fq^k$ with $c = \Cout(m)$, by
+  \[
+    \Ccode(m) = \big(\Cin(c_1), \Cin(c_2), \dots, \Cin(c_n)\big) \in \Ftwo^N.
+  \]
+  Its rate is the product of the rates and its distance is at least the product
+  of the distances of $\Cout$ and $\Cin$.
+\end{definition}
+
+\section{Weight distribution of the inner code}
+
+\begin{definition}[$\tau$-niceness of the inner code, Definition 2.2]
+  \label{def:tau-nice}
+  \uses{def:dual-code, def:weight}
+  Fix $0 < \tau < \varepsilon$. The inner code $\Cin \subseteq \Ftwo^{n_0}$ (of
+  rate $\varepsilon$) is \emph{$\tau$-nice} if for every $i \in \{1,\dots,n_0\}$,
+  the number of codewords $c \in \Cin^\perp$ with $\wt(c) = i$ is at most
+  \[
+    \binom{n_0}{i} \cdot 2^{-n_0(\varepsilon - \tau)} .
+  \]
+  (The $\varepsilon$ is dropped from the name because it is the common rate of
+  $\Cin$ and $\Cout$ throughout.)
+\end{definition}
+
+\begin{lemma}[Random inner codes are nice, Lemma 2.3]
+  \label{lem:tau-nice-random}
+  \uses{def:tau-nice, def:random-linear-code}
+  Let $\Cin \subseteq \Ftwo^{n_0}$ be a random linear code of dimension
+  $k_0 = \varepsilon n_0$. Then with probability at least
+  $1 - n_0 \cdot 2^{-\tau n_0}$, the code $\Cin$ is $\tau$-nice.
+\end{lemma}
+\begin{proof}
+  \uses{def:tau-nice, lem:markov, lem:union-bound, def:random-linear-code}
+  For $i \in \{1,\dots,n_0\}$ let $E_i$ be the event that $\Cin^\perp$ has at
+  most $\binom{n_0}{i}2^{-n_0(\varepsilon - \tau)}$ codewords of weight $i$.
+  Since $\Cin^\perp$ is a random subspace of dimension $n_0 - k_0$, a fixed
+  nonzero vector lies in $\Cin^\perp$ with probability at most $2^{-k_0} =
+  2^{-n_0\varepsilon}$; hence the expected number of weight-$i$ codewords of
+  $\Cin^\perp$ is at most $\binom{n_0}{i}2^{-n_0\varepsilon}$. By Markov's
+  inequality (Lemma~\ref{lem:markov}), the number exceeds
+  $2^{\tau n_0}\binom{n_0}{i}2^{-n_0\varepsilon} =
+  \binom{n_0}{i}2^{-n_0(\varepsilon-\tau)}$ with probability at most
+  $2^{-\tau n_0}$, so $\Pr[E_i] \geq 1 - 2^{-\tau n_0}$. By a union bound
+  (Lemma~\ref{lem:union-bound}) over the $n_0$ values of $i$,
+  $\Pr[\Cin \text{ is } \tau\text{-nice}] \geq 1 - n_0 2^{-\tau n_0}$.
+\end{proof}
+
+\begin{lemma}[Negative correlation in a random linear code, Lemma 2.4]
+  \label{lem:negative-correlation}
+  \uses{def:random-linear-code}
+  Let $\Ccode \subseteq \Ftwo^n$ be a random linear code of dimension $Rn$ and
+  let $x,y \in \Ftwo^n \setminus \{0\}$ with $x \neq y$. Then
+  \[
+    \Pr_{\Ccode}[x,y \in \Ccode] \leq \Pr_\Ccode[x \in \Ccode]\cdot
+      \Pr_\Ccode[y \in \Ccode].
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{def:random-linear-code}
+  A random linear code of dimension $Rn$ contains a fixed $d$-dimensional
+  subspace of $\Ftwo^n$ with probability $\prod_{i=0}^{d-1}
+  \frac{2^{Rn}-2^i}{2^n - 2^i}$. Since $x \neq y$ are nonzero and distinct they
+  span a $2$-dimensional subspace, so
+  \[
+    \Pr[x,y \in \Ccode] = \frac{(2^{Rn}-1)(2^{Rn}-2)}{(2^n-1)(2^n-2)}
+      \leq \left(\frac{2^{Rn}-1}{2^n-1}\right)^2 = \Pr[x \in \Ccode]\cdot
+      \Pr[y \in \Ccode],
+  \]
+  where $\Pr[x \in \Ccode] = \frac{2^{Rn}-1}{2^n-1}$ for each nonzero $x$.
+\end{proof}
+
+\section{Fourier analysis over $\Ftwo^{k_0 n}$}
+
+\begin{definition}[Fourier transform]
+  \label{def:fourier}
+  \uses{def:inner-product, lem:self-dual-basis}
+  Identifying $\Fq \cong \Ftwo^{k_0}$ via a self-dual basis, for
+  $\varphi : \Fq^n \to \R$ and $\omega \in \Fq^n$, the \emph{Fourier transform}
+  is
+  \[
+    \hat{\varphi}(\omega) = \frac{1}{q^n}\sum_{x \in \Fq^n}\varphi(x)
+      (-1)^{\Tr(\inner{\omega}{x})}
+      = \frac{1}{2^{k_0 n}}\sum_{x \in \Ftwo^{k_0 n}}\varphi(x)
+      (-1)^{\inner{\omega}{x}} .
+  \]
+\end{definition}
+
+\begin{lemma}[Fourier inversion, Equation (2)]
+  \label{lem:fourier-inversion}
+  \uses{def:fourier}
+  For any $\varphi : \Fq^n \to \R$ and any $x$,
+  $\varphi(x) = \sum_{\omega \in \Fq^n}\hat{\varphi}(\omega)(-1)^{\inner{x}{\omega}}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:fourier}
+  Using the orthogonality relation $\sum_{\omega}(-1)^{\inner{\omega}{z}} = q^n
+  \cdot \mathbf{1}[z = 0]$ (a sum of a nontrivial character over the group
+  vanishes), we compute
+  \[
+    \sum_{\omega}\hat{\varphi}(\omega)(-1)^{\inner{x}{\omega}}
+      = \frac{1}{q^n}\sum_y \varphi(y)\sum_\omega (-1)^{\inner{\omega}{x+y}}
+      = \frac{1}{q^n}\sum_y \varphi(y)\,q^n\,\mathbf{1}[x = y] = \varphi(x).
+  \]
+\end{proof}
+
+\begin{lemma}[Fourier transform of a subspace indicator, Equation (3)]
+  \label{lem:fourier-subspace}
+  \uses{def:fourier, def:dual-code}
+  For an $\Fq$-subspace $V \subseteq \Fq^n$ and any $g \in \Fq^n$,
+  \[
+    \widehat{\mathbf{1}_V}(g) = \frac{|V|}{q^n}\,\mathbf{1}_{V^\perp}(g).
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{def:fourier, def:dual-code}
+  By definition $\widehat{\mathbf{1}_V}(g) = \frac{1}{q^n}\sum_{x \in V}
+  (-1)^{\inner{g}{x}}$. The map $x \mapsto (-1)^{\inner{g}{x}}$ is a character of
+  the group $V$; it is trivial precisely when $g \in V^\perp$. Hence the inner
+  sum equals $|V|$ if $g \in V^\perp$ and $0$ otherwise, giving
+  $\frac{|V|}{q^n}\mathbf{1}_{V^\perp}(g)$.
+\end{proof}
+
+\section{Standard probabilistic and combinatorial facts}
+
+\begin{lemma}[Markov's inequality]
+  \label{lem:markov}
+  \lean{MeasureTheory.mul_meas_ge_le_lintegral}
+  \mathlibok
+  For a nonnegative random variable $Z$ and $t > 0$, $\Pr[Z \geq t] \leq
+  \E[Z]/t$.
+  % TODO: confirm exact Mathlib decl name (Markov / Chebyshev family).
+\end{lemma}
+
+\begin{lemma}[Chebyshev's inequality]
+  \label{lem:chebyshev}
+  \lean{ProbabilityTheory.meas_ge_le_variance_div_sq}
+  \mathlibok
+  For a random variable $Z$ with finite variance and $t > 0$,
+  $\Pr[|Z - \E[Z]| \geq t] \leq \operatorname{Var}[Z]/t^2$.
+  % TODO: confirm exact Mathlib decl name.
+\end{lemma}
+
+\begin{lemma}[Union bound]
+  \label{lem:union-bound}
+  \lean{measure_iUnion_le}
+  \mathlibok
+  For events $A_1,\dots,A_t$, $\Pr[\bigcup_i A_i] \leq \sum_i \Pr[A_i]$.
+\end{lemma}
+
+\begin{lemma}[Poisson distribution]
+  \label{lem:poisson-pmf}
+  \lean{ProbabilityTheory.poissonPMFReal}
+  \mathlibok
+  The Poisson distribution $\Poi(\lambda)$ has $\Pr[\Poi(\lambda) = r] =
+  \frac{\lambda^r e^{-\lambda}}{r!}$ for $r \in \N$.
+\end{lemma}
+
+\begin{lemma}[Bernoulli distribution]
+  \label{lem:bernoulli}
+  \lean{PMF.bernoulli}
+  \mathlibok
+  The Bernoulli distribution $\Ber(p)$ takes value $1$ with probability $p$ and
+  $0$ with probability $1-p$.
+\end{lemma}
+
+\begin{lemma}[Total variation distance]
+  \label{lem:tv-distance}
+  \lean{MeasureTheory.Measure.totalVariation}
+  \mathlibok
+  For probability distributions $\mathcal{P},\mathcal{Q}$ on a finite set,
+  $\dist_{\TV}(\mathcal{P},\mathcal{Q}) = \frac12\sum_\sigma
+  |\mathcal{P}(\sigma) - \mathcal{Q}(\sigma)|$.
+  % TODO: confirm Mathlib decl name for TV distance between PMFs.
+\end{lemma}
+
+\begin{lemma}[Parity of a Poisson variable]
+  \label{lem:poisson-parity}
+  \uses{lem:poisson-pmf}
+  If $Y \sim \Poi(\lambda)$ then $\Pr[Y \text{ odd}] = \tfrac12(1 - e^{-2\lambda})$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:poisson-pmf}
+  Summing the Poisson pmf over odd values,
+  \[
+    \Pr[Y \text{ odd}] = \sum_{j=0}^\infty \frac{\lambda^{2j+1}e^{-\lambda}}{(2j+1)!}
+      = e^{-\lambda}\cdot\frac{e^{\lambda} - e^{-\lambda}}{2}
+      = \tfrac12\big(1 - e^{-2\lambda}\big),
+  \]
+  using $\sum_{j\geq 0}\frac{\lambda^{2j+1}}{(2j+1)!} = \sinh\lambda =
+  \frac{e^\lambda - e^{-\lambda}}{2}$.
+\end{proof}
+
+\begin{lemma}[Poissonisation / Poisson splitting]
+  \label{lem:poisson-splitting}
+  \uses{lem:poisson-pmf}
+  \notready
+  If $r \sim \Poi(\Lambda)$ balls are thrown independently and uniformly into $M$
+  bins, then the occupancy counts $Y_1,\dots,Y_M$ are independent, each
+  distributed as $\Poi(\Lambda/M)$.
+  % TODO: standard Poissonisation fact; cite (e.g. [MU17]) or formalise.
+\end{lemma}
+
+\begin{lemma}[Poisson Chernoff tail]
+  \label{lem:poisson-chernoff}
+  \uses{lem:poisson-pmf}
+  \notready
+  If $r \sim \Poi(\lambda)$ then $\Pr[r \geq \lambda + t] \leq
+  \exp\!\big(\frac{-t^2}{\lambda + t}\big)$. In particular
+  $\Pr[r \geq \lambda + 100\sqrt{\lambda}] \leq \exp(-100^2/2)$.
+  % TODO: cited from [MU17] without proof in the paper.
+\end{lemma}
+
+\begin{lemma}[Entropy upper bound on binomial sums]
+  \label{lem:entropy-binom-upper}
+  \uses{def:binary-entropy}
+  For $\alpha \in [0,1/2]$ and $n \in \N$,
+  $\sum_{i=0}^{\lfloor \alpha n\rfloor}\binom{n}{i} \leq 2^{n\htwo(\alpha)}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:binary-entropy}
+  For $\alpha \in (0,1/2]$ we have $\frac{\alpha}{1-\alpha}\leq 1$, so for
+  $i \leq \alpha n$ the factor $(\alpha/(1-\alpha))^{i - \alpha n}\geq 1$. Hence
+  \[
+    \sum_{i \leq \alpha n}\binom{n}{i}
+      \leq \sum_{i \leq \alpha n}\binom{n}{i}
+        \left(\tfrac{\alpha}{1-\alpha}\right)^{i-\alpha n}
+      \leq \left(\tfrac{\alpha}{1-\alpha}\right)^{-\alpha n}
+        \sum_{i=0}^n \binom{n}{i}\left(\tfrac{\alpha}{1-\alpha}\right)^{i}
+      = \alpha^{-\alpha n}(1-\alpha)^{-(1-\alpha)n} = 2^{n\htwo(\alpha)},
+  \]
+  using the binomial theorem $\sum_i \binom{n}{i}t^i = (1+t)^i$ with
+  $t = \alpha/(1-\alpha)$, so $(1+t)^n = (1-\alpha)^{-n}$. The cases $\alpha = 0$
+  is trivial.
+\end{proof}
+
+\begin{lemma}[Entropy lower bound on a binomial]
+  \label{lem:entropy-binom-lower}
+  \uses{def:binary-entropy}
+  For $\alpha \in [0,1]$ with $\alpha n \in \N$,
+  $\binom{n}{\alpha n} \geq \frac{1}{n+1}2^{n\htwo(\alpha)} \geq
+  2^{(\htwo(\alpha) - \frac{\log_2(2n)}{2n})n}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:binary-entropy, lem:entropy-binom-upper}
+  Among the $n+1$ terms $\binom{n}{i}$ the term $\binom{n}{\alpha n}$ is the
+  largest at $i = \alpha n \leq n/2$ (or by symmetry), and $\binom{n}{\alpha n}
+  \alpha^{\alpha n}(1-\alpha)^{(1-\alpha)n}$ is the largest term of
+  $1 = (\alpha + (1-\alpha))^n = \sum_i \binom{n}{i}\alpha^i(1-\alpha)^{n-i}$,
+  whence $\binom{n}{\alpha n}\alpha^{\alpha n}(1-\alpha)^{(1-\alpha)n}\geq
+  \frac{1}{n+1}$, i.e.\ $\binom{n}{\alpha n}\geq \frac{1}{n+1}2^{n\htwo(\alpha)}$.
+  Finally $\frac{1}{n+1}\geq 2^{-\log_2(2n)}$ for $n \geq 1$ gives the second
+  inequality.
+\end{proof}
+
+\begin{lemma}[Linear upper bound on $\htwo$]
+  \label{lem:h2-upper-linear}
+  \uses{def:binary-entropy}
+  For all $x \in [0,1]$, $\htwo(x) \leq -x\log_2 x + 2x$.
+\end{lemma}
+\begin{proof}
+  \uses{def:binary-entropy}
+  We have $\htwo(x) = -x\log_2 x - (1-x)\log_2(1-x)$. It suffices to show
+  $-(1-x)\log_2(1-x) \leq 2x$ for $x \in [0,1]$. Writing $u = 1-x \in [0,1]$ this
+  is $-u\log_2 u \leq 2(1-u)$. Since $\ln u \geq 1 - 1/u$ gives
+  $-\ln u \leq \frac{1-u}{u}$, we get $-u\ln u \leq 1-u$, so
+  $-u\log_2 u = \frac{-u\ln u}{\ln 2}\leq \frac{1-u}{\ln 2}\leq 2(1-u)$, as
+  $1/\ln 2 < 2$.
+\end{proof}
+
+\begin{lemma}[Inverse entropy: quadratic upper bound]
+  \label{lem:h2-inv-upper}
+  \uses{def:binary-entropy}
+  \notready
+  For $x \in [0,1]$, $\htwo^{-1}(1 - x^2) \leq \frac12 - \frac{\sqrt{\ln 2}}{2}x$.
+  % TODO: cited as [GRS, Lemma B.2.4]; cite or reconstruct.
+\end{lemma}
+
+\begin{lemma}[Inverse entropy: linear lower bound]
+  \label{lem:h2-inv-lower}
+  \uses{def:binary-entropy}
+  \notready
+  For $x \in [0,\tfrac14]$, $\htwo^{-1}(1 - x) \geq \frac12 - 5x^2$.
+  % TODO: cited as [GRS, Lemma B.2.4]; cite or reconstruct.
+\end{lemma}
+
+\begin{lemma}[Counting bounded even compositions]
+  \label{lem:stars-bars}
+  The number of ways to choose a multiset of $s$ even positive integers (an
+  ordered assignment of even values to $\leq s/2$ chosen positions summing to a
+  prescribed even total $S$ with $s = S$) is at most $2^{3S/2}$; concretely, the
+  number of nonnegative integer compositions counted in the proof of Claim~4.3 is
+  $\binom{S/2 + S - 1}{S} \leq 2^{3S/2}$.
+\end{lemma}
+\begin{proof}
+  By stars and bars, the number of ways to distribute is
+  $\binom{S/2 + S - 1}{S} \leq 2^{S/2 + S - 1}\leq 2^{3S/2}$, using
+  $\binom{a+b}{b}\leq 2^{a+b}$.
+\end{proof}
+
+\chapter{A Useful Moment Computation}
+\label{chap:moment}
+
+Throughout this chapter $\Cout \subseteq \Fq^n$ and $\Cin \subseteq \Ftwo^{n_0}$
+are \emph{fixed} linear codes of rate $\varepsilon$ (with $q = 2^{k_0}$,
+$k = \varepsilon n$, $k_0 = \varepsilon n_0$, $N = n_0 n$); the only randomness is
+in a uniform nonzero message $m \in \Fq^k \setminus \{0\}$.
+
+\begin{definition}[The set $\Omega$, Definition 3.1]
+  \label{def:omega}
+  \uses{def:linear-code, lem:self-dual-basis}
+  Let $G_0 \in \Ftwo^{n_0 \times k_0}$ be a generator matrix of $\Cin$, so that
+  $\Cin = \{G_0 x : x \in \Ftwo^{k_0}\}$. Let $\Omega \subseteq \Ftwo^{k_0}$ be
+  the set of rows of $G_0$, so $|\Omega| = n_0$. Identifying $\Ftwo^{k_0}$ with
+  $\Fq$ via a self-dual basis, we also view $\Omega \subseteq \Fq$. We call
+  $\Omega$ the set \emph{derived from} $\Cin$.
+\end{definition}
+
+\begin{definition}[Bias variable $X_m$, Definition 3.2]
+  \label{def:Xm}
+  \uses{def:omega, constr:concatenation, def:inner-product}
+  For a message $m \in \Fq^k$, define
+  \[
+    X_m \triangleq \sum_{\alpha \in [n]}\sum_{b \in \Omega}
+      (-1)^{\inner{\Cout(m)_\alpha}{b}} .
+  \]
+  Then $X_m$ is the bias (number of zeros minus number of ones) of the codeword
+  $\Ccode(m) = (\Cout \circ \Cin)(m)$: the weight of $\Ccode(m)$ is at least
+  $\frac12 - O(\varepsilon)$ iff $X_m = O(\varepsilon N)$. For an ordered list
+  $\Vcal$ of pairs in $[n]\times\Omega$ and $\alpha \in [n]$, let
+  $\Vcal_\alpha$ be the multiset $\{b : (\alpha,b) \in \Vcal\}$ (with
+  multiplicity).
+\end{definition}
+
+\begin{lemma}[Moment formula, Lemma 3.3]
+  \label{lem:moment-formula}
+  \uses{def:Xm, def:omega, def:dual-code, def:fourier}
+  Suppose $\Omega$ is derived from $\Cin$. For every integer $r \geq 1$,
+  \[
+    \E_{m \sim \Fq^k \setminus \{0\}}\!\big[X_m^r\big] =
+      \frac{1}{q^k - 1}\sum_{\Vcal \in ([n]\times\Omega)^r}
+      \Big(q^k\cdot \mathbf{1}\big[g_\Vcal \in \Cout^\perp\big] - 1\Big),
+  \]
+  where $\Vcal$ ranges over tuples $((\alpha_1,b_1),\dots,(\alpha_r,b_r))$ and
+  $g_\Vcal \in \Fq^n$ is defined by $(g_\Vcal)_\alpha = \sum_{b \in \Vcal_\alpha} b$.
+\end{lemma}
+\begin{proof}
+  \uses{def:Xm, def:fourier, lem:fourier-inversion, lem:fourier-subspace, def:dual-code}
+  Expanding the $r$-th power,
+  \[
+    X_m^r = \sum_{\Vcal = ((\alpha_1,b_1),\dots,(\alpha_r,b_r))}
+      \prod_{j=1}^r (-1)^{\inner{\Cout(m)_{\alpha_j}}{b_j}} .
+  \]
+  Taking the expectation over $m \in \Fq^k \setminus \{0\}$ and grouping the
+  $b_j$ by their coordinate $\alpha$,
+  \begin{equation}
+    \E_{m}[X_m^r] = \frac{1}{q^k-1}\sum_{m \neq 0}\sum_\Vcal
+      \prod_{\alpha \in [n]}(-1)^{\inner{\Cout(m)_\alpha}{\sum_{b\in\Vcal_\alpha}b}},
+    \tag{4}
+  \end{equation}
+  with the convention $\sum_{b \in \Vcal_\alpha} b = 0$ when $\Vcal_\alpha$ is
+  empty. For $\alpha \in [n]$ set $\varphi_\alpha(x) =
+  (-1)^{\inner{x}{\sum_{b\in\Vcal_\alpha}b}}$. Its Fourier transform over
+  $\Ftwo^{k_0}$ (Definition~\ref{def:fourier}) is
+  \[
+    \widehat{\varphi_\alpha}(w) = \frac{1}{q}\sum_{x \in \Ftwo^{k_0}}
+      (-1)^{\inner{x}{\sum_{b\in\Vcal_\alpha}b} + \inner{w}{x}}
+      = \mathbf{1}\Big[w = \sum_{b\in\Vcal_\alpha}b\Big].
+  \]
+  Write $\overline{m} = \Cout(m)$. Substituting via Fourier inversion
+  (Lemma~\ref{lem:fourier-inversion}) and exchanging the product and sum over
+  $g : [n] \to \Ftwo^{k_0}$,
+  \[
+    \E_m[X_m^r] = \frac{1}{q^k-1}\sum_{m\neq 0}\sum_\Vcal\sum_{g \in \Fq^n}
+      \Big(\prod_\alpha \widehat{\varphi_\alpha}(g_\alpha)\Big)
+      \Big(\prod_\alpha (-1)^{\inner{g_\alpha}{\overline{m}_\alpha}}\Big).
+  \]
+  Moving the sum over $m$ inside,
+  \begin{equation}
+    \E_m[X_m^r] = \frac{1}{q^k-1}\sum_\Vcal\sum_{g\in\Fq^n}
+      \Big(\prod_\alpha \widehat{\varphi_\alpha}(g_\alpha)\Big)
+      \Big(\sum_{m\neq 0}(-1)^{\inner{g}{\overline{m}}}\Big).
+    \tag{5}
+  \end{equation}
+  Now by Lemma~\ref{lem:fourier-subspace} applied to $V = \Cout$
+  (so $|\Cout| = q^k$),
+  \begin{equation}
+    \sum_{m \in \Fq^k \setminus\{0\}}(-1)^{\inner{g}{\overline{m}}}
+      = q^k\cdot \mathbf{1}[g \in \Cout^\perp] - 1,
+    \tag{6}
+  \end{equation}
+  since $\sum_{m \in \Fq^k}(-1)^{\inner{g}{\overline{m}}} = q^n
+  \widehat{\mathbf{1}_{\Cout}}(g) = |\Cout|\mathbf{1}_{\Cout^\perp}(g) =
+  q^k \mathbf{1}_{\Cout^\perp}(g)$ and we subtract the $m=0$ term, which equals
+  $1$. Plugging (6) into (5),
+  \begin{equation}
+    \E_m[X_m^r] = \frac{1}{q^k-1}\sum_\Vcal\sum_{g\in\Fq^n}
+      \Big(\prod_\alpha \widehat{\varphi_\alpha}(g_\alpha)\Big)
+      \big(q^k\mathbf{1}[g\in\Cout^\perp]-1\big).
+    \tag{7}
+  \end{equation}
+  Finally $\prod_\alpha \widehat{\varphi_\alpha}(g_\alpha) =
+  \mathbf{1}[\forall \alpha,\ g_\alpha = \sum_{b\in\Vcal_\alpha}b] =
+  \mathbf{1}[g = g_\Vcal]$, so the only surviving $g$ is $g_\Vcal$, yielding the
+  claimed formula.
+\end{proof}
+
+\chapter{Most Linear Codes \texorpdfstring{$\Cout$}{Cout} Work Well}
+\label{chap:most}
+
+\begin{definition}[Multiplicity and parity matrices, Definition 4.1]
+  \label{def:V-B}
+  \uses{def:Xm}
+  For a sequence $\Vcal = ((\alpha_1,b_1),\dots,(\alpha_r,b_r))$, let
+  $V = V(\Vcal) \in \N^{n \times n_0}$ be its ``unordered'' version, where
+  $V[\alpha,b]$ is the number of times $(\alpha,b)$ appears in $\Vcal$. Let
+  $B = B(\Vcal) = V \bmod 2$ (entrywise). The \emph{weight} $\|B\|$ is the number
+  of $1$-entries of $B$.
+\end{definition}
+
+\begin{lemma}[Counting kernel sequences, Claim 4.3]
+  \label{claim:counting-W}
+  \uses{def:V-B, def:tau-nice, def:omega, lem:entropy-binom-upper, lem:h2-upper-linear, lem:stars-bars}
+  Fix a linear code $\Cin \subseteq \Ftwo^{n_0}$ of dimension $k_0$ that is
+  $\tau$-nice for $\tau = 1/\sqrt{n_0}$. Let $\varepsilon \triangleq k_0/n_0$ and
+  $r \in \N$. Let $G_0 \in \Ftwo^{n_0\times k_0}$ have left kernel
+  $\Cin^\perp$, and set
+  \[
+    W = \big\{\Vcal \in ([n]\times\Omega)^r : B(\Vcal)\cdot G_0 = 0\big\}.
+  \]
+  Then
+  \[
+    |W| \leq (8N)^r \cdot (r/N)^{r/2}\cdot 2^{\frac{2N}{\sqrt{n_0}} + \log_2 N}
+      \cdot \max\Big\{1, \Big(\tfrac{re}{\varepsilon^2 N}\Big)^{r/2}\Big\}.
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{def:V-B, def:tau-nice, lem:entropy-binom-upper, lem:h2-upper-linear, lem:stars-bars}
+  Let $W' = \{V(\Vcal) : \Vcal \in W\}$. Since $V(\Vcal)$ retains all of $\Vcal$
+  up to ordering, $|W| \leq r!\,|W'|$. We bound $|W'|$.
+
+  Fix $V \in W'$ and write $V = B + E$ where $B \in \{0,1\}^{n\times n_0}$ is the
+  parity matrix and $E$ has all entries even. The total entry-sum of $V$ is $r$;
+  write $p = r/N$, so the entry-sum is $Np$. For $0 \leq m \leq Np$ let $W'_m$ be
+  the set of $V = B+E \in W'$ with $\|B\| = m$. We count the choices of $E$ and
+  $B$ separately.
+
+  \textbf{Choosing $E$.} The matrix $E$ has entry-sum $Np - m$. Each nonzero
+  entry of $E$ is even, hence $\geq 2$, so $E$ has at most $\frac{Np-m}{2}$
+  nonzero entries. The number of ways to choose their positions is at most
+  $\sum_{t=0}^{(Np-m)/2}\binom{N}{t} \leq 2^{N\cdot\htwo\left(\frac{Np-m}{2N}\right)}$
+  by Lemma~\ref{lem:entropy-binom-upper}. Given the positions, the number of even
+  value-assignments is at most $\binom{\frac{Np-m}{2}+Np-m-1}{Np-m}\leq 2^{3Np/2}$
+  by Lemma~\ref{lem:stars-bars}.
+
+  \textbf{Choosing $B$.} Let $I = \{i \in [n] : B_i \neq 0\}$ be the set of
+  nonzero rows; the number of choices of $I$ is at most $2^n$. Write
+  $|I| = \gamma n$. Given $m$ and $I$, we claim there are at most
+  $2^{N\gamma(\htwo(m/\gamma N) - \varepsilon + 1/\sqrt{n_0})}$ choices for $B$.
+  Indeed, every row of $B$ must lie in $\Cin^\perp$. Let $B'$ be a uniformly
+  random matrix among those of weight $m$ whose nonzero rows are exactly $I$; the
+  number of such matrices is at most
+  $\binom{n_0|I|}{m} = \binom{\gamma n n_0}{m}\leq 2^{\gamma N\htwo(m/\gamma N)}$.
+  Conditioning on the weight $w$ of each row, $\tau$-niceness with
+  $\tau = 1/\sqrt{n_0}$ gives, for each $i \in I$,
+  \[
+    \Pr\big[B'_i \in \Cin^\perp \mid |B'_i| = w\big]
+      = \frac{|\{x \in \Cin^\perp : |x| = w\}|}{\binom{n_0}{w}}
+      \leq 2^{-n_0\varepsilon + \sqrt{n_0}} .
+  \]
+  Since the rows are independent under this conditioning, the probability that
+  all $\gamma n$ nonzero rows of $B'$ lie in $\Cin^\perp$ is at most
+  $2^{\gamma n(-n_0\varepsilon + \sqrt{n_0})} = 2^{\gamma N(-\varepsilon +
+  1/\sqrt{n_0})}$ (using $n\sqrt{n_0} = N/\sqrt{n_0}$). Multiplying the count of
+  weight-$m$ matrices by this probability proves the claim.
+
+  \textbf{Combining.} Writing $m = \alpha N$ and combining the bounds,
+  \[
+    \frac{\log_2|W'_m|}{N} \leq \max_{\gamma\in[0,1]}
+      \Big\{\tfrac{3p}{2} + \tfrac{n}{N} + \htwo\!\big(\tfrac{p-\alpha}{2}\big)
+      + \gamma\big(\htwo(\tfrac{\alpha}{\gamma}) - \varepsilon +
+      \tfrac{1}{\sqrt{n_0}}\big)\Big\}.
+  \]
+  Using $\htwo(x) \leq -x\log_2 x + 2x$ (Lemma~\ref{lem:h2-upper-linear}) and
+  optimising over $\gamma$ (the choice $\gamma = \alpha/(\varepsilon\ln 2)$
+  maximises the bracket) gives, after simplification,
+  \[
+    \frac{\log_2|W'_m|}{N} \leq 3p + \tfrac{1}{\sqrt{n_0}} + \tfrac{n}{N}
+      + \tfrac{p-\alpha}{2}\log_2\!\big(\tfrac{2}{p-\alpha}\big)
+      + \alpha\log_2\!\big(\tfrac{1}{\varepsilon}\big).
+  \]
+  The last expression is maximised at $\alpha = \max\{p - \varepsilon^2/e, 0\}$:
+  its derivative in $\alpha$ is $\frac{1}{2\ln 2}\big(1 + \ln\frac{p-\alpha}{
+  \varepsilon^2}\big)$, which is negative throughout $[0,p]$ when
+  $p < \varepsilon^2/e$ (so the max is at $\alpha = 0$), and vanishes at
+  $\alpha = p - \varepsilon^2/e$ when $p \geq \varepsilon^2/e$. Plugging in each
+  case yields
+  \[
+    \frac{\log_2|W'_m|}{N} \leq 3p + \tfrac{1}{\sqrt{n_0}} + \tfrac{n}{N}
+      + \tfrac{p}{2}\log_2\!\Big(\max\big\{\tfrac{1}{p}, \tfrac{e}{\varepsilon^2}\big\}\Big).
+  \]
+  Therefore, summing over $0 \leq m \leq Np$ and using $|W| \leq r!\,|W'| \leq
+  (Np)!\sum_{m}|W'_m|$,
+  \[
+    |W| \leq N^{Np+1}\cdot 2^{3Np + N/\sqrt{n_0} + n}\cdot p^{Np/2}\cdot
+      \big(\max\{1, p/\varepsilon^2\}\big)^{Np/2}
+      \leq (8N)^r (r/N)^{r/2} 2^{2N/\sqrt{n_0}+\log_2 N}
+      \big(\max\{1, \tfrac{r}{\varepsilon^2 N}\}\big)^{r/2},
+  \]
+  where we substituted $p = r/N$ and used $n = N/n_0 \leq N/\sqrt{n_0}$.
+\end{proof}
+
+\begin{theorem}[Most outer codes are good, Theorem 4.2]
+  \label{thm:most-codes}
+  \uses{constr:concatenation, def:tau-nice, def:random-linear-code, lem:moment-formula, claim:counting-W, def:relative-distance}
+  There exist constants $c, \bar{c}, \tilde{c} > 0$ such that the following
+  holds. Fix an integer $k > 0$, any sufficiently small $\varepsilon > 0$ (in
+  terms of $\bar c$), and a power of two $q = 2^{k_0}$. Let $n_0 = k_0/\varepsilon$,
+  $n = k/\varepsilon$, $N = n_0 n$, and suppose $q \geq 2^{\tilde c/\varepsilon^3}$.
+  Let $\Cin \subseteq \Ftwo^{n_0}$ be a linear code of dimension $k_0$ that is
+  $\tau$-nice for $\tau = 1/\sqrt{n_0}$, and let $\Cout \subseteq \Fq^n$ be an
+  independent random linear code of dimension $k$. Then with probability at least
+  $1 - 2^{-\varepsilon^2 N/\bar c}$ over $\Cout$, the relative distance of
+  $\Ccode = \Cout \circ \Cin \subseteq \Ftwo^N$ is at least
+  $\frac12 - c\varepsilon$.
+\end{theorem}
+\begin{proof}
+  \uses{lem:moment-formula, claim:counting-W, lem:markov, def:random-linear-code, def:Xm}
+  Choose $r = \varepsilon^2 N$ (the smallest even integer larger than
+  $\varepsilon^2 N$; assume WLOG equality). By Lemma~\ref{lem:moment-formula},
+  for any fixed $\Cin$ (hence fixed $\Omega$),
+  \begin{equation}
+    \E_{m \sim \Fq^k\setminus\{0\}}[X_m^r(\Cout,\Omega)]
+      = \frac{1}{q^k-1}\sum_{\Vcal\in([n]\times\Omega)^r}
+      \big(q^k\mathbf{1}[g_\Vcal\in\Cout^\perp]-1\big).
+    \tag{8}
+  \end{equation}
+  Take the expectation over the random $\Cout$. Since $\Cout^\perp$ is a random
+  linear code of dimension $n-k$, for any fixed $\Vcal$,
+  $\Pr_{\Cout}[g_\Vcal\in\Cout^\perp] = 1$ if $g_\Vcal = 0$ and
+  $\frac{q^{n-k}-1}{q^n-1}$ otherwise. Hence
+  \begin{equation}
+    \E_{\Cout,m}[X_m^r] = \frac{1}{q^k-1}\sum_\Vcal
+      \big(q^k\Pr_\Cout[g_\Vcal\in\Cout^\perp]-1\big)
+      = \sum_\Vcal\Big(\mathbf{1}[g_\Vcal=0]
+      - \tfrac{1}{q^n-1}\mathbf{1}[g_\Vcal\neq 0]\Big)
+      \leq \sum_\Vcal \mathbf{1}[g_\Vcal = 0].
+    \tag{9}
+  \end{equation}
+  Now $g_\Vcal = 0$ iff every row of $B(\Vcal)$ is a left-kernel vector of $G_0$,
+  i.e.\ iff every row of $B(\Vcal)$ lies in $\Cin^\perp$, i.e.\ iff
+  $\Vcal \in W$ as in Claim~\ref{claim:counting-W}. Thus $\sum_\Vcal
+  \mathbf{1}[g_\Vcal=0] = |W|$, and Claim~\ref{claim:counting-W} with
+  $r = \varepsilon^2 N$ (so $r/N = \varepsilon^2$ and
+  $\max\{1,(re/\varepsilon^2 N)^{r/2}\} = e^{r/2}$) gives
+  \begin{equation}
+    \E_{\Cout,m}[X_m^r] \leq |W| \leq (8N)^r(e\varepsilon^2)^{r/2}
+      2^{2N\varepsilon^2/\sqrt{\tilde c}}\cdot N = (32\sqrt e\,N\varepsilon)^r\cdot N,
+    \tag{10}
+  \end{equation}
+  using $q \geq 2^{\tilde c/\varepsilon^3} \Rightarrow n_0 \geq \tilde c/\varepsilon^4$
+  (so $2N/\sqrt{n_0}\leq 2N\varepsilon^2/\sqrt{\tilde c}$) and WLOG
+  $\tilde c \geq 1$ so that $8\sqrt e\cdot 2^{2/\sqrt{\tilde c}}\leq 32\sqrt e$.
+
+  By Markov's inequality (Lemma~\ref{lem:markov}), using that $r$ is even so
+  $X_m^r = |X_m|^r$, and $q^k = 2^{N\varepsilon^2} = 2^r$,
+  \[
+    \Pr_\Cout\big[\exists m\neq 0,\ X_m > c\varepsilon N\big]
+      \leq \sum_{m\neq 0}\frac{\E_\Cout[X_m^r]}{(c\varepsilon N)^r}
+      = \frac{(q^k-1)\E_{\Cout,m}[X_m^r]}{(c\varepsilon N)^r}
+      \leq \frac{2^r\,\E_{\Cout,m}[X_m^r]}{(c\varepsilon N)^r}.
+  \]
+  Plugging in (10) gives
+  $\big(\frac{64\sqrt e\,N\varepsilon}{c\varepsilon N}\big)^r\cdot N
+  = (\frac{64\sqrt e}{c})^r\cdot N$. Choosing $c = 128\sqrt e$ yields
+  $\Pr_\Cout[\exists m\neq 0,\ X_m > c\varepsilon N]\leq N\cdot 2^{-r}
+  = N\cdot 2^{-N\varepsilon^2}$. Since $n_0 \geq \tilde c/\varepsilon^4$ implies
+  $n_0 \leq 2^{n_0\varepsilon^2}$ (for small $\varepsilon$) and hence
+  $N = n n_0 \leq 2^{N\varepsilon^2}$, for sufficiently large $N$ we have
+  $N \leq 2^{N\varepsilon^2/2}$, so the probability is at most
+  $2^{-N\varepsilon^2/2} \leq 2^{-\varepsilon^2 N/\bar c}$ for $\bar c \geq 2$.
+  When no message has $X_m > c\varepsilon N$, every nonzero codeword of $\Ccode$
+  has weight at least $\frac12 - c\varepsilon$ times $N$ (by
+  Definition~\ref{def:Xm}), so the relative distance is at least
+  $\frac12 - c\varepsilon$.
+\end{proof}
+
+\chapter{A Soft-Decoding Sufficient Condition}
+\label{chap:soft}
+
+In this chapter $\Cin$ is fixed and $\tau$-nice, and we seek a deterministic
+condition on $\Cout$ alone guaranteeing that $\Cout \circ \Cin$ approaches the
+GV bound. Here $X_m$ and $\Omega$ are as in Chapter~\ref{chap:moment}.
+
+\begin{definition}[Bad message]
+  \label{def:bad-message}
+  \uses{def:Xm}
+  Fix a constant $c > 0$. A message $m \in \Fq^k\setminus\{0\}$ is \emph{bad} if
+  $|X_m| \geq c\varepsilon N$. If there are no bad messages then every nonzero
+  codeword of $\Cout\circ\Cin$ has relative weight at least $\frac{1-c\varepsilon}{2}$.
+\end{definition}
+
+\begin{definition}[Moment counter $\mathcal{B}_r$]
+  \label{def:Br}
+  \uses{lem:moment-formula, def:omega, def:dual-code}
+  For $r \geq 0$ define
+  \[
+    \mathcal{B}_r(\Cout,\Cin) \triangleq \frac{q^k}{q^k-1}\cdot
+      \frac{1}{(c\varepsilon N)^r}\sum_{\Vcal\in([n]\times\Omega)^r}
+      \big(q^k\mathbf{1}[g_\Vcal\in\Cout^\perp]-1\big).
+  \]
+\end{definition}
+
+\begin{lemma}[Bad messages are few, Observation 5.2]
+  \label{obs:bad-count}
+  \uses{def:Br, def:bad-message, lem:moment-formula, lem:markov}
+  For any $r$, the number of bad messages $m \in \Fq^k\setminus\{0\}$ is at most
+  $\mathcal{B}_r(\Cout,\Cin)$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:moment-formula, lem:markov, def:Br}
+  By Lemma~\ref{lem:moment-formula}, $\E_{m}[X_m^r] = \frac{1}{q^k-1}
+  \sum_\Vcal(q^k\mathbf{1}[g_\Vcal\in\Cout^\perp]-1)$. For $r$ even,
+  $X_m^r = |X_m|^r$, and Markov's inequality (Lemma~\ref{lem:markov}) gives
+  $\Pr_m[|X_m|\geq c\varepsilon N] = \Pr_m[X_m^r \geq (c\varepsilon N)^r]\leq
+  \frac{1}{q^k}\mathcal{B}_r(\Cout,\Cin)$. The number of bad $m$ equals
+  $(q^k-1)\Pr_m[|X_m|\geq c\varepsilon N]\leq \frac{q^k-1}{q^k}
+  \mathcal{B}_r(\Cout,\Cin)\leq \mathcal{B}_r(\Cout,\Cin)$.
+\end{proof}
+
+\begin{definition}[Distribution $\mathcal{D}_r$]
+  \label{def:Dr}
+  \uses{def:omega}
+  Let $\mathcal{D}_r$ be the distribution on $g \in \Fq^n$ obtained by sampling
+  $\Vcal = ((\alpha_1,b_1),\dots,(\alpha_r,b_r))$ with each $(\alpha_i,b_i) \in
+  [n]\times\Omega$ independent and uniform, and setting
+  $g_\alpha = \sum_{b \in \Vcal_\alpha} b$. Rewriting
+  Definition~\ref{def:Br} as an expectation gives
+  \begin{equation}
+    \mathcal{B}_r(\Cout,\Cin) = \frac{q^k}{q^k-1}\Big(\tfrac{1}{c\varepsilon}\Big)^r
+      \big(q^k\Pr_{g\sim\mathcal{D}_r}[g\in\Cout^\perp]-1\big).
+    \tag{12}
+  \end{equation}
+\end{definition}
+
+\begin{lemma}[Poissonised decoupling, Claim 5.3]
+  \label{claim:poisson-decouple}
+  \uses{def:Dr, lem:poisson-splitting, lem:poisson-parity, lem:bernoulli}
+  Suppose $r \sim \Poi(\tilde c\varepsilon^2 N)$ and $g \sim \mathcal{D}_r$. Then
+  the joint distribution of the coordinates $g_\alpha$ is
+  \[
+    g_\alpha = \sum_{b\in\Omega}\zeta_{\alpha,b}\cdot b,\qquad
+    \zeta_{\alpha,b}\sim\Ber\!\Big(\tfrac{1 - e^{-2\tilde c\varepsilon^2}}{2}\Big)
+    \text{ i.i.d.}
+  \]
+  In particular the $g_\alpha$ are independent and identically distributed across
+  $\alpha\in[n]$, matching the product distribution $\mathcal{D}^n$ of
+  Theorem~\ref{thm:soft-decoding}.
+\end{lemma}
+\begin{proof}
+  \uses{lem:poisson-splitting, lem:poisson-parity, lem:bernoulli}
+  View choosing the $(\alpha_i,b_i)$ as dropping $r$ balls into the
+  $N = |[n]\times\Omega|$ bins. Since $r \sim \Poi(\tilde c\varepsilon^2 N)$, by
+  Poisson splitting (Lemma~\ref{lem:poisson-splitting}) the occupancy
+  $Y_{\alpha,b}$ of each bin $(\alpha,b)$ is independent and distributed as
+  $\Poi(\tilde c\varepsilon^2)$. Since $Y_{\alpha,b}$ is the number of times $b$
+  appears in $\Vcal_\alpha$, working over a field of characteristic $2$ we have
+  $g_\alpha = \sum_b Y_{\alpha,b}\,b = \sum_b \zeta_{\alpha,b}\,b$ with
+  $\zeta_{\alpha,b} = Y_{\alpha,b}\bmod 2$. The $\zeta_{\alpha,b}$ are
+  independent, and by Lemma~\ref{lem:poisson-parity},
+  $\Pr[\zeta_{\alpha,b} = 1] = \Pr[Y_{\alpha,b}\text{ odd}] =
+  \frac12(1 - e^{-2\tilde c\varepsilon^2})$.
+\end{proof}
+
+\begin{lemma}[The $g = 0$ term is small, Claim 5.4]
+  \label{claim:term13}
+  \uses{def:Dr, claim:counting-W, lem:poisson-pmf, claim:poisson-decouple}
+  Suppose the constants $c,\tilde c$ satisfy $\tilde c \geq 4\ln 2$ and
+  $c \geq 72\tilde c$, that $n$ is sufficiently large, $r \sim \Poi(\tilde c
+  \varepsilon^2 N)$, and $n_0 \geq 64/\varepsilon^4$. Let
+  \[
+    (13) \triangleq q^k\Big(1 + \tfrac{1}{q^k-1}\Big)
+      \Big(\tfrac{1}{c\varepsilon}\Big)^r \Pr_{g\sim\mathcal{D}_r}[g = 0].
+  \]
+  Then $\E_r[(13)] \leq 2^{-\varepsilon^2 N/2}$.
+\end{lemma}
+\begin{proof}
+  \uses{claim:counting-W, lem:poisson-pmf}
+  For fixed $r$, the event $g = 0$ is exactly that all rows of $B(\Vcal)$ lie in
+  $\Cin^\perp$, so by Claim~\ref{claim:counting-W} (dividing the bound on $|W|$
+  by $N^r$),
+  \[
+    \Pr_{g\sim\mathcal{D}_r}[g=0] \leq 8^r(r/N)^{r/2}
+      2^{2N/\sqrt{n_0}+\log_2 N}\big(\max\{1,\tfrac{er}{\varepsilon^2 N}\}\big)^{r/2}.
+  \]
+  Let $\lambda = \tilde c\varepsilon^2 N$ be the Poisson mean. Taking the
+  expectation over $r \sim \Poi(\lambda)$ and using the Poisson pmf
+  (Lemma~\ref{lem:poisson-pmf}),
+  \[
+    \E_r[q^k(\tfrac{1}{c\varepsilon})^r\Pr_{\mathcal{D}_r}[g=0]]
+      \leq e^{-\lambda}q^k 2^{3N/\sqrt{n_0}}\sum_{r\geq 0}\frac{1}{r!}
+      \Big(\tfrac{8\lambda\sqrt{r/N}}{c\varepsilon}\Big)^r
+      \big(\max\{1,\tfrac{er}{\varepsilon^2 N}\}\big)^{r/2}.
+  \]
+  Splitting the sum at $r = \varepsilon^2 N/e$: the first part (where the maximum
+  is $1$) is bounded, using $r \leq \varepsilon^2 N/e$, by
+  $\sum_{r}\frac{1}{r!}\big(\frac{8\lambda\sqrt{\varepsilon^2/e}}{c\varepsilon}\big)^r
+  = \exp(\frac{8}{c\sqrt e}\lambda)$. The second part (where the maximum is
+  $\frac{er}{\varepsilon^2 N}$), using $r! \geq (r/e)^r$, is bounded by
+  $\sum_{r > \varepsilon^2 N/e}\big(\frac{8e\sqrt e\,\tilde c}{c}\big)^r \leq
+  2^{-\varepsilon^2 N/e} < 1$ provided $c \geq 16 e\sqrt e\,\tilde c$. Hence
+  \[
+    \E_r[q^k(\tfrac{1}{c\varepsilon})^r\Pr_{\mathcal{D}_r}[g=0]]
+      \leq 2e^{-\lambda}q^k 2^{3N/\sqrt{n_0}}\exp(8\lambda/c)
+      \leq \exp_2\!\Big(-\varepsilon^2 N\big(1 - \tfrac{4}{\varepsilon^2\sqrt{n_0}}\big)\Big)
+      \leq 2^{-\varepsilon^2 N/2},
+  \]
+  using $q^k = 2^{\varepsilon^2 N}$, $\lambda = \tilde c\varepsilon^2 N$, the
+  hypotheses $\tilde c \geq 4\ln 2$, $c \geq 16$, and finally
+  $n_0 \geq 64/\varepsilon^4$. The factor $1 + \frac{1}{q^k-1}\leq 2$ only
+  changes the constant.
+\end{proof}
+
+\begin{theorem}[Soft-decoding sufficient condition, Theorem 5.1]
+  \label{thm:soft-decoding}
+  \uses{def:tau-nice, def:omega, obs:bad-count, claim:poisson-decouple, claim:term13, lem:poisson-chernoff, def:relative-distance, lem:bernoulli}
+  There are constants $\tilde c, c > 0$ so that the following holds. Let
+  $\varepsilon > 0$, and let $\Cin \subseteq \Ftwo^{n_0}$ be a binary linear code
+  of dimension $k_0 = \varepsilon n_0$ that is $\tau$-nice for
+  $\tau = 1/\sqrt{n_0}$, with $n_0 \geq 64/\varepsilon^4$. Let $\Omega \subseteq
+  \Fq$ be the set derived from $\Cin$ (Definition~\ref{def:omega}). Let
+  $Y \in \F$ be $Y = \sum_{b\in\Omega}\zeta_b\cdot b$ where
+  $\zeta_b \sim \Ber\big(\frac{1-e^{-2\tilde c\varepsilon^2}}{2}\big)$ are i.i.d.,
+  and let $\mathcal{D}$ be the distribution of $Y$. Suppose
+  $\Cout \subseteq \Fq^n$ is a linear code of dimension $k = \varepsilon n$ with
+  \begin{equation}
+    \Pr_{x\sim\mathcal{D}^n}[x \in \Cout^\perp\setminus\{0\}]
+      \leq \frac{1}{q^k}(1 + \Delta),\qquad
+    \Delta \leq \Big(\tfrac{c\varepsilon}{2}\Big)^{\tilde c\varepsilon^2 N
+      + 100\sqrt{\tilde c\varepsilon^2 N}}.
+    \tag{11}
+  \end{equation}
+  Then $\Cout \circ \Cin$ is a binary linear code of rate $\varepsilon^2$ with
+  relative distance at least $\frac{1-c\varepsilon}{2}$.
+\end{theorem}
+\begin{proof}
+  \uses{obs:bad-count, claim:term13, claim:poisson-decouple, lem:poisson-chernoff, def:Br, def:Dr, def:bad-message}
+  The rate is $\varepsilon^2$ by construction, so we bound the distance via the
+  number of bad messages. By Observation~\ref{obs:bad-count} it suffices to find
+  $r$ with $\mathcal{B}_r(\Cout,\Cin) < 1$, since then there are no bad messages
+  and the relative distance is at least $\frac{1-c\varepsilon}{2}$
+  (Definition~\ref{def:bad-message}). Choose $r \sim \Poi(\lambda)$ with
+  $\lambda = \tilde c\varepsilon^2 N$. Splitting (12) into the events $g = 0$ and
+  $g \neq 0$ gives $\mathcal{B}_r(\Cout,\Cin) = (13) + (14)$ with $(13)$ as in
+  Claim~\ref{claim:term13} and
+  \[
+    (14) = \frac{q^k}{q^k-1}\Big(\tfrac{1}{c\varepsilon}\Big)^r
+      \big(q^k\Pr_{g\sim\mathcal{D}_r}[g\in\Cout^\perp\setminus\{0\}]-1\big).
+  \]
+  By Claim~\ref{claim:term13}, $\E_r[(13)]\leq 2^{-\varepsilon^2 N/2}$, so by
+  Markov's inequality, with probability at least $1 - 2^{-\varepsilon^2 N/4}$
+  over $r$,
+  \begin{equation}
+    (13)\leq 2^{-\varepsilon^2 N/4}.
+    \tag{15}
+  \end{equation}
+  For $(14)$: by Claim~\ref{claim:poisson-decouple}, when $r \sim \Poi(\lambda)$
+  the distribution $\mathcal{D}_r$ equals the product distribution
+  $\mathcal{D}^n$ of the theorem, so by hypothesis (11),
+  $q^k\Pr_{r\sim\Poi(\lambda),g\sim\mathcal{D}_r}[g\in\Cout^\perp\setminus\{0\}]
+  - 1 \leq \Delta \leq (\frac{c\varepsilon}{2})^{\lambda + 100\sqrt\lambda}$. By
+  the Poisson Chernoff bound (Lemma~\ref{lem:poisson-chernoff}),
+  $\Pr[r \geq \lambda + 100\sqrt\lambda]\leq \exp(-100^2/2)$. Union bounding over
+  (15) and the event $r \leq \lambda + 100\sqrt\lambda$, with positive
+  probability over $r$ we have
+  \[
+    \mathcal{B}_r(\Cout,\Cin)\leq 2^{-\varepsilon^2 N/4}
+      + \frac{q^k}{q^k-1}\Big(\tfrac{1}{c\varepsilon}\Big)^r
+      \Big(\tfrac{c\varepsilon}{2}\Big)^{\lambda+100\sqrt\lambda}
+      \leq 2^{-\varepsilon^2 N/4} + 2^{-\tilde c\varepsilon^2 N} < 1,
+  \]
+  using $r \leq \lambda + 100\sqrt\lambda$ and $c\varepsilon < 1$ so that
+  $(\frac{1}{c\varepsilon})^r(\frac{c\varepsilon}{2})^{\lambda+100\sqrt\lambda}
+  \leq 2^{-(\lambda+100\sqrt\lambda)}\leq 2^{-\lambda}$. Thus some $r$ gives
+  $\mathcal{B}_r < 1$, proving the theorem.
+\end{proof}
+
+\begin{proposition}[Codes satisfying (11) exist, Remark 8]
+  \label{prop:eq11-exists}
+  \uses{thm:soft-decoding, def:random-linear-code, def:dual-code}
+  There exists a linear code $\Cout \subseteq \Fq^n$ of dimension $k$ with
+  $\Pr_{x\sim\mathcal{D}^n}[x\in\Cout^\perp\setminus\{0\}]\leq \frac{1}{q^k}$,
+  satisfying the condition of Theorem~\ref{thm:soft-decoding} with $\Delta = 0$.
+\end{proposition}
+\begin{proof}
+  \uses{def:random-linear-code, def:dual-code}
+  Let $\Cout$ be a random linear code of dimension $k = \varepsilon n$. Then
+  $\Cout^\perp$ is a random linear code of dimension $n - k$, and for each fixed
+  nonzero $x$, $\Pr_\Cout[x\in\Cout^\perp] = \frac{q^{n-k}-1}{q^n-1}\leq q^{-k}$.
+  Taking the expectation over $\Cout$,
+  \[
+    \E_\Cout\Big[\Pr_{x\sim\mathcal{D}^n}[x\in\Cout^\perp\setminus\{0\}]\Big]
+      = \sum_{x\neq 0}\mathcal{D}^n(x)\Pr_\Cout[x\in\Cout^\perp]
+      = q^{-k} - q^{-n} \leq q^{-k}.
+  \]
+  Hence some fixed $\Cout$ of dimension $k$ achieves
+  $\Pr_{x\sim\mathcal{D}^n}[x\in\Cout^\perp\setminus\{0\}]\leq q^{-k}$, i.e.\
+  (11) with $\Delta = 0$ (the condition only requires this probability not be
+  much larger than $1/q^k$).
+\end{proof}
+
+\chapter{A High Min-Entropy Sufficient Condition}
+\label{chap:entropy}
+
+\begin{definition}[Empirical symbol distribution]
+  \label{def:empirical-dist}
+  \uses{def:code}
+  For a word $c \in \Fq^n$, the \emph{empirical distribution} $\mathcal{D}_c$ on
+  $\Fq$ is given by $\Pr_{\mathcal{D}_c}[\sigma] = \Pr_{\alpha\sim[n]}[c_\alpha =
+  \sigma]$, the fraction of coordinates of $c$ equal to $\sigma$.
+\end{definition}
+
+\begin{definition}[Min-entropy]
+  \label{def:min-entropy}
+  \uses{def:empirical-dist}
+  For $c \in \Fq^n$, the \emph{min-entropy} of $\mathcal{D}_c$ is
+  $\Hinf(c) \triangleq -\log_2 \max_\sigma \Pr_{\mathcal{D}_c}[\sigma]$, so that
+  $\Hinf(c) \leq \log_2 q$.
+\end{definition}
+
+\begin{definition}[Smoothed min-entropy]
+  \label{def:smoothed-min-entropy}
+  \uses{def:min-entropy, lem:tv-distance}
+  For a smoothness parameter $\eta > 0$, the \emph{smoothed min-entropy} is
+  \[
+    \Hinf^\eta(\mathcal{D}_c) \triangleq
+      \max_{\mathcal{D}_{c'} : \dist_{\TV}(\mathcal{D}_c,\mathcal{D}_{c'})\leq\eta}
+      \Hinf(\mathcal{D}_{c'}),
+  \]
+  where the maximum is over distributions within total variation distance $\eta$.
+\end{definition}
+
+\begin{lemma}[Weight distribution of a random linear code, Lemma 6.1]
+  \label{lem:weight-dist}
+  \uses{def:random-linear-code, lem:negative-correlation, def:binary-entropy, lem:markov, lem:chebyshev, lem:union-bound, def:tau-nice, lem:h2-inv-lower, lem:entropy-binom-upper, lem:entropy-binom-lower}
+  For any $n \in \N$, $\frac{8}{\sqrt n}\leq \gamma\leq \frac13$, integers
+  $\frac{24\log n}{\gamma}\leq k\leq \frac{n}{5}$, and
+  $2^{2k/3}\leq T\leq 2^{(1-\gamma)k}$, a random linear code
+  $\Ccode \subseteq \Ftwo^n$ of dimension $k$ satisfies the following with
+  probability $1 - 2^{-\Omega(\gamma k + \gamma^2 n + \sqrt n)}$. For
+  $0 \leq j \leq n$ let $\Delta_j$ be the number of codewords of weight $j$, and
+  let $j^\star$ be the minimal $j$ with $\sum_{i=0}^j \Delta_i \geq T$. Then:
+  \begin{enumerate}
+    \item $j^\star \geq \alpha n$ for some $\alpha \geq \htwo^{-1}\!\big(1 - 2\cdot
+      \frac{k-\log T}{n}\big)$;
+    \item $\dfrac{\sum_{i=0}^{j^\star} i\,\Delta_i}{\sum_{i=0}^{j^\star}\Delta_i}
+      \geq (1 - 2\gamma)\,j^\star$;
+    \item $\dfrac{\Delta_{j^\star+1}}{\sum_{i=0}^{j^\star}\Delta_i}\leq 2^{\sqrt n}$.
+  \end{enumerate}
+\end{lemma}
+\begin{proof}
+  \uses{lem:negative-correlation, lem:markov, lem:chebyshev, lem:union-bound, lem:entropy-binom-upper, lem:entropy-binom-lower, def:binary-entropy, lem:h2-inv-lower}
+  As in Theorem~\ref{thm:most-codes} we work with codes whose weight
+  distribution deviates only slightly from that of a uniformly random code, but
+  here we need both an upper and a lower bound on the $\Delta_i$.
+
+  Write $p = 2^{-(n-k)}$ and $p' = 2^{-(n-k)}(1 - 2^{-k})$. For $1 \leq i \leq n$,
+  $\binom{n}{i}p' \leq \E_\Ccode[\Delta_i] = \binom{n}{i}\frac{2^k-1}{2^n-1}\leq
+  \binom{n}{i}p$, and $\operatorname{Var}_\Ccode[\Delta_i]\leq \binom{n}{i}p$ by
+  the negative correlation of distinct nonzero vectors
+  (Lemma~\ref{lem:negative-correlation}). Fix $\tau > 0$. Markov
+  (Lemma~\ref{lem:markov}) gives $\Pr[\Delta_i \geq 2^{\tau n}\binom{n}{i}p]\leq
+  2^{-\tau n}$, and Chebyshev (Lemma~\ref{lem:chebyshev}) gives
+  $\Pr[\Delta_i \leq \binom{n}{i}p/2^{\tau n}]\leq \frac{1}{(1 - 2^{-\tau n} -
+  2^{-k})^2\binom{n}{i}p}$. Fixing $1 \leq \ell \leq n/2$ and union bounding
+  (Lemma~\ref{lem:union-bound}), with probability at least $1 - \frac{n}{2^{\tau n}}
+  - \frac{n}{(1 - 2^{-\tau n} - 2^{-k})^2\binom{n}{\ell}p}$,
+  \begin{align}
+    \Delta_i &\leq 2^{\tau n}\binom{n}{i}p \quad\text{for all } 1 \leq i \leq n,
+      \tag{19}\\
+    \Delta_i &\geq \binom{n}{i}p/2^{\tau n}\quad\text{for all } \ell\leq i\leq n/2.
+      \tag{20}
+  \end{align}
+  Choosing $\tau = \min\big\{\frac18\gamma^2(\htwo^{-1}(1 - k/n))^2,
+  \frac{k\gamma}{n} - \frac{\log n}{n}\big\}$ and
+  $\ell = \lfloor\htwo^{-1}(1 - \frac23\frac{k}{n})n\rfloor$, the failure
+  probability is $2^{-\Omega(\gamma k + \gamma^2 n + \sqrt n)}$, using
+  $\htwo^{-1}(1-x)\geq \frac12 - 5x^2$ (Lemma~\ref{lem:h2-inv-lower}) to lower
+  bound $\htwo^{-1}(1 - k/n)\geq \frac14$ from $k \leq n/5$, and the bounds
+  $\binom{n}{\ell}p \geq 2^{k/4}$ from $k$ large.
+
+  \textbf{Item 1.} Equation (19) makes $\Ccode^\perp$ effectively $\tau$-nice,
+  and by (19), to bound $j^\star$ it suffices to solve $\sum_{i=0}^j\binom{n}{i}
+  2^{-(n-k-\tau n)}\geq T$ for $j$. Writing $j = \alpha n$ and using
+  $\sum_{i\leq\alpha n}\binom{n}{i}\leq 2^{n\htwo(\alpha)}$
+  (Lemma~\ref{lem:entropy-binom-upper}; sharpened to $2^{h_2(\alpha)n - \frac12
+  \log n - 1}$), the smallest such $\alpha$ satisfies $\alpha \geq
+  \htwo^{-1}\big(1 - \tau - \frac{k - \log T + \log n}{n}\big)\geq
+  \htwo^{-1}\big(1 - 2\frac{k - \log T}{n}\big)$, using $\tau \leq
+  \frac{k\gamma}{n} - \frac{\log n}{n}\leq \frac{k - \log T - \log n}{n}$.
+
+  \textbf{Item 2.} Let $j' = \lceil\alpha(1 - \gamma)n\rceil$. By (19),
+  $A \triangleq \sum_{i=0}^{j'-1}\Delta_i \leq \sum_{i=0}^{j'-1}\binom{n}{i}
+  2^{-(n-k+\tau n)}\leq 2^{n(\htwo(\alpha(1-\gamma)) + \tau + k/n - 1)}$. By Item 1
+  and $T \geq 2^{2k/3}$, $j^\star = \alpha n \geq \htwo^{-1}(1 - 2\frac{k-\log T}{n})
+  n \geq \htwo^{-1}(1 - \frac23\frac{k}{n})n \geq \ell$, so (20) yields
+  $\Delta_{j^\star}\geq \binom{n}{j^\star}p\,2^{-\tau n}$, hence
+  $B \triangleq \sum_{i=j'+1}^{j^\star}\Delta_i \geq \Delta_{j^\star}\geq
+  2^{n(\htwo(\alpha) - \frac{\log(2n)}{2n} - 1 + k/n - \tau)}$
+  (Lemma~\ref{lem:entropy-binom-lower}). Therefore
+  \[
+    \frac{\sum_{i=0}^{j^\star} i\Delta_i}{\sum_{i=0}^{j^\star}\Delta_i}
+      \geq \frac{j'\sum_{i=j'}^{j^\star}\Delta_i}{\sum_{i=0}^{j^\star}\Delta_i}
+      = j'\frac{B}{A+B}\geq (1-\gamma)j^\star\frac{1}{1 + A/B}.
+  \]
+  Now $\frac{\log(A/B)}{n}\leq \htwo(\alpha(1-\gamma)) - \htwo(\alpha) + 2\tau +
+  \frac{\log(2n)}{2n}\leq \htwo(\alpha(1-\gamma)) - \htwo(\alpha) + 4\tau \leq
+  -(\alpha\gamma)^2 + 4\tau \leq -\frac12\gamma^2(\htwo^{-1}(1 - k/n))^2
+  \triangleq -\theta$, using $h_2'\geq 0$, $h_2''\leq -2$, Item 1, and the choice
+  of $\tau$. Hence $\frac{\sum i\Delta_i}{\sum\Delta_i}\geq
+  \frac{(1-\gamma)j^\star}{1 + 2^{-\theta n}}\geq (1-2\gamma)j^\star$, since
+  $2^{-\theta n}\leq \gamma$ from the lower bound on $k$.
+
+  \textbf{Item 3.} For some $\tau > 0$, (19) gives $\Delta_{j^\star+1}\leq
+  2^{\tau n}\binom{n}{j^\star+1}p$ and (20) gives $\Delta_{i}\geq
+  2^{-\tau n}\binom{n}{i}p$, with probability at least $1 - \frac{1}{2^{\tau n}}
+  - \frac{1}{(1 - 2^{-\tau n} - 2^{-k})^2\binom{n}{j^\star}p}$. Then
+  \[
+    \frac{\Delta_{j^\star+1}}{\sum_{i=0}^{j^\star+1}\Delta_i}\leq
+      \frac{\Delta_{j^\star+1}}{\Delta_{j^\star}}\leq
+      \frac{2^{\tau n}\binom{n}{j^\star+1}p}{2^{-\tau n}\binom{n}{j^\star}p}
+      = 2^{2\tau n}\frac{n - j^\star}{j^\star + 1}\leq 2^{2\tau n + 2},
+  \]
+  using $j^\star \geq \frac14 n$. Setting $\tau = \frac{1}{4\sqrt n}$ makes this
+  at most $2^{\sqrt n}$, and the success probability is at least
+  $1 - 2^{-\frac14\sqrt n} - \frac14 2^{-k/4}$, using $\binom{n}{j^\star}
+  2^{-n+k}\geq 2^{-k/4}$.
+\end{proof}
+
+\begin{theorem}[Min-entropy sufficient condition, Theorem 6.2]
+  \label{thm:min-entropy}
+  \uses{constr:concatenation, def:smoothed-min-entropy, def:random-linear-code, lem:weight-dist, def:relative-distance, def:binary-entropy, lem:h2-inv-upper, def:empirical-dist}
+  Fix any sufficiently small $\varepsilon > 0$. For integers $k,q \in \N$ with
+  $q = 2^{k_0}$, let $n_0 = k_0/\varepsilon$ and $n = k/\varepsilon$. Let
+  $\Cout \subseteq \Fq^n$ be an $\Ftwo$-linear code of rate $\varepsilon$, and let
+  $\Cin \subseteq \Ftwo^{n_0}$ be a random linear code of rate $\varepsilon$.
+  Assume there exist constants $\bar c_\gamma, \bar c_\eta$ such that for every
+  nonzero $c \in \Cout$,
+  \[
+    \Hinf^{\bar c_\eta\varepsilon}(c)\geq (1 - \bar c_\gamma\varepsilon)\log q,
+  \]
+  and $n_0 = \Omega_{\bar c_\gamma}\big(\frac{\log(1/\varepsilon)}{\varepsilon^2}\big)$.
+  Then with probability at least $1 - 2^{-\Omega_{\bar c_\gamma}(\varepsilon^2 n_0
+  + \sqrt{n_0})}$ over $\Cin$, the concatenated code $\Ccode = \Cout\circ\Cin$ has
+  relative distance $\frac12 - O_{\bar c_\gamma,\bar c_\eta}(\varepsilon)$.
+\end{theorem}
+\begin{proof}
+  \uses{lem:weight-dist, def:smoothed-min-entropy, def:empirical-dist, def:binary-entropy, lem:h2-inv-upper, constr:concatenation}
+  Let $\gamma = \bar c_\gamma\varepsilon$ and $\eta = \bar c_\eta\varepsilon$.
+  Since $\Ccode$ is linear it suffices to lower bound the weight of every nonzero
+  codeword. Fix nonzero $c \in \Cout$ and consider
+  $w = (\Cin(c_1),\dots,\Cin(c_n))$. Order $\Fq = \{\sigma_0,\dots,\sigma_{q-1}\}$
+  with $\Pr_{\mathcal{D}_c}[\sigma_0]\geq\cdots\geq\Pr_{\mathcal{D}_c}[\sigma_{q-1}]$
+  and set $p_t(c) = \Pr_{\mathcal{D}_c}[\sigma_t]$.
+
+  \textbf{Worst-case inner map.} It suffices to lower bound $\wt(w)$ under a
+  worst-case (not necessarily linear) assignment of symbols of $\Fq$ to codewords
+  of $\Cin$: the most frequent symbols are mapped to the lowest-weight codewords.
+  For $j \in \{0,\dots,n_0\}$ let $\Delta_j = |\{x\in\Cin : \wt(x) = j\}|$ and
+  $\ell_j = \Delta_0 + \cdots + \Delta_j$ (with $\ell_{-1} = 0$). Assigning the
+  symbols $\{\sigma_{\ell_{j-1}},\dots,\sigma_{\ell_j - 1}\}$ to the weight-$j$
+  codewords, the weight of $w$ satisfies $\wt(w)\geq d(c)$, where with $d_{\mathrm{in}}$
+  the minimum distance of $\Cin$,
+  \begin{equation}
+    d(c) = n\sum_{j = d_{\mathrm{in}}}^{n_0}\Big(\Big(\sum_{t=\ell_{j-1}}^{\ell_j-1}
+      p_t(c)\Big)\cdot j\Big).
+    \tag{16}
+  \end{equation}
+
+  \textbf{Worst-case distribution.} Minimising over symbol distributions
+  $\mathbf p = (p_0\geq\cdots\geq p_{q-1}\geq 0)$ obeying the smoothed entropy
+  constraint $\Hinf^\eta(\mathbf p)\leq b$ with $b = (1-\gamma)\log q$,
+  \begin{equation}
+    d(c)\geq d \triangleq \min_{\mathbf p : \Hinf^\eta(\mathbf p)\leq b}
+      n\sum_{j=d_{\mathrm{in}}}^{n_0}\Big(\Big(\sum_{t=\ell_{j-1}}^{\ell_j-1}p_t\Big)
+      \cdot j\Big).
+    \tag{17}
+  \end{equation}
+  The minimiser puts mass uniformly on the $2^b$ lowest-weight symbols and shifts
+  an $\eta$-fraction to the zero codeword's symbol:
+  $p_t = \eta + 2^{-b}$ for $t = 0$, $p_t = 2^{-b}$ for
+  $1 \leq t \leq (1-\eta)2^b - 1$, and $0$ otherwise. Set $T = (1-\eta)2^b$,
+  $j^\star = \min\{j \leq n_0 : \ell_j \geq T\}$, and define $b'$ by
+  $\ell_{j^\star-1} = (1-\eta)2^{b'} \triangleq T'$. The worst case for $b'$ is no
+  better, and $\frac{T}{T'}\leq 1 + \frac{\Delta_{j^\star}}{\ell_{j^\star-1}}$.
+  Then
+  \begin{equation}
+    d\geq n\sum_{j=d_{\mathrm{in}}}^{j^\star-1}\Big(\Big(\sum_{t=\ell_{j-1}}^{\ell_j-1}
+      2^{-b}\Big)j\Big) = \frac{n}{2^{b'}}\sum_{j=d_{\mathrm{in}}}^{j^\star-1}
+      (\Delta_j\cdot j).
+    \tag{18}
+  \end{equation}
+
+  \textbf{Applying Lemma~\ref{lem:weight-dist}.} Apply Lemma~\ref{lem:weight-dist}
+  to $\Cin$ with this $\gamma$ and $T'$ (valid since $\gamma \geq 8/\sqrt{n_0}$ and
+  $k_0 \geq 24\log n_0/\gamma$ by the lower bound on $n_0$). With probability
+  $1 - 2^{-\Omega(\gamma k_0 + \gamma^2 n_0 + \sqrt{n_0})} = 1 -
+  2^{-\Omega_{\bar c_\gamma}(\varepsilon^2 n_0 + \sqrt{n_0})}$ the conclusions
+  hold. Item 1 gives $j^\star - 1 = \alpha n_0$ with
+  \[
+    \alpha \geq \htwo^{-1}\Big(1 - 2\tfrac{\log q - \log T'}{n_0}\Big)
+      \geq \htwo^{-1}\Big(1 - 2\varepsilon\big(\gamma + \tfrac{2\eta}{\log q}\big)
+        - \varepsilon\Big) - \tfrac{2}{\sqrt{n_0}}
+      \geq \htwo^{-1}(1 - 4\varepsilon\gamma) - \tfrac{2}{\sqrt{n_0}}
+      \geq \tfrac12 - \sqrt{\gamma\varepsilon\ln 2},
+  \]
+  using $\log T - \log T'\leq \sqrt{n_0} + 1$ (Item 3), $\log\frac{1}{1-\eta}\leq
+  2\eta$, $n_0 \geq 4\varepsilon^{-2}$, and $\htwo^{-1}(1 - x^2)\leq \frac12 -
+  \frac{\sqrt{\ln 2}}{2}x$ (Lemma~\ref{lem:h2-inv-upper}). Item 2 gives
+  $\sum_{j=0}^{j^\star-1}\Delta_j j\geq (1-2\gamma)(j^\star-1)\sum_{j=0}^{j^\star-1}
+  \Delta_j\geq (1-2\gamma)\alpha n_0 T'$. Returning to (18),
+  \[
+    \frac{d}{n_0 n}\geq \frac{1}{n_0 2^{b'}}\sum_{j=0}^{j^\star-1}\Delta_j j
+      \geq (1-2\gamma)\alpha\frac{T'}{2^{b'}} = (1-2\gamma)\alpha(1-\eta),
+  \]
+  using $T' = (1-\eta)2^{b'}$. Since $N = n_0 n$, the relative distance is at
+  least
+  \[
+    \frac{d}{N}\geq (1-2\gamma)(1-\eta)\alpha
+      \geq (1-2\gamma)(1-\eta)\Big(\tfrac12 - \sqrt{\gamma\varepsilon\ln 2}\Big)
+      \geq \tfrac12 - \big(\sqrt{\bar c_\gamma\ln 2} + \bar c_\gamma
+        + \tfrac12\bar c_\eta\big)\varepsilon
+      = \tfrac12 - O_{\bar c_\gamma,\bar c_\eta}(\varepsilon),
+  \]
+  as desired.
+\end{proof}
+
+\begin{proposition}[Random outer codes are mildly smooth, Remark 9]
+  \label{prop:rlc-smooth}
+  \uses{def:random-linear-code, def:min-entropy}
+  Let $\Cout$ be a random linear code of dimension $k = \varepsilon n$ over
+  $\Fq$ and let $\gamma = \frac12\varepsilon$, $q = O(n)$. With high probability
+  the symbols of every nonzero codeword of $\Cout$ are \emph{not} contained in any
+  set of size smaller than $q^{1-\gamma}$; equivalently every nonzero codeword has
+  $\Hinf(c)\geq (1-\gamma)\log_2 q$ on the support level required.
+\end{proposition}
+\begin{proof}
+  \uses{def:random-linear-code, def:min-entropy}
+  For a fixed nonzero codeword, the probability that all $n$ of its symbols fall
+  inside a fixed set $S \subseteq \Fq$ of size $q^{1-\gamma}$ is at most
+  $(|S|/q)^n = q^{-\gamma n}$; summing over the $\binom{q}{q^{1-\gamma}}$ choices
+  of $S$ gives
+  $\sum_{i=1}^{q^{1-\gamma}}\binom{q}{i}(i/q)^n\approx q^{-\gamma(n - q^{1-\gamma})}$.
+  Taking a union bound over the $q^k = 2^{\varepsilon n\log q}$ nonzero codewords,
+  with $\gamma = \frac12\varepsilon$ and $q = O(n)$, no nonzero codeword violates
+  the constraint with high probability.
+\end{proof}

@@ -1,0 +1,28 @@
+% Web (HTML) version of the blueprint, rendered by plasTeX.
+% It loads only what the web build needs -- no Lean, no lake, no TeX install
+% (math is rendered client-side by MathJax). The `blueprint` package here is
+% plasTeX's Python implementation provided by the leanblueprint plugin.
+%
+% Edit \title and \author below. To add navigation buttons, fill in and
+% uncomment any of these:
+%   \home{https://example.com}
+%   \github{https://github.com/you/your-repo}
+%   \dochome{https://you.github.io/your-repo/docs}
+\documentclass{report}
+
+\usepackage{amssymb, amsthm, amsmath}
+\usepackage{hyperref}
+\usepackage[showmore, dep_graph]{blueprint}
+
+\input{macros/common}
+\input{macros/web}
+
+\title{Efficient Near-Optimal Codes for General Repeat Channels}
+\author{Pernice, Li, Wootters (blueprint)}
+
+\home{https://arxiv.org/abs/2201.12746}
+
+\begin{document}
+\maketitle
+\input{content}
+\end{document}

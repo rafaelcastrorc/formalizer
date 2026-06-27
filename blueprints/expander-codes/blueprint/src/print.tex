@@ -1,0 +1,26 @@
+% Printable (PDF) version of the blueprint, compiled with latexmk -> xelatex
+% (see latexmkrc). This is only built when meta.yml has build_pdf: true, which
+% requires a TeX installation. macros/print.tex provides no-op definitions for
+% the web-only macros (\lean, \leanok, \uses, ...), so no Lean is needed here
+% either.
+\documentclass[a4paper]{report}
+
+\usepackage{geometry}
+
+\usepackage{expl3}
+
+\usepackage{amssymb, amsthm, mathtools}
+\usepackage[unicode,colorlinks=true,linkcolor=blue,urlcolor=magenta, citecolor=blue]{hyperref}
+
+\usepackage[warnings-off={mathtools-colon,mathtools-overbracket}]{unicode-math}
+
+\input{macros/common}
+\input{macros/print}
+
+\title{Expander Codes}
+\author{Sipser, Spielman (blueprint)}
+
+\begin{document}
+\maketitle
+\input{content}
+\end{document}

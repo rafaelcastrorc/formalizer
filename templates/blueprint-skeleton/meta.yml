@@ -1,0 +1,11 @@
+# Per-blueprint metadata. `name` MUST match the folder name; it is used as the
+# URL subpath (the blueprint is published at site/<name>/).
+#
+# NOTE: scripts/new_blueprint.py overwrites this file with the values you pass
+# on the command line, so the placeholders below are only a reference.
+name: CHANGEME
+title: "CHANGEME"
+description: ""
+build_pdf: false        # if true, also build + link a PDF (requires TeX in CI)
+home: ""                # optional URL shown as a "home" link on the landing card
+github: ""              # optional repo URL shown as a "GitHub" link on the landing card

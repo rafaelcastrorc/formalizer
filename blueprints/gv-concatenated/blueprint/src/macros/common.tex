@@ -1,0 +1,43 @@
+% In this file you should put all LaTeX macros and settings to be used both by
+% the pdf version and the web version.
+% This should be most of your macros.
+
+% The theorem-like environments defined below are those that appear by default
+% in the dependency graph. See the README of leanblueprint if you need help to
+% customize this.
+% The configuration below use the theorem counter for all those environments
+% (this is what the [theorem] arguments mean) and never resets it.
+% If you want for instance to number them within chapters then you can add
+% [chapter] at the end of the next line.
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+
+% ---------------------------------------------------------------------------
+% Notation macros shared by both builds.
+% ---------------------------------------------------------------------------
+\newcommand{\Cout}{\mathcal{C}_{\mathrm{out}}}
+\newcommand{\Cin}{\mathcal{C}_{\mathrm{in}}}
+\newcommand{\Ccode}{\mathcal{C}}
+\newcommand{\F}{\mathbb{F}}
+\newcommand{\Fq}{\mathbb{F}_q}
+\newcommand{\Ftwo}{\mathbb{F}_2}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\dist}{\Delta}
+\newcommand{\wt}{\operatorname{weight}}
+\newcommand{\Tr}{\operatorname{Tr}}
+\newcommand{\htwo}{h_2}
+\newcommand{\Hinf}{H_\infty}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Ber}{\operatorname{Ber}}
+\newcommand{\Poi}{\operatorname{Poi}}
+\newcommand{\Dcal}{\mathcal{D}}
+\newcommand{\Vcal}{\mathcal{V}}
+\newcommand{\inner}[2]{\langle #1, #2\rangle}
+\newcommand{\TV}{\mathrm{TV}}

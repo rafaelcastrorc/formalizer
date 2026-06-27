@@ -1,0 +1,98 @@
+% MODEL content.tex produced by the paper-to-blueprint skill.
+% It illustrates the two-kind model and the level of detail expected.
+% This is a TEMPLATE/REFERENCE, not a real blueprint -- copy the *shape*, not
+% the mathematics. content.tex must NOT contain \begin{document}.
+%
+% Notice:
+%   * library prerequisites are LEAF nodes: \mathlibok + \lean{...}, no proof;
+%   * the paper's own results are FULL nodes: statement + complete proof, with
+%     \uses on both, and NO \leanok/\mathlibok (they are the work to formalize);
+%   * a multi-step argument is split into a helper lemma so the graph is granular;
+%   * an omitted proof is kept as a node and flagged \notready with a TODO.
+
+\chapter{Preliminaries}
+
+% --- Settled dependencies: already in Mathlib/cslib, so leaves only. ----------
+
+\begin{definition}[Monoid]
+  \label{def:monoid}
+  \lean{Monoid}
+  \mathlibok
+  A monoid is a set with an associative binary operation and a two-sided
+  identity. (Standard; recalled here only so later nodes can depend on it.)
+\end{definition}
+
+\begin{lemma}[Identity is unique]
+  \label{lem:unique-identity}
+  \uses{def:monoid}
+  \lean{...}                 % TODO: confirm exact Mathlib decl name
+  \mathlibok
+  A monoid has exactly one identity element.
+\end{lemma}
+
+\chapter{The widget construction}
+
+% --- Novel content: stated in full and proved in full. ------------------------
+
+\begin{definition}[Widget over a monoid]
+  \label{def:widget}
+  \uses{def:monoid}
+  Let $M$ be a monoid. A \emph{widget} over $M$ is a pair $(m, \varphi)$ where
+  $m \in M$ and $\varphi : M \to M$ satisfies $\varphi(x)\,m = m\,\varphi(x)$
+  for all $x \in M$.    % full hypotheses, all notation defined
+\end{definition}
+
+\begin{lemma}[Widgets are closed under composition]
+  \label{lem:widget-compose}
+  \uses{def:widget}
+  If $(m,\varphi)$ and $(n,\psi)$ are widgets over $M$, then
+  $(mn,\ \varphi\circ\psi)$ is a widget over $M$.
+\end{lemma}
+\begin{proof}
+  \uses{def:widget, lem:unique-identity}
+  Let $x \in M$. Then
+  $(\varphi\circ\psi)(x)\,(mn) = \varphi(\psi(x))\,m\,n
+   = m\,\varphi(\psi(x))\,n = m\,n\,(\varphi\circ\psi)(x)$,
+  using the commutation property of each widget in turn. Associativity is
+  Definition~\ref{def:monoid}. Hence $(mn, \varphi\circ\psi)$ satisfies the
+  widget condition.   % every step written out, no "clearly"
+\end{proof}
+
+\begin{theorem}[Widgets form a monoid]
+  \label{thm:widget-monoid}
+  \uses{def:widget, lem:widget-compose}
+  The set of widgets over $M$, under the composition of
+  Lemma~\ref{lem:widget-compose}, is a monoid.
+\end{theorem}
+\begin{proof}
+  \uses{lem:widget-compose, lem:assoc-helper, def:monoid}
+  Closure is Lemma~\ref{lem:widget-compose}. The identity is
+  $(e, \mathrm{id})$ where $e$ is the monoid identity
+  (Lemma~\ref{lem:unique-identity}). Associativity of widget composition is
+  Lemma~\ref{lem:assoc-helper}. These are exactly the monoid axioms of
+  Definition~\ref{def:monoid}.
+\end{proof}
+
+% A step pulled out of the proof above into its own node, so the graph is
+% granular and the eventual formalization can tackle it independently.
+\begin{lemma}[Associativity of widget composition]
+  \label{lem:assoc-helper}
+  \uses{def:widget}
+  Widget composition is associative.
+\end{lemma}
+\begin{proof}
+  \uses{def:widget}
+  Componentwise: the first components multiply associatively in $M$
+  (Definition~\ref{def:monoid}); the second components compose associatively
+  as functions. Hence the pairs compose associatively.
+\end{proof}
+
+% An omitted proof: keep the node, flag it, do not invent a proof.
+\begin{proposition}[Widget cancellation]
+  \label{prop:widget-cancel}
+  \uses{thm:widget-monoid}
+  \notready
+  If $M$ is cancellative then so is the monoid of widgets over $M$.
+\end{proposition}
+% TODO: the paper states this as "the proof is routine" with no argument.
+% Reconstruct from cancellativity of M, or cite, before marking ready.
