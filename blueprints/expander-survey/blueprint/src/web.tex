@@ -1,0 +1,28 @@
+% Web (HTML) version of the blueprint, rendered by plasTeX.
+% It loads only what the web build needs -- no Lean, no lake, no TeX install
+% (math is rendered client-side by MathJax). The `blueprint` package here is
+% plasTeX's Python implementation provided by the leanblueprint plugin.
+%
+% Edit \title and \author below. To add navigation buttons, fill in and
+% uncomment any of these:
+%   \home{https://example.com}
+%   \github{https://github.com/you/your-repo}
+%   \dochome{https://you.github.io/your-repo/docs}
+\documentclass{report}
+
+\usepackage{amssymb, amsthm, amsmath}
+\usepackage{hyperref}
+\usepackage[showmore, dep_graph, thms=definition+lemma+proposition+theorem+corollary+claim+construction+problem]{blueprint}
+
+\input{macros/common}
+\input{macros/web}
+
+\home{https://www.ams.org/journals/bull/2006-43-04/S0273-0979-06-01126-8/}
+
+\title{Expander Graphs and Their Applications}
+\author{S. Hoory, N. Linial, A. Wigderson (blueprint)}
+
+\begin{document}
+\maketitle
+\input{content}
+\end{document}

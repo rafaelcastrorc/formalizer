@@ -1,23 +1,26 @@
 # Blueprint Generation Report
 
 Auto-generated record of the paper → blueprint runs (via the
-`paper-to-blueprint` skill). Each blueprint was produced by one extraction
+`paper-to-blueprint` skill). Each blueprint was produced by an extraction
 subagent that read the full paper, classified every item against Mathlib/cslib,
-and wrote a maximally detailed `content.tex`. All seven build cleanly with no
+and wrote a maximally detailed `content.tex` (the longest, `expander-survey`,
+fanned out across section subagents). All nine build cleanly with no
 undefined `\uses`/`\ref` targets.
 
 ## Token usage (per extraction agent)
 
 | # | Blueprint | Paper (pages) | Tokens | Tool calls | Wall time |
 |---|---|---|--:|--:|--:|
-| 1 | gv-concatenated | When Do Low-Rate Concatenated Codes Approach the GV Bound? (41) | 164,295 | 48 | ~17.9 min |
-| 2 | gradient-coding | Approximate Gradient Coding with Optimal Decoding (30) | 116,725 | 32 | ~10.4 min |
-| 3 | magic-communication | Magic and Communication Complexity (24) | 110,885 | 36 | ~11.7 min |
-| 4 | subquadratic-transformers | Fundamental Limitations on Subquadratic Alternatives to Transformers (23) | 96,270 | 19 | ~7.8 min |
-| 5 | repeat-channels | Efficient Near-Optimal Codes for General Repeat Channels (14) | 85,355 | 23 | ~7.7 min |
-| 6 | expander-codes | Expander Codes (Sipser–Spielman, 1996) (13) | 78,764 | 18 | ~7.2 min |
-| 7 | batch-codes | Improved Batch Code Lower Bounds (8) | 68,023 | 18 | ~6.0 min |
-| | **Total** | **7 papers (~153 pages)** | **720,317** | **194** | — |
+| 1 | expander-survey | Expander Graphs and Their Applications (Hoory–Linial–Wigderson, ~120) | 370,712 | 61 | ~26.8 min |
+| 2 | gv-concatenated | When Do Low-Rate Concatenated Codes Approach the GV Bound? (41) | 164,295 | 48 | ~17.9 min |
+| 3 | alon-roichman | Random Cayley Graphs and Expanders (Alon–Roichman, 16) | 123,842 | 42 | ~13.1 min |
+| 4 | gradient-coding | Approximate Gradient Coding with Optimal Decoding (30) | 116,725 | 32 | ~10.4 min |
+| 5 | magic-communication | Magic and Communication Complexity (24) | 110,885 | 36 | ~11.7 min |
+| 6 | subquadratic-transformers | Fundamental Limitations on Subquadratic Alternatives to Transformers (23) | 96,270 | 19 | ~7.8 min |
+| 7 | repeat-channels | Efficient Near-Optimal Codes for General Repeat Channels (14) | 85,355 | 23 | ~7.7 min |
+| 8 | expander-codes | Expander Codes (Sipser–Spielman, 1996) (13) | 78,764 | 18 | ~7.2 min |
+| 9 | batch-codes | Improved Batch Code Lower Bounds (8) | 68,023 | 18 | ~6.0 min |
+| | **Total** | **9 papers (~289 pages)** | **1,214,871** | **297** | — |
 
 Notes:
 - These are the per-agent extraction costs only; main-loop orchestration tokens
@@ -30,6 +33,8 @@ Notes:
 
 | Blueprint | Nodes | Mathlib/cslib leaves | Novel (full proof) | Edges | `\notready` |
 |---|--:|--:|--:|--:|--:|
+| expander-survey | 259 | 28 | 231 | 374 | 40 |
+| alon-roichman | 39 | 6 | 33 | ~43 | 9 |
 | gv-concatenated | 57 | 10 | 41 | ~93 | 6 |
 | gradient-coding | 60 | 6 | 54 | ~105 | 8 |
 | magic-communication | 58 | 1 | 57 | ~90 | 11 |
@@ -37,7 +42,7 @@ Notes:
 | repeat-channels | 34 | 13 | 21 | ~49 | 5 |
 | expander-codes | 44 | 5 | 39 | ~76 | 6 |
 | batch-codes | 22 | 6 | 16 | ~34 | 0 |
-| **Total** | **330** | **46** | **278** | **~539** | **39** |
+| **Total** | **628** | **80** | **542** | **~956** | **88** |
 
 (Per-agent classification; `\notready` nodes overlap the novel/leaf columns.)
 

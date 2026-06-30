@@ -1,0 +1,2666 @@
+% Blueprint for "Expander Graphs and Their Applications"
+% S. Hoory, N. Linial, A. Wigderson, Bulletin (New Series) of the AMS,
+% 43(4):439-561, 2006.
+%
+% Chapters mirror the survey's numbered sections.  Node titles keep the paper's
+% numbering (Definition 2.1, Lemma 2.5, Theorem 5.3, ...) for cross-reference.
+%
+% Two-kind model:
+%   * Settled library facts are LEAVES: \mathlibok (+ \lean{...} when known),
+%     a short restatement, NO proof -- they render dark green.
+%   * The survey's own definitions/results are FULL nodes: precise statement,
+%     \uses edges, and a complete proof; NO \leanok/\mathlibok.
+%   * Genuinely omitted/cited proofs and conjectures are kept as nodes, flagged
+%     \notready with a TODO.
+
+\chapter{The magical mystery tour}
+
+% ---- Settled library prerequisites (used throughout) -----------------------
+
+\begin{definition}[Hamming distance]
+  \label{def:hamming-distance}
+  \lean{hammingDist}
+  \mathlibok
+  For words $u,v\in\Sigma^n$ over an alphabet $\Sigma$, the \emph{Hamming
+  distance} $d_H(u,v)$ is the number of coordinates $i$ with $u_i\neq v_i$.
+\end{definition}
+
+\begin{theorem}[Hall's marriage theorem]
+  \label{thm:hall-marriage}
+  \mathlibok
+  Let $G=(L\cup R,E)$ be a bipartite graph. There is a matching saturating $L$
+  iff $|\Gamma(S)|\ge|S|$ for every $S\subseteq L$.
+  % TODO: confirm Lean decl -- Finset.all_card_le_biUnion_card_iff_existsInjective.
+\end{theorem}
+
+\begin{lemma}[Union bound]
+  \label{lem:union-bound}
+  \mathlibok
+  For finite events $A_1,\dots,A_m$, $\Pr[\bigcup_i A_i]\le\sum_i\Pr[A_i]$.
+  % TODO: confirm Lean decl -- measure_biUnion_finset_le.
+\end{lemma}
+
+\begin{lemma}[Binomial coefficient bound]
+  \label{lem:binom-bound}
+  \mathlibok
+  For integers $1\le k\le n$, $\binom nk\le(en/k)^k$.
+  % TODO: confirm Lean decl -- standard Nat.choose upper bound.
+\end{lemma}
+
+\begin{lemma}[Chernoff bound for the binomial distribution]
+  \label{lem:chernoff}
+  \mathlibok
+  If $Z\sim\mathrm{Binomial}(N,p)$ then for $0<\Delta<1$,
+  $\Pr[|Z-\E Z|\ge\Delta\E Z]<2\exp(-Np\Delta^2/3)$.
+  % TODO: confirm Lean decl -- Hoeffding/Chernoff tail bound.
+\end{lemma}
+
+% ---- Section 1.1: three motivating problems --------------------------------
+
+\begin{problem}[1.1, Hardness of linear transformations]
+  \label{prob:linear-transform}
+  Let $A$ be an $n\times n$ matrix over a field $\mathcal F$. What is the least
+  number of gates in an arithmetic circuit computing $x\mapsto Ax$, where each
+  gate has two inputs $x,y$, two field coefficients $a,b$, and output $ax+by$?
+\end{problem}
+
+\begin{definition}[1.2, Super regular matrix]
+  \label{def:super-regular}
+  A matrix $A$ is \emph{super regular} if every square submatrix of $A$ has full
+  rank.
+\end{definition}
+
+\begin{definition}[1.3, Super concentrator]
+  \label{def:super-concentrator}
+  Let $G=(V,E)$ and let $I,O\subseteq V$ each have $n$ vertices (inputs and
+  outputs). $G$ is a \emph{super concentrator} if for every $k$ and every
+  $S\subseteq I$, $T\subseteq O$ with $|S|=|T|=k$ there are $k$ vertex-disjoint
+  paths from $S$ to $T$.
+\end{definition}
+
+\begin{problem}[1.4, Communication over a noisy channel]
+  \label{prob:noisy-channel}
+  Alice sends a $k$-bit message to Bob over a channel that may flip a fraction
+  $p$ of bits. What is the smallest $n$ so that Bob can always recover the
+  message?
+\end{problem}
+
+\begin{definition}[1.5, Rate and distance of a code]
+  \label{def:code-rate-distance}
+  \uses{def:hamming-distance}
+  For a code $C\subseteq\{0,1\}^n$, the \emph{rate} and (normalized)
+  \emph{distance} are $R=\frac{\log_2|C|}{n}$ and
+  $\delta=\frac{\min_{c_1\neq c_2\in C}d_H(c_1,c_2)}{n}$.
+\end{definition}
+
+\begin{problem}[1.6, Refined communication problem]
+  \label{prob:refined-codes}
+  \uses{def:code-rate-distance}
+  Do there exist arbitrarily large codes $\{C_k\}$, $|C_k|=2^k$, with
+  $R(C_k)\ge R_0$ and $\delta(C_k)\ge\delta_0$ for absolute constants
+  $R_0,\delta_0>0$, that are explicit and efficiently encodable/decodable?
+\end{problem}
+
+\begin{definition}[$\mathbf{RP}$ and one-sided error]
+  \label{def:rp-class}
+  $\mathcal L\subseteq\{0,1\}^*$ is in $\mathbf{RP}$ if a randomized
+  polynomial-time $A$ satisfies: $x\in\mathcal L\Rightarrow A(x,r)=1$ for all
+  $r$; $x\notin\mathcal L\Rightarrow\Pr_r[A(x,r)=1]<1$ (fixed below $1/16$),
+  with $r$ uniform of length $k=\mathrm{poly}(|x|)$.
+\end{definition}
+
+\begin{problem}[1.7, Saving random bits]
+  \label{prob:saving-random-bits}
+  \uses{def:rp-class}
+  Given a one-sided-error randomized membership algorithm for $\mathcal L$, how
+  many random bits suffice to reduce the error to $\le\epsilon$ on \emph{every}
+  input?
+\end{problem}
+
+% ---- Section 1.2: magical graphs ------------------------------------------
+
+\begin{definition}[1.8, Magical graph]
+  \label{def:magical-graph}
+  A bipartite graph $G=(L,R,E)$ with $|L|=n$, $|R|=m$, every left vertex of
+  degree $d$, and neighbourhood map $\Gamma$, is an \emph{$(n,m;d)$-magical
+  graph} if: (1) $|\Gamma(S)|\ge\tfrac{5d}8|S|$ for $|S|\le\tfrac n{10d}$; and
+  (2) $|\Gamma(S)|\ge|S|$ for $\tfrac n{10d}<|S|\le\tfrac n2$.
+\end{definition}
+
+\begin{lemma}[1.9, Magical graphs exist]
+  \label{lem:magical-exists}
+  \uses{def:magical-graph}
+  There is $n_0$ so that for every $d\ge32$, $n\ge n_0$, $m\ge3n/4$, an
+  $(n,m;d)$-magical graph exists.
+\end{lemma}
+\begin{proof}
+  \uses{def:magical-graph, lem:union-bound, lem:binom-bound}
+  Let $G$ be random bipartite, each left vertex joined to a uniform $d$-set on
+  the right. \emph{Property (1):} for $S$, $s=|S|\le\tfrac n{10d}$ and
+  $T\subseteq R$, $t<\tfrac{5ds}8$, let $X_{S,T}$ indicate all edges from $S$
+  land in $T$; $\Pr[X_{S,T}=1]=(t/m)^{sd}$. By the union bound and
+  $\binom nk\le(en/k)^k$,
+  \[\Pr[\textstyle\sum X_{S,T}>0]\le\sum_{s\le n/10d}\binom ns\binom m{5ds/8}
+    \bigl(\tfrac{5ds}{8m}\bigr)^{sd}\le\sum_s\bigl(\tfrac{ne}s\bigr)^s
+    \bigl(\tfrac{8me}{5ds}\bigr)^{5ds/8}\bigl(\tfrac{5ds}{8m}\bigr)^{sd}<\tfrac1{10},\]
+  the $s$-th term being $\le20^{-s}$ for $d\ge32$. \emph{Property (2):} for
+  $\tfrac n{10d}<s\le\tfrac n2$, $t<s$, with $Y_{S,T}$ the analogue,
+  $\Pr[\sum Y_{S,T}>0]\le\sum_s\binom ns\binom ms(s/m)^{sd}
+  \le\sum_s[(ne/s)(me/s)(s/m)^d]^s<\tfrac1{10}$, each bracket $\le10^{-4}$. The
+  total failure probability is $<1$, so a magical (indeed most) graph exists.
+\end{proof}
+
+% ---- Section 1.3: the three solutions -------------------------------------
+
+\begin{lemma}[Magical graphs have perfect matchings]
+  \label{lem:magical-matching}
+  \uses{def:magical-graph, thm:hall-marriage}
+  In an $(n,3n/4;d)$-magical graph, $|\Gamma(S)|\ge|S|$ for every $S\subseteq L$
+  with $|S|\le\tfrac n2$, so by Hall's theorem there is a matching saturating
+  any such $S$.
+\end{lemma}
+\begin{proof}
+  \uses{def:magical-graph, thm:hall-marriage}
+  Property (1) gives $|\Gamma(S)|\ge\tfrac{5d}8|S|\ge|S|$ for
+  $|S|\le\tfrac n{10d}$; property (2) gives $|\Gamma(S)|\ge|S|$ for
+  $\tfrac n{10d}<|S|\le\tfrac n2$. Thus Hall's condition holds for all such $S$.
+\end{proof}
+
+\begin{lemma}[Unique-neighbour property]
+  \label{lem:unique-neighbour}
+  \uses{def:magical-graph}
+  In an $(n,3n/4;d)$-magical graph, every nonempty $S\subseteq L$ with
+  $|S|\le\tfrac n{10d}$ has a vertex $u\in R$ with $|\Gamma(u)\cap S|=1$.
+\end{lemma}
+\begin{proof}
+  \uses{def:magical-graph}
+  The number of edges between $S$ and $\Gamma(S)$ is $d|S|$. By property (1)
+  $|\Gamma(S)|\ge\tfrac{5d}8|S|$, so the average number of $S$-neighbours of a
+  vertex of $\Gamma(S)$ is $\le 8/5<2$; since each has $\ge1$, some has exactly
+  one.
+\end{proof}
+
+\begin{theorem}[1.3.1, Super concentrator with $O(n)$ edges]
+  \label{thm:super-concentrator-linear}
+  \uses{def:super-concentrator, lem:magical-exists, lem:magical-matching}
+  There exist super concentrators with $n$ inputs, $n$ outputs and $O(n)$ edges.
+\end{theorem}
+\begin{proof}
+  \uses{def:super-concentrator, lem:magical-matching, lem:magical-exists}
+  Recursively: for $n<n_0$ use the complete bipartite graph ($n^2$ edges). For
+  $n\ge n_0$ build $C'$ from two copies $G_1,G_2$ of an $(n,3n/4;d)$-magical
+  graph, a super concentrator $C$ on $R_1,R_2$ (size $3n/4$, by induction), and
+  a perfect matching between $L_1,L_2$; inputs/outputs are $L_1,L_2$. For
+  $|S|=|T|=k\le n/2$, Lemma~\ref{lem:magical-matching} and Hall give matchings of
+  $S,T$ into $R_1,R_2$; their images are joined by $k$ disjoint paths in $C$. For
+  $k>n/2$, route $k-n/2$ pairs directly through the matching and reduce to
+  $k\le n/2$. The edge recursion $e(n)\le2nd+n+e(3n/4)$ ($n>n_0$), $e(n)=n^2$
+  ($n\le n_0$) solves to $e(n)\le Kn$.
+\end{proof}
+
+\begin{theorem}[1.3.2, Good code from a magical graph]
+  \label{thm:magical-code}
+  \uses{def:magical-graph, def:code-rate-distance, lem:unique-neighbour, lem:magical-exists}
+  An $(n,3n/4;d)$-magical graph yields a linear code $C\subseteq\{0,1\}^n$ with
+  rate $R\ge\tfrac14$ and normalized distance $\delta\ge\tfrac1{10d}$.
+\end{theorem}
+\begin{proof}
+  \uses{lem:unique-neighbour, def:code-rate-distance, lem:magical-exists}
+  Let $A$ be the $|R|\times|L|$ bipartite adjacency matrix over $\GF2$ and
+  $C=\{x:Ax=0\}$. Then $\dim C\ge n-|R|=n/4$, so $R\ge\tfrac14$. Since $C$ is
+  linear, its distance is the minimum weight of a nonzero codeword; if a nonzero
+  $x$ had support $S$ with $|S|<\tfrac n{10d}$, then by
+  Lemma~\ref{lem:unique-neighbour} some coordinate of $Ax$ is $1$, so
+  $x\notin C$. Hence $\delta\ge\tfrac1{10d}$.
+\end{proof}
+
+\begin{theorem}[1.3.3, Deterministic error amplification for $\mathbf{RP}$]
+  \label{thm:rp-amplification}
+  \uses{def:magical-graph, def:rp-class, lem:magical-exists, lem:unique-neighbour}
+  For $\mathcal L\in\mathbf{RP}$ with one-sided-error algorithm $f$ using $k$
+  bits, $n=2^k$, failing on $B$ with $|B|\le n/16$: for every $d$ there is an
+  algorithm evaluating $f$ exactly $d$ times, using only the $k$ random bits,
+  with error $\le\tfrac1{10d}$.
+\end{theorem}
+\begin{proof}
+  \uses{def:magical-graph, lem:magical-exists}
+  Use an $(n,n;d)$-magical graph $G=(L,R,E)$, $R$ identified with $\{0,1\}^k$.
+  Sample $r\in L$, let $r_1,\dots,r_d$ be its neighbours, output
+  $\bigwedge_i f(x,r_i)$. For $x\in\mathcal L$ this is always $1$. For
+  $x\notin\mathcal L$ failure means all $r_i\in B$; let $S=\{r:\Gamma(r)\subseteq
+  B\}$. If $|S|>\tfrac n{10d}$ then by property (1)
+  $|B|\ge|\Gamma(S)|>\tfrac{5d}8\cdot\tfrac n{10d}=\tfrac n{16}$, contradiction.
+  So $|S|\le\tfrac n{10d}$ and $\Pr[r\in S]\le\tfrac1{10d}$.
+\end{proof}
+
+
+\chapter{Graph expansion and eigenvalues}
+
+\begin{definition}[$d$-regular graph and edge sets]
+  \label{def:d-regular}
+  Unless stated otherwise $G=(V,E)$ is undirected, \emph{$d$-regular}, with
+  $n=|V|$ (self-loops/multi-edges allowed). For $S,T\subseteq V$,
+  $E(S,T)=\{(u,v):u\in S,v\in T,(u,v)\in E\}$ is a set of \emph{directed} edges;
+  $\Gamma(S)$ is the neighbourhood of $S$.
+\end{definition}
+
+\begin{definition}[2.1, Edge boundary and expansion ratio]
+  \label{def:edge-expansion}
+  \uses{def:d-regular}
+  The \emph{edge boundary} is $\partial S=E(S,\overline S)$; the \emph{expansion
+  ratio} is $h(G)=\min_{|S|\le n/2}\frac{|\partial S|}{|S|}$.
+\end{definition}
+
+\begin{definition}[2.2, Family of expander graphs]
+  \label{def:expander-family}
+  \uses{def:edge-expansion}
+  A sequence $\{G_i\}$ of $d$-regular graphs of increasing size is a
+  \emph{family of expanders} if $h(G_i)\ge\epsilon$ for some $\epsilon>0$, all
+  $i$.
+\end{definition}
+
+\begin{definition}[2.3, Mildly and very explicit families]
+  \label{def:explicit}
+  \uses{def:expander-family}
+  $\{G_i\}$ (on $n_i$ vertices, $n_{i+1}\le n_i^2$) is \emph{mildly explicit} if
+  $G_j$ is computable in time $\mathrm{poly}(j)$, and \emph{very explicit} if the
+  $k$-th neighbour of $v$ in $G_i$ is computable in time
+  $\mathrm{poly}(|(i,v,k)|)$.
+\end{definition}
+
+\begin{construction}[2.2(1), Margulis $8$-regular family]
+  \label{constr:margulis-family}
+  \uses{def:d-regular}
+  $G_m$ has vertices $\Z_m\times\Z_m$; $(x,y)$ joins $(x\pm y,y)$,
+  $(x\pm(y+1),y)$, $(x,y\pm x)$, $(x,y\pm(x+1))$ (mod $m$); $8$-regular and very
+  explicit.
+\end{construction}
+
+\begin{construction}[2.2(2), $3$-regular $\Z_p$ family]
+  \label{constr:zp-family}
+  \uses{def:d-regular}
+  For prime $p$, $V_p=\Z_p$, $x$ joins $x\pm1$ and $x^{-1}$ ($0^{-1}:=0$);
+  $3$-regular, expansion by Selberg's $3/16$ theorem, mildly explicit.
+\end{construction}
+
+\begin{definition}[Adjacency matrix and spectrum]
+  \label{def:adjacency}
+  \uses{def:d-regular}
+  The \emph{adjacency matrix} $A=A(G)$ has $(u,v)$ entry the number of edges
+  between $u,v$. It is real symmetric with eigenvalues
+  $\lambda_1\ge\dots\ge\lambda_n$ (the \emph{spectrum}) and orthonormal
+  eigenbasis $v_1,\dots,v_n$.
+\end{definition}
+
+\begin{lemma}[Spectral theorem for symmetric matrices]
+  \label{lem:spectral-theorem}
+  \mathlibok
+  A real symmetric matrix has real eigenvalues and an orthonormal eigenbasis.
+  % TODO: confirm Lean decl -- Matrix.IsHermitian.spectral_theorem.
+\end{lemma}
+
+\begin{lemma}[Cauchy--Schwarz]
+  \label{lem:cauchy-schwarz}
+  \mathlibok
+  For real vectors, $|\langle x,y\rangle|\le\|x\|_2\,\|y\|_2$.
+  % TODO: confirm Lean decl -- inner_mul_le_norm_mul_norm.
+\end{lemma}
+
+\begin{lemma}[Perron--Frobenius]
+  \label{lem:perron-frobenius}
+  \mathlibok
+  An irreducible nonnegative matrix has a positive real eigenvalue equal to its
+  spectral radius, with a positive eigenvector of multiplicity one.
+  % TODO: confirm Lean decl -- Matrix.Perron-Frobenius results.
+\end{lemma}
+
+\begin{lemma}[Variational (Courant--Fischer) characterization]
+  \label{lem:rayleigh-variational}
+  \uses{def:adjacency}
+  \mathlibok
+  For a symmetric $A$ with eigenvalues $\lambda_1\ge\dots\ge\lambda_n$ and top
+  eigenvector $v_1$, $\lambda_1=\max_x\frac{x^\top Ax}{\|x\|^2}$ and
+  $\lambda_2=\max_{x\perp v_1}\frac{x^\top Ax}{\|x\|^2}$.
+  % TODO: confirm Lean decl -- min-max / Rayleigh quotient in Mathlib.
+\end{lemma}
+
+\begin{lemma}[Basic spectral facts of a $d$-regular graph]
+  \label{lem:basic-spectrum}
+  \uses{def:adjacency, lem:spectral-theorem, lem:perron-frobenius}
+  For $d$-regular $G$: (i) $\lambda_1=d$ with eigenvector $\mathbf 1/\sqrt n$;
+  (ii) $G$ is connected iff $\lambda_1>\lambda_2$; (iii) $G$ is bipartite iff
+  $\lambda_1=-\lambda_n$.
+\end{lemma}
+\begin{proof}
+  \uses{def:adjacency, lem:perron-frobenius}
+  (i) $A\mathbf 1=d\mathbf 1$ and Perron--Frobenius makes $d$ the top eigenvalue.
+  (ii) The multiplicity of $d$ is the number of components. (iii) For connected
+  $G$, $-d$ is an eigenvalue iff $G$ is bipartite (a $\pm1$ eigenvector splits
+  $V$).
+\end{proof}
+
+\begin{definition}[$\lambda(G)$ and $(n,d,\alpha)$-graphs]
+  \label{def:lambda-G}
+  \uses{def:adjacency}
+  Set $\lambda(G)=\max(|\lambda_2|,|\lambda_n|)$. An $n$-vertex $d$-regular graph
+  is an \emph{$(n,d)$-graph}; it is an \emph{$(n,d,\alpha)$-graph} if
+  $\lambda(G)\le\alpha d$. The \emph{spectral gap} is $d-\lambda_2$.
+\end{definition}
+
+\begin{theorem}[2.4, Discrete Cheeger inequality]
+  \label{thm:cheeger}
+  \uses{def:edge-expansion, def:lambda-G}
+  For a $d$-regular graph,
+  $\frac{d-\lambda_2}2\le h(G)\le\sqrt{2d(d-\lambda_2)}$.
+\end{theorem}
+\begin{proof}
+  \uses{thm:cheeger-easy, thm:cheeger-hard}
+  The lower bound is Theorem~\ref{thm:cheeger-easy}, the upper bound is
+  Theorem~\ref{thm:cheeger-hard} (both proved in the geometric chapter).
+\end{proof}
+
+\begin{lemma}[2.5, Expander Mixing Lemma]
+  \label{lem:expander-mixing}
+  \uses{def:lambda-G, def:adjacency}
+  For a $d$-regular graph on $n$ vertices with $\lambda=\lambda(G)$ and all
+  $S,T\subseteq V$,
+  $\bigl|\,|E(S,T)|-\frac{d|S||T|}n\bigr|\le\lambda\sqrt{|S||T|}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:adjacency, def:lambda-G, lem:spectral-theorem, lem:cauchy-schwarz}
+  Expand $\mathbf 1_S=\sum_i\alpha_iv_i$, $\mathbf 1_T=\sum_j\beta_jv_j$ in the
+  eigenbasis ($v_1=\mathbf 1/\sqrt n$). Then
+  $|E(S,T)|=\mathbf 1_S^\top A\mathbf 1_T=\sum_i\lambda_i\alpha_i\beta_i
+  =d\tfrac{|S||T|}n+\sum_{i\ge2}\lambda_i\alpha_i\beta_i$, since
+  $\alpha_1=|S|/\sqrt n$, $\beta_1=|T|/\sqrt n$. Hence by the definition of
+  $\lambda$ and Cauchy--Schwarz the deviation is
+  $\le\lambda\sum_{i\ge2}|\alpha_i\beta_i|\le\lambda\|\alpha\|_2\|\beta\|_2
+  =\lambda\sqrt{|S||T|}$.
+\end{proof}
+
+\begin{lemma}[2.6, Converse of the Expander Mixing Lemma (Bilu--Linial)]
+  \label{lem:mixing-converse}
+  \uses{def:lambda-G, lem:expander-mixing}
+  \notready
+  If $\bigl|\,|E(S,T)|-\tfrac{d|S||T|}n\bigr|\le\rho\sqrt{|S||T|}$ for all
+  disjoint $S,T$, then $\lambda\le O(\rho(1+\log(d/\rho)))$, and this is tight.
+\end{lemma}
+% TODO: paper states this without proof; reconstruct from Bilu--Linial or cite.
+
+\begin{corollary}[Independent sets]
+  \label{cor:independent-set}
+  \uses{lem:expander-mixing, def:lambda-G}
+  An independent set in an $(n,d,\alpha)$-graph has $\le\alpha n$ vertices.
+\end{corollary}
+\begin{proof}
+  \uses{lem:expander-mixing}
+  With $T=S$ and $|E(S,S)|=0$, the mixing lemma gives
+  $\tfrac{d|S|^2}n\le\lambda|S|\le\alpha d|S|$.
+\end{proof}
+
+\begin{corollary}[Chromatic number]
+  \label{cor:chromatic}
+  \uses{cor:independent-set}
+  An $(n,d,\alpha)$-graph has $\chi(G)\ge1/\alpha$.
+\end{corollary}
+\begin{proof}
+  \uses{cor:independent-set}
+  Each colour class is independent of size $\le\alpha n$, so $\ge1/\alpha$
+  classes are needed.
+\end{proof}
+
+\begin{theorem}[Logarithmic diameter]
+  \label{thm:diameter}
+  \uses{lem:expander-mixing, def:lambda-G}
+  An $(n,d,\alpha)$-graph has diameter $O(\log n)$.
+\end{theorem}
+\begin{proof}
+  \uses{lem:expander-mixing}
+  For $S=B(x,r)$ with $|S|\le n/2$, the mixing lemma gives
+  $|E(S,\overline S)|/|S|\ge d((1-\alpha)-|S|/n)$, so
+  $|B(x,r+1)|\ge(1+\epsilon)|B(x,r)|$ with $\epsilon=\tfrac12-\alpha$. Geometric
+  growth reaches $n/2$ within $O(\log n)$ steps; applying this from any vertex
+  bounds the diameter.
+\end{proof}
+
+\begin{theorem}[2.7, Alon--Boppana bound]
+  \label{thm:alon-boppana}
+  \uses{def:lambda-G}
+  Every $(n,d)$-graph has $\lambda\ge2\sqrt{d-1}-o_n(1)$.
+\end{theorem}
+\begin{proof}
+  \uses{thm:alon-boppana-diam}
+  Proved in the extremal chapter (Theorem~\ref{thm:alon-boppana-diam}) via
+  closed walks in the $d$-regular tree.
+\end{proof}
+
+\begin{claim}[2.8, Weak Alon--Boppana via trace]
+  \label{claim:weak-alon-boppana}
+  \uses{def:lambda-G, def:adjacency}
+  Every $(n,d)$-graph has $\lambda\ge\sqrt d\,(1-o_n(1))$.
+\end{claim}
+\begin{proof}
+  \uses{def:adjacency, lem:spectral-theorem}
+  $\Tr(A^2)$ counts closed walks of length $2$, so $\Tr(A^2)\ge nd$. Also
+  $\Tr(A^2)=\sum_i\lambda_i^2\le d^2+(n-1)\lambda^2$. Hence
+  $\lambda^2\ge d\tfrac{n-d}{n-1}$.
+\end{proof}
+
+
+\chapter{Random walks on expander graphs}
+
+\begin{lemma}[Jensen's inequality]
+  \label{lem:jensen}
+  \mathlibok
+  For a concave $\varphi$ and a random variable $X$,
+  $\E[\varphi(X)]\le\varphi(\E X)$.
+  % TODO: confirm Lean decl -- ConvexOn Jensen.
+\end{lemma}
+
+\begin{lemma}[Markov's inequality]
+  \label{lem:markov}
+  \mathlibok
+  For a nonnegative random variable $X$ and $a>0$, $\Pr[X\ge a]\le\E X/a$.
+  % TODO: confirm Lean decl -- MeasureTheory.mul_meas_ge_le_lintegral.
+\end{lemma}
+
+\begin{definition}[3.1, Random walk]
+  \label{def:random-walk}
+  \uses{def:d-regular}
+  A \emph{random walk} on $G$ is the Markov chain $(X_0,X_1,\dots)$ with $X_0$
+  drawn from an initial distribution and $X_{i+1}$ uniform among the neighbours
+  of $X_i$; this induces distributions $\pi_i$ on $V$.
+\end{definition}
+
+\begin{definition}[Normalized adjacency matrix]
+  \label{def:normalized-adjacency}
+  \uses{def:adjacency}
+  For $d$-regular $G$, $\hat A=\tfrac1d A$. The uniform vector is
+  $\mathbf u=(1,\dots,1)/n$.
+\end{definition}
+
+\begin{claim}[Properties of $\hat A$]
+  \label{claim:Ahat-properties}
+  \uses{def:normalized-adjacency, def:lambda-G, def:random-walk}
+  $\hat A$ is the transition matrix of the random walk; it is symmetric and
+  doubly stochastic; its eigenvalues are $\hat\lambda_i=\lambda_i/d$, so
+  $\hat\lambda_1=1$ and $\max(|\hat\lambda_2|,|\hat\lambda_n|)\le\alpha$; $\hat
+  A^t$ is the $t$-step transition matrix; and $\hat A\mathbf u=\mathbf u$.
+\end{claim}
+\begin{proof}
+  \uses{def:normalized-adjacency, def:lambda-G}
+  $A$ is symmetric with constant row sum $d$, so $\hat A=\tfrac1dA$ is symmetric
+  with row/column sums $1$. Scaling preserves eigenvectors and divides
+  eigenvalues by $d$; powers give $t$-step probabilities, and
+  $\hat A\mathbf u=\mathbf u$ since rows sum to $1$.
+\end{proof}
+
+\begin{definition}[Entropies]
+  \label{def:entropies}
+  For a distribution $\mathbf p$ on $[n]$: Shannon entropy
+  $H(\mathbf p)=-\sum_ip_i\log p_i$; Rényi $2$-entropy
+  $H_2(\mathbf p)=-2\log\|\mathbf p\|_2$; min-entropy
+  $H_\infty(\mathbf p)=-\log\|\mathbf p\|_\infty$.
+\end{definition}
+
+\begin{lemma}[3.4, $\ell_2$ shrinkage per step]
+  \label{lem:l2-shrinkage}
+  \uses{claim:Ahat-properties, def:lambda-G}
+  For a probability vector $\mathbf p$ in an $(n,d,\alpha)$-graph,
+  $\|\hat A\mathbf p-\mathbf u\|_2\le\alpha\|\mathbf p-\mathbf u\|_2\le\alpha$.
+\end{lemma}
+\begin{proof}
+  \uses{claim:Ahat-properties}
+  $\hat A\mathbf u=\mathbf u$ and $\mathbf p-\mathbf u\perp\mathbf u$, so it lies
+  in the span of eigenvectors with $|\hat\lambda|\le\alpha$. Thus
+  $\|\hat A\mathbf p-\mathbf u\|_2=\|\hat A(\mathbf p-\mathbf u)\|_2
+  \le\alpha\|\mathbf p-\mathbf u\|_2\le\alpha$.
+\end{proof}
+
+\begin{theorem}[3.3, $\ell_2$ convergence]
+  \label{thm:l2-convergence}
+  \uses{lem:l2-shrinkage}
+  For any distribution $\mathbf p$ and $t\ge1$,
+  $\|\hat A^t\mathbf p-\mathbf u\|_2\le\alpha^t$.
+\end{theorem}
+\begin{proof}
+  \uses{lem:l2-shrinkage}
+  Induct on $t$ using Lemma~\ref{lem:l2-shrinkage}, noting $\hat A^{t-1}\mathbf p$
+  is again a distribution.
+\end{proof}
+
+\begin{theorem}[3.2, $\ell_1$ convergence]
+  \label{thm:l1-convergence}
+  \uses{thm:l2-convergence, lem:cauchy-schwarz}
+  For any distribution $\mathbf p$ and $t\ge1$,
+  $\|\hat A^t\mathbf p-\mathbf u\|_1\le\sqrt n\,\alpha^t$.
+\end{theorem}
+\begin{proof}
+  \uses{thm:l2-convergence, lem:cauchy-schwarz}
+  Cauchy--Schwarz gives $\|x\|_1\le\sqrt n\|x\|_2$; apply with
+  $x=\hat A^t\mathbf p-\mathbf u$.
+\end{proof}
+
+\begin{proposition}[3.5, Entropy ordering]
+  \label{prop:entropy-ordering}
+  \uses{def:entropies}
+  $H_\infty(\mathbf p)\le H_2(\mathbf p)\le2H_\infty(\mathbf p)$.
+\end{proposition}
+\begin{proof}
+  \uses{def:entropies}
+  Since $\|\mathbf p\|_\infty\ge\|\mathbf p\|_2^2\ge\|\mathbf p\|_\infty^2$, take
+  $-\log$.
+\end{proof}
+
+\begin{theorem}[Rényi $2$-entropy increases under a walk]
+  \label{thm:renyi-increase}
+  \uses{def:entropies, claim:Ahat-properties, lem:l2-shrinkage}
+  Writing $\mathbf p=\mathbf u+\mathbf f$, $\mathbf f\perp\mathbf u$,
+  $\mu=\|\mathbf f\|/\|\mathbf p\|$, one has
+  $H_2(\hat A\mathbf p)\ge H_2(\mathbf p)-\log(1-(1-\alpha^2)\mu^2)$.
+\end{theorem}
+\begin{proof}
+  \uses{claim:Ahat-properties, lem:l2-shrinkage}
+  $\hat A\mathbf p=\mathbf u+\hat A\mathbf f$ with $\hat A\mathbf f\perp\mathbf u$,
+  so $\|\hat A\mathbf p\|^2=\|\mathbf u\|^2+\|\hat A\mathbf f\|^2
+  \le(1-(1-\alpha^2)\mu^2)\|\mathbf p\|^2$. Take $-\log$.
+\end{proof}
+
+\begin{definition}[Projection onto a set]
+  \label{def:projection}
+  For $B\subseteq V$, $P=P_B$ is the diagonal $0/1$ matrix with $P_{ii}=1$ iff
+  $i\in B$.
+\end{definition}
+
+\begin{lemma}[3.7, Confined-walk probability]
+  \label{lem:walk-confinement}
+  \uses{def:projection, def:random-walk, claim:Ahat-properties}
+  Let $(B,t)$ be the event that a uniformly-started length-$t$ walk stays in
+  $B$. Then $\Pr[(B,t)]=\|(P\hat A)^tP\mathbf u\|_1$.
+\end{lemma}
+\begin{proof}
+  \uses{def:projection, claim:Ahat-properties}
+  The entries of $(P\hat A)^tP$ count walks confined to $B$; summing against
+  $\mathbf u=\tfrac1n\mathbf 1$ gives the probability over a uniform start.
+\end{proof}
+
+\begin{lemma}[3.8, Projection contraction]
+  \label{lem:projection-contraction}
+  \uses{def:projection, claim:Ahat-properties, lem:l2-shrinkage, lem:cauchy-schwarz}
+  $\|P\hat A P\mathbf v\|_2\le(\beta+\alpha)\|\mathbf v\|_2$ for all $\mathbf v$,
+  where $\beta=|B|/n$.
+\end{lemma}
+\begin{proof}
+  \uses{claim:Ahat-properties, lem:cauchy-schwarz}
+  WLOG $\mathbf v=P\mathbf v\ge0$, $\sum v_i=1$, $\mathbf v=\mathbf u+\mathbf z$,
+  $\mathbf z\perp\mathbf u$. Then
+  $\|P\hat A\mathbf v\|_2\le\|P\mathbf u\|_2+\|P\hat A\mathbf z\|_2$;
+  Cauchy--Schwarz on the $\le\beta n$-support gives $\|P\mathbf u\|_2\le\beta\|
+  \mathbf v\|_2$, and $\|P\hat A\mathbf z\|_2\le\alpha\|\mathbf z\|_2\le\alpha\|
+  \mathbf v\|_2$.
+\end{proof}
+
+\begin{theorem}[3.6, AKS confinement bound]
+  \label{thm:aks-confinement}
+  \uses{lem:walk-confinement, lem:projection-contraction, lem:cauchy-schwarz}
+  For $B$ of density $\beta$ in an $(n,d,\alpha)$-graph,
+  $\Pr[(B,t)]\le(\beta+\alpha)^t$.
+\end{theorem}
+\begin{proof}
+  \uses{lem:walk-confinement, lem:projection-contraction, lem:cauchy-schwarz}
+  By Lemma~\ref{lem:walk-confinement},
+  $\Pr[(B,t)]=\|(P\hat A)^tP\mathbf u\|_1\le\sqrt n\|(P\hat A P)^t\mathbf u\|_2$;
+  iterate Lemma~\ref{lem:projection-contraction} and use $\sqrt n\|\mathbf
+  u\|_2=1$.
+\end{proof}
+
+\begin{theorem}[3.9, AKS two-sided bound]
+  \label{thm:aks-lower-bound}
+  \uses{thm:aks-confinement}
+  \notready
+  If $\beta>6\alpha$ then
+  $\beta(\beta+2\alpha)^t\ge\Pr[(B,t)]\ge\beta(\beta-2\alpha)^t$.
+\end{theorem}
+% TODO: paper omits the proof (refers to [AFWZ95]); reconstruct or cite.
+
+\begin{theorem}[3.10, Time-dependent confinement]
+  \label{thm:time-confinement}
+  \uses{thm:aks-confinement, lem:projection-contraction}
+  For $K\subseteq\{0,\dots,t\}$ and $B$ of density $\beta$,
+  $\Pr[X_i\in B\ \forall i\in K]\le(\beta+\alpha)^{|K|-1}$.
+\end{theorem}
+\begin{proof}
+  \uses{thm:aks-confinement, lem:projection-contraction}
+  Insert projections only at steps in $K$, with free $\hat A$ propagation
+  between; $|K|$ projection factors give the bound.
+\end{proof}
+
+\begin{theorem}[3.11, Varying-set confinement]
+  \label{thm:varying-confinement}
+  \uses{lem:walk-confinement, lem:projection-contraction}
+  For sets $B_0,\dots,B_t$ of densities $\beta_i$,
+  $\Pr[X_i\in B_i\ \forall i]\le\prod_{i=0}^{t-1}(\sqrt{\beta_i\beta_{i+1}}+\alpha)$.
+\end{theorem}
+\begin{proof}
+  \uses{lem:projection-contraction}
+  As in Theorem~\ref{thm:aks-confinement}, with per-step bound
+  $\|P_{i+1}\hat A P_i\mathbf v\|_2\le(\sqrt{\beta_i\beta_{i+1}}+\alpha)\|\mathbf
+  v\|_2$.
+\end{proof}
+
+\begin{definition}[$\mathbf{BPP}$]
+  \label{def:bpp-class}
+  $\mathcal L\in\mathbf{BPP}$ if a randomized polynomial-time $A$ using $k$ bits
+  errs (on every $x$) with probability $\le\beta\le\tfrac1{10}$.
+\end{definition}
+
+\begin{theorem}[Randomness-efficient one-sided error reduction]
+  \label{thm:one-sided-reduction}
+  \uses{def:rp-class, thm:aks-confinement, def:lambda-G}
+  For $\mathcal L\in\mathbf{RP}$ with bad set of density $\beta$, the AND over a
+  length-$t$ walk on a $(2^k,d,\alpha)$-graph errs with probability
+  $\le(\beta+\alpha)^t$, using $k+O(t)$ random bits.
+\end{theorem}
+\begin{proof}
+  \uses{thm:aks-confinement}
+  The reduced algorithm errs iff the walk stays in the bad set, i.e. event
+  $(B,t)$, bounded by $(\beta+\alpha)^t$; the walk uses $k$ bits for the start
+  and $O(1)$ per step.
+\end{proof}
+
+\begin{theorem}[Randomness-efficient two-sided error reduction]
+  \label{thm:two-sided-reduction}
+  \uses{def:bpp-class, thm:time-confinement, lem:union-bound}
+  For $\mathcal L\in\mathbf{BPP}$ with $\alpha+\beta\le\tfrac18$, the majority
+  vote over a length-$t$ walk errs with probability $O(2^{-t/2})$, using $k+O(t)$
+  random bits.
+\end{theorem}
+\begin{proof}
+  \uses{thm:time-confinement, lem:union-bound}
+  Failure means some $K$ with $|K|\ge(t+1)/2$ has all $X_i\in B$; by
+  Theorem~\ref{thm:time-confinement} each has probability
+  $\le(\beta+\alpha)^{(t-1)/2}$, and a union bound over $\le2^t$ sets $K$ gives
+  $O(2^{-t/2})$.
+\end{proof}
+
+\begin{definition}[Clique and clique number]
+  \label{def:clique}
+  \uses{def:d-regular}
+  A \emph{clique} is a set of pairwise-adjacent vertices; $\omega(G)$ is the
+  maximum clique size.
+\end{definition}
+
+\begin{theorem}[3.12, FGL clique hardness]
+  \label{thm:fgl-clique}
+  \uses{def:clique}
+  \notready
+  There are constants $1>\delta_1>\delta_2>0$ such that it is $\mathbf{NP}$-hard
+  to decide whether $\omega(G)\le\delta_2n$ or $\omega(G)\ge\delta_1n$.
+\end{theorem}
+% TODO: rests on the PCP theorem; proof omitted in the survey ([FGL91]).
+
+\begin{construction}[Tensor-power graph $H$]
+  \label{constr:graph-product-H}
+  \uses{def:clique}
+  Given $n$-vertex $G$ and $t=\log n$, $H$ has vertex set $V^t$; two tuples are
+  adjacent iff the union of their coordinates induces a clique in $G$.
+\end{construction}
+
+\begin{claim}[3.14.1, Clique structure of $H$]
+  \label{claim:clique-H}
+  \uses{constr:graph-product-H, def:clique}
+  Every clique of $H$ lies in some $S^t$ with $S$ a maximal clique of $G$; in
+  particular $\omega(H)=\omega(G)^t$.
+\end{claim}
+\begin{proof}
+  \uses{constr:graph-product-H, def:clique}
+  If $S$ is a clique then $S^t$ is a clique of $H$, so
+  $\omega(H)\ge\omega(G)^t$; conversely the vertices appearing in a clique $S'$
+  of $H$ form a clique $S$ with $|S'|\le|S|^t$.
+\end{proof}
+
+\begin{lemma}[3.14, Clique inapproximability, $\mathbf{NP}\subseteq\mathbf{RP}$]
+  \label{lem:clique-inapprox}
+  \uses{constr:graph-product-H, claim:clique-H, thm:fgl-clique, lem:chernoff, def:rp-class}
+  If a polynomial-time $A$ satisfies $n^{-\epsilon}\le A(G)/\omega(G)\le
+  n^{\epsilon}$ on every graph, then $\mathbf{NP}\subseteq\mathbf{RP}$.
+\end{lemma}
+\begin{proof}
+  \uses{claim:clique-H, thm:fgl-clique, lem:chernoff}
+  Sample $m=\mathrm{poly}(n)$ random vertices of $H$, induce $H'$, run $A$,
+  threshold at $\tfrac12\delta_1^tm$. If $\omega(G)\ge\delta_1n$, a clique of $H$
+  of size $(\delta_1n)^t$ meets $H'$ in $\ge\tfrac12\delta_1^tm$ vertices w.h.p.;
+  if $\omega(G)\le\delta_2n$, each of $\le2^n$ maximal cliques contributes
+  $\le2\delta_2^tm$ w.h.p. (Chernoff). With $t=\log n$ the gap is polynomial,
+  separating the cases, so $A$ decides the problem of
+  Theorem~\ref{thm:fgl-clique}.
+\end{proof}
+
+\begin{construction}[Derandomized sampling via walks]
+  \label{constr:derandomized-H}
+  \uses{constr:graph-product-H, def:lambda-G, def:random-walk}
+  Replace random $t$-tuples by all length-$(t-1)$ walks of an
+  $(n,d,\alpha)$-graph $\mathcal G$ on $V(G)$; then $m=nd^{t-1}$.
+\end{construction}
+
+\begin{claim}[3.15, Derandomized upper bound]
+  \label{claim:derand-upper}
+  \uses{constr:derandomized-H, thm:aks-lower-bound, def:clique}
+  If $\omega(G)\le\delta_2n$ then $\omega(H')\le(\delta_2+2\alpha)^tm$.
+\end{claim}
+\begin{proof}
+  \uses{thm:aks-lower-bound, constr:derandomized-H}
+  Cliques of $H'$ are walks confined to a clique of density $\le\delta_2$;
+  Theorem~\ref{thm:aks-lower-bound} caps the confinement probability.
+\end{proof}
+
+\begin{claim}[3.16, Derandomized lower bound]
+  \label{claim:derand-lower}
+  \uses{constr:derandomized-H, thm:aks-lower-bound, def:clique}
+  If $\omega(G)\ge\delta_1n$ then $\omega(H')\ge(\delta_1-2\alpha)^tm$.
+\end{claim}
+\begin{proof}
+  \uses{thm:aks-lower-bound, constr:derandomized-H}
+  A clique of density $\ge\delta_1$ retains a $(\delta_1-2\alpha)^t$ fraction of
+  walks by Theorem~\ref{thm:aks-lower-bound}.
+\end{proof}
+
+\begin{theorem}[3.13, Clique inapproximability, $\mathbf{NP}=\mathbf{P}$]
+  \label{thm:clique-inapprox}
+  \uses{lem:clique-inapprox, claim:derand-upper, claim:derand-lower, thm:fgl-clique}
+  There is $\epsilon>0$ such that a polynomial-time $A$ with $n^{-\epsilon}\le
+  A(G)/\omega(G)\le n^{\epsilon}$ on every graph implies $\mathbf{NP}=\mathbf{P}$.
+\end{theorem}
+\begin{proof}
+  \uses{lem:clique-inapprox, claim:derand-upper, claim:derand-lower, thm:fgl-clique}
+  Derandomize Lemma~\ref{lem:clique-inapprox} via
+  Construction~\ref{constr:derandomized-H};
+  Claims~\ref{claim:derand-upper}--\ref{claim:derand-lower} separate the cases
+  deterministically.
+\end{proof}
+
+
+\chapter{A geometric view of expander graphs}
+
+\begin{problem}[4.1, Classical isoperimetric problem]
+  \label{prob:classical-isoperimetric}
+  Of all simple closed plane curves of a given length, which encloses the
+  greatest area? (Answer: the circle.)
+\end{problem}
+
+\begin{construction}[Steiner symmetrization]
+  \label{constr:steiner}
+  Symmetrizing a convex planar set about the $x$-axis (replacing each vertical
+  slice $[y_1(x),y_2(x)]$ by the centred slice of equal length) preserves area
+  and does not increase the perimeter.
+\end{construction}
+
+\begin{definition}[4.2, Edge isoperimetric parameter]
+  \label{def:edge-iso}
+  \uses{def:edge-expansion}
+  $\Phi_E(G,k)=\min_{|S|=k}|E(S,\overline S)|$.
+\end{definition}
+
+\begin{definition}[4.3, Vertex isoperimetric parameter]
+  \label{def:vertex-iso}
+  \uses{def:d-regular}
+  $\Phi_V(G,k)=\min_{|S|=k}|\Gamma(S)\setminus S|$.
+\end{definition}
+
+\begin{definition}[Discrete cube $Q_d$]
+  \label{def:discrete-cube}
+  \uses{def:hamming-distance}
+  $Q_d$ is the graph on $\{0,1\}^d$ with edges between vectors of Hamming
+  distance $1$.
+\end{definition}
+
+\begin{theorem}[Edge isoperimetry of the cube]
+  \label{thm:cube-edge-iso}
+  \uses{def:edge-iso, def:discrete-cube}
+  \notready
+  $\Phi_E(Q_d,k)\ge k(d-\log_2k)$, with equality when $k=2^\ell$ (a subcube).
+\end{theorem}
+% TODO: stated as known (survey [Bol86]); proof omitted.
+
+\begin{theorem}[Vertex isoperimetry of the cube (Harper)]
+  \label{thm:cube-vertex-iso}
+  \uses{def:vertex-iso, def:discrete-cube}
+  \notready
+  If $k=\sum_{i\le r}\binom di$ then $\Phi_V(Q_d,k)=\binom d{r+1}$ (Hamming
+  balls).
+\end{theorem}
+% TODO: stated as known (survey [Bol86]); proof omitted.
+
+\begin{construction}[Margulis transformations on the torus]
+  \label{constr:margulis-infinite}
+  On $I\times I$ ($I=[0,1)$), $T(x,y)=(x+y,y)$ and $S(x,y)=(x,x+y)$ (mod $1$);
+  neighbours of $(x,y)$ are $T^{\pm1},S^{\pm1}$ of it, a $4$-regular structure.
+\end{construction}
+
+\begin{theorem}[4.4, Margulis/Gabber--Galil torus expansion]
+  \label{thm:margulis-torus}
+  \uses{constr:margulis-infinite}
+  \notready
+  There is $\epsilon>0$ such that every measurable $A$ with $\mu(A)\le\tfrac12$
+  has $\mu(\Gamma(A)\cup A)\ge(1+\epsilon)\mu(A)$.
+\end{theorem}
+% TODO: analysis deferred to the Margulis chapter (harmonic analysis); cited.
+
+\begin{definition}[Signed incidence matrix]
+  \label{def:incidence}
+  \uses{def:d-regular}
+  Fix an orientation of $E$. The $V\times E$ matrix $K$ has $K_{u,e}=+1$ if $e$
+  leaves $u$, $-1$ if $e$ enters $u$, else $0$.
+\end{definition}
+
+\begin{definition}[Gradient and divergence]
+  \label{def:gradient}
+  \uses{def:incidence}
+  For $f:V\to\R$, the gradient is $fK$ (indexed by $E$), with $(fK)_e=f_u-f_v$
+  for $e=(u,v)$. For $g:E\to\R$, the divergence is $Kg$.
+\end{definition}
+
+\begin{definition}[Discrete Laplacian]
+  \label{def:laplacian}
+  \uses{def:incidence, def:gradient}
+  $L=L_G=KK^\top$, with $L_{u,u}=\deg(u)$ and $L_{u,v}=-1$ for $(u,v)\in E$.
+\end{definition}
+
+\begin{lemma}[Laplacian quadratic form]
+  \label{eq:laplacian-form}
+  \uses{def:laplacian, def:gradient}
+  $fLf^\top=\|fK\|^2=\sum_{(u,v)\in E}(f(u)-f(v))^2$.
+\end{lemma}
+\begin{proof}
+  \uses{def:laplacian, def:gradient}
+  $fLf^\top=(fK)(fK)^\top=\|fK\|^2$, and $(fK)_e=f(u)-f(v)$.
+\end{proof}
+
+\begin{proposition}[4.6, Laplacian is PSD]
+  \label{prop:laplacian-psd}
+  \uses{eq:laplacian-form}
+  \lean{SimpleGraph.posSemidef_lapMatrix}
+  \mathlibok
+  $L_G$ is positive semidefinite; its smallest eigenvalue is $0$ with constant
+  eigenfunction.
+  % TODO: confirm Lean decl name.
+\end{proposition}
+
+\begin{lemma}[4.7, Laplacian of a regular graph]
+  \label{lem:laplacian-regular}
+  \uses{def:laplacian, def:adjacency, def:lambda-G}
+  For $d$-regular $G$, $L=dI-A$; $\mathrm{spec}(L)\subseteq[0,2d]$, with smallest
+  eigenvalue $0$ and smallest positive eigenvalue $d-\lambda_2$, the spectral
+  gap.
+\end{lemma}
+\begin{proof}
+  \uses{def:laplacian, def:adjacency}
+  $\deg(u)=d$ gives $L=dI-A$; eigenvalues of $L$ are $d-\mu$ for $\mu\in
+  \mathrm{spec}(A)\subseteq[-d,d]$, so the smallest is $d-d=0$ and the smallest
+  positive is $d-\lambda_2$.
+\end{proof}
+
+\begin{definition}[4.8, Cheeger constant of a manifold]
+  \label{def:cheeger-manifold}
+  $h(M)=\inf_A\mu_{n-1}(\partial A)/\min(\mu_n(A),\mu_n(M\setminus A))$.
+\end{definition}
+
+\begin{theorem}[4.9, Cheeger's inequality (manifold)]
+  \label{thm:cheeger-manifold}
+  \uses{def:cheeger-manifold}
+  \notready
+  The smallest positive Laplacian eigenvalue satisfies $\lambda\ge h(M)^2/4$.
+\end{theorem}
+% TODO: cited to Cheeger [Che70]; discrete analog is proved below.
+
+\begin{lemma}[4.12, Upper bound on $B_f$]
+  \label{lem:Bf-upper}
+  \uses{eq:laplacian-form, lem:cauchy-schwarz, lem:laplacian-regular}
+  For $B_f=\sum_{(x,y)\in E}|f_x^2-f_y^2|$ on a $d$-regular graph,
+  $B_f\le\sqrt{2d}\,\|fK\|\,\|f\|$.
+\end{lemma}
+\begin{proof}
+  \uses{eq:laplacian-form, lem:cauchy-schwarz}
+  By Cauchy--Schwarz, $B_f=\sum_E|f_x+f_y|\,|f_x-f_y|
+  \le\sqrt{\sum_E(f_x+f_y)^2}\sqrt{\sum_E(f_x-f_y)^2}$. The second factor is
+  $\|fK\|$; the first is $\le\sqrt{2\sum_E(f_x^2+f_y^2)}=\sqrt{2d}\,\|f\|$ using
+  $(a+b)^2\le2(a^2+b^2)$ and $d$-regularity.
+\end{proof}
+
+\begin{lemma}[4.13, Lower bound on $B_f$]
+  \label{lem:Bf-lower}
+  \uses{def:edge-expansion}
+  Order $f_1\ge\dots\ge f_n$ with $V^+=\mathrm{supp}(f)$, $|V^+|\le n/2$. Then
+  $B_f\ge h(G)\,\|f\|^2$.
+\end{lemma}
+\begin{proof}
+  \uses{def:edge-expansion}
+  Telescoping, $B_f=\sum_{i}(f_i^2-f_{i+1}^2)|E([i],\overline{[i]})|
+  \ge h\sum_{i\in V^+}(f_i^2-f_{i+1}^2)\,i=h\sum_{i\in V^+}f_i^2=h\|f\|^2$, using
+  $|E([i],\overline{[i]})|\ge h\,i$ for $i\le|V^+|\le n/2$.
+\end{proof}
+
+\begin{theorem}[4.5.1, Spectral gap implies expansion]
+  \label{thm:cheeger-easy}
+  \uses{def:edge-expansion, def:lambda-G, lem:rayleigh-variational, lem:expander-mixing}
+  For a $d$-regular graph, $h(G)\ge\tfrac{d-\lambda_2}2$, equivalently
+  $\lambda_2\ge d-2h(G)$.
+\end{theorem}
+\begin{proof}
+  \uses{def:edge-expansion, lem:rayleigh-variational}
+  Let $S$ attain $h(G)$, $|S|\le n/2$, and put
+  $f=|\overline S|\mathbf 1_S-|S|\mathbf 1_{\overline S}\perp\mathbf 1$. Then
+  $\|f\|^2=n|S||\overline S|$ and, using $2|E(S)|=d|S|-|\partial S|$ and the
+  analogue for $\overline S$,
+  $\lambda_2\ge\frac{fAf^\top}{\|f\|^2}=d-\frac{n|\partial S|}{|S||\overline S|}
+  \ge d-2h(G)$, since $|\overline S|\ge n/2$.
+\end{proof}
+
+\begin{theorem}[4.5.2, Expansion implies spectral gap]
+  \label{thm:cheeger-hard}
+  \uses{lem:Bf-upper, lem:Bf-lower, eq:laplacian-form, lem:laplacian-regular, def:edge-expansion}
+  For a $d$-regular graph, $h(G)\le\sqrt{2d(d-\lambda_2)}$.
+\end{theorem}
+\begin{proof}
+  \uses{lem:Bf-upper, lem:Bf-lower, lem:laplacian-regular}
+  Let $g$ be a $\lambda_2$-eigenvector, $f=g^+$ on $V^+=\mathrm{supp}(g^+)$ with
+  $|V^+|\le n/2$. (i) $fLf^\top\le(d-\lambda_2)\|f\|^2$: for $x\in V^+$,
+  $(Lf)_x\le(Lg)_x=(d-\lambda_2)g_x$ since dropped terms have $g_y\le0$. (ii)
+  Lemmas~\ref{lem:Bf-lower} and~\ref{lem:Bf-upper} give
+  $h\|f\|^2\le B_f\le\sqrt{2d}\,\|fK\|\,\|f\|=\sqrt{2d\,fLf^\top}\,\|f\|$, so
+  $h^2/2d\le fLf^\top/\|f\|^2\le d-\lambda_2$.
+\end{proof}
+
+\begin{definition}[Small-set expansion parameters]
+  \label{def:small-set-expansion}
+  \uses{def:d-regular}
+  $\Psi_E(G,k)=\min_{|S|\le k}\frac{|E(S,\overline S)|}{|S|}$,
+  $\Psi_V(G,k)=\min_{|S|\le k}\frac{|\Gamma(S)\setminus S|}{|S|}$,
+  $\Psi'_V(G,k)=\min_{|S|\le k}\frac{|\Gamma(S)|}{|S|}$.
+\end{definition}
+
+\begin{theorem}[4.14, Kahale's vertex expansion]
+  \label{thm:kahale}
+  \uses{def:small-set-expansion, def:lambda-G}
+  \notready
+  For an $(n,d,\alpha)$-graph and $\rho>0$,
+  $\Psi'_V(G,\rho n)\ge\frac d2(1-\sqrt{1-4(d-1)/(d^2\alpha^2)})(1-c\log
+  d/\log(1/\rho))$.
+\end{theorem}
+% TODO: cited to Kahale [Kah95]; proof omitted.
+
+\begin{theorem}[4.15, Tanner's vertex expansion]
+  \label{thm:tanner}
+  \uses{def:small-set-expansion, def:lambda-G, def:normalized-adjacency, lem:cauchy-schwarz}
+  For an $(n,d,\alpha)$-graph and $\rho>0$,
+  $\Psi'_V(G,\rho n)\ge\frac1{\rho(1-\alpha^2)+\alpha^2}$.
+\end{theorem}
+\begin{proof}
+  \uses{def:normalized-adjacency, lem:cauchy-schwarz, def:lambda-G}
+  For $|S|=\rho n$, expand $\mathbf 1_S=\sum_ia_iv_i$. Then
+  $\|\hat A\mathbf 1_S\|_2^2\le\tfrac{|S|^2}n+\alpha^2(\|\mathbf 1_S\|^2-a_1^2)
+  =\rho n(\rho+\alpha^2(1-\rho))$, while by Cauchy--Schwarz
+  $\|\hat A\mathbf 1_S\|_2^2\ge|S|^2/|\Gamma(S)|$. Combining,
+  $|\Gamma(S)|/|S|\ge1/(\rho(1-\alpha^2)+\alpha^2)$.
+\end{proof}
+
+\begin{theorem}[4.16, Typical expansion of random regular graphs]
+  \label{thm:typical-expansion}
+  \uses{def:small-set-expansion, def:lambda-G, lem:binom-bound}
+  \notready
+  For fixed $d\ge3$ and every $\delta>0$ there is $\epsilon>0$ so that almost
+  every $(n,d)$-graph has $\Psi_E(G,\epsilon n),\Psi_V(G,\epsilon n)\ge d-2-\delta$
+  and $\Psi'_V(G,\epsilon n)\ge d-1-\delta$ (and $\ge d-1-\delta$ in the
+  bipartite case).
+\end{theorem}
+% TODO: proved in the survey via a long configuration-model first-moment
+% computation; transcribe the full counting argument before marking ready.
+
+\begin{definition}[Hypergraph]
+  \label{def:hypergraph}
+  A hypergraph $H=(V,E)$ has $E$ a family of subsets of $V$; it is
+  $r$-uniform if every edge has size $r$ (graphs are $2$-uniform).
+\end{definition}
+
+
+\chapter{Extremal problems on spectrum and expansion}
+
+\begin{definition}[Catalan numbers]
+  \label{def:catalan}
+  \lean{Nat.catalan}
+  \mathlibok
+  $C_k=\binom{2k}k/(k+1)$, counting balanced bracket sequences; $C_k=\Theta(4^k
+  k^{-3/2})$.
+\end{definition}
+
+\begin{definition}[$d$-regular infinite tree]
+  \label{def:d-regular-tree}
+  $\Td$ is the unique infinite connected acyclic graph with every vertex of
+  degree $d$ (the universal cover of every $d$-regular graph).
+\end{definition}
+
+\begin{theorem}[5.1.1, Expansion of $\Td$]
+  \label{thm:tree-edge-expansion}
+  \uses{def:d-regular-tree, def:edge-iso, def:edge-expansion}
+  $\Phi_E(\Td,k)=k(d-2)+2$ and $h(\Td)=d-2$; hence every $(n,d)$-graph has
+  $\Phi_E(G,k)\le k(d-2)+2$.
+\end{theorem}
+\begin{proof}
+  \uses{def:d-regular-tree}
+  A minimizing set is a subtree, with $|E(S)|=|S|-1$; counting directed edges,
+  $\Phi_E(\Td,k)=kd-2(k-1)=k(d-2)+2$, and dividing by $k$ gives $h(\Td)=d-2$.
+\end{proof}
+
+\begin{definition}[Spectrum of the tree operator]
+  \label{def:tree-spectrum-op}
+  \uses{def:d-regular-tree, def:adjacency}
+  $A_T$ acts on $\ell_2(V(\Td))$; $\lambda\in\mathrm{spec}(A_T)$ iff
+  $A_T-\lambda I$ is not invertible.
+\end{definition}
+
+\begin{theorem}[5.2, Spectrum of $\Td$ (Cartier)]
+  \label{thm:tree-spectrum}
+  \uses{def:tree-spectrum-op}
+  $\mathrm{spec}(A_T)=[-2\sqrt{d-1},\,2\sqrt{d-1}]$.
+\end{theorem}
+\begin{proof}
+  \uses{def:tree-spectrum-op}
+  $\lambda\in\mathrm{spec}(A_T)$ iff $\delta_v\notin\mathrm{Range}(\lambda
+  I-A_T)$. Seeking a spherical solution $f$ of $\delta_v=(\lambda I-A)f$ gives the
+  recurrence $\lambda x_i=x_{i-1}+(d-1)x_{i+1}$ with characteristic roots
+  $\rho_{1,2}=\frac{\lambda\pm\sqrt{\lambda^2-4(d-1)}}{2(d-1)}$. For
+  $|\lambda|<2\sqrt{d-1}$ the roots have modulus $(d-1)^{-1/2}$ and $f\notin
+  \ell_2$ (as $(d-1)^i$ vertices at level $i$), so $\lambda$ is in the spectrum;
+  for $|\lambda|>2\sqrt{d-1}$ an $\ell_2$ solution exists, so $\lambda$ is not.
+\end{proof}
+
+\begin{definition}[Spectral radius of $\Td$]
+  \label{def:spectral-radius-tree}
+  \uses{thm:tree-spectrum}
+  $\rho(\Td)=2\sqrt{d-1}$.
+\end{definition}
+
+\begin{definition}[Tree number]
+  \label{def:tree-number}
+  \uses{def:d-regular-tree}
+  $t_{2k}$ is the number of closed walks of length $2k$ from a fixed vertex of
+  $\Td$ (the analogous count in any $d$-regular graph is $\ge t_{2k}$).
+\end{definition}
+
+\begin{lemma}[Tree-number estimate]
+  \label{lem:tree-number-estimate}
+  \uses{def:tree-number, def:catalan}
+  $t_{2k}\ge C_k(d-1)^k=\Theta((2\sqrt{d-1})^{2k}k^{-3/2})$.
+\end{lemma}
+\begin{proof}
+  \uses{def:tree-number, def:catalan}
+  Each closed walk has a sign pattern (away/toward $v$) that is a balanced
+  bracket sequence, $C_k$ of them; each admits $\ge(d-1)^k$ walks (at least
+  $d-1$ choices per away-step). Catalan asymptotics give the estimate.
+\end{proof}
+
+\begin{claim}[5.5, Top eigenfunction of the height-$k$ tree]
+  \label{claim:tree-eigenfunction}
+  \uses{def:d-regular-tree, def:adjacency, lem:perron-frobenius}
+  The largest eigenvalue $\mu$ of the height-$k$ tree $\Td^{(k)}$ has a unique,
+  nonnegative, spherically symmetric eigenfunction $g$, with $g_i$ on level $i$
+  satisfying $\mu g_0=dg_1$, $\mu g_i=g_{i-1}+(d-1)g_{i+1}$, $g_{k+1}=0$.
+\end{claim}
+\begin{proof}
+  \uses{lem:perron-frobenius}
+  Perron--Frobenius gives uniqueness and nonnegativity; spherical symmetry
+  follows as in Theorem~\ref{thm:tree-spectrum}.
+\end{proof}
+
+\begin{lemma}[5.6, Test-function eigenvalue inequality]
+  \label{lem:test-function}
+  \uses{claim:tree-eigenfunction, def:adjacency}
+  For $f$ built from a nonincreasing $g$ supported on the two distance-balls
+  around far vertices $s,t$: $(Af)_v\ge\mu f_v$ on the $s$-side and
+  $(Af)_v\le\mu f_v$ on the $t$-side.
+\end{lemma}
+\begin{proof}
+  \uses{claim:tree-eigenfunction}
+  For $v$ at level $i$ with $p$ neighbours below, $q$ at level, $d-p-q$ above,
+  $(Af)_v=c_1(pg_{i-1}+qg_i+(d-p-q)g_{i+1})\ge c_1(g_{i-1}+(d-1)g_{i+1})=\mu f_v$,
+  using monotonicity of $g$ and the recurrence.
+\end{proof}
+
+\begin{corollary}[5.7, $\lambda_2\ge\mu$]
+  \label{cor:lambda2-geq-mu}
+  \uses{lem:test-function, lem:rayleigh-variational}
+  $\lambda_2(G)\ge\mu$, the top eigenvalue of $\Td^{(k)}$.
+\end{corollary}
+\begin{proof}
+  \uses{lem:test-function, lem:rayleigh-variational}
+  With the $\pm$ choice of constants making $f\perp\mathbf 1$, the contributions
+  of both sides give $fAf^\top\ge\mu\|f\|^2$, so by the variational principle
+  $\lambda_2\ge\mu$.
+\end{proof}
+
+\begin{theorem}[5.3, Alon--Boppana bound (diameter form)]
+  \label{thm:alon-boppana-diam}
+  \uses{cor:lambda2-geq-mu, claim:tree-eigenfunction, lem:tree-number-estimate, def:spectral-radius-tree, def:lambda-G}
+  There is $c$ such that every $(n,d)$-graph of diameter $\Delta$ has
+  $\lambda_2\ge2\sqrt{d-1}(1-c/\Delta^2)$.
+\end{theorem}
+\begin{proof}
+  \uses{cor:lambda2-geq-mu, claim:tree-eigenfunction}
+  By Corollary~\ref{cor:lambda2-geq-mu}, $\lambda_2\ge\mu$. The explicit solution
+  $h_i=(d-1)^{-i/2}\sin((k+1-i)\theta_0)$ of the recurrence in
+  Claim~\ref{claim:tree-eigenfunction} (with $\theta_0$ the smallest root of the
+  boundary condition, $0<\theta_0<\pi/(k+1)$) gives $\mu=2\sqrt{d-1}\cos\theta_0$.
+  With $k=\lfloor\Delta/2\rfloor-1$, $\cos\theta_0>1-c/\Delta^2$.
+\end{proof}
+
+\begin{corollary}[5.4, Alon--Boppana, $\log$ form]
+  \label{cor:alon-boppana-log}
+  \uses{thm:alon-boppana-diam, def:lambda-G}
+  Every $(n,d)$-graph has $\lambda_2\ge2\sqrt{d-1}(1-O(1/\log^2n))$.
+\end{corollary}
+\begin{proof}
+  \uses{thm:alon-boppana-diam}
+  An $(n,d)$-graph has diameter $\Delta=\Omega(\log_{d-1}n)$; substitute into
+  Theorem~\ref{thm:alon-boppana-diam}.
+\end{proof}
+
+\begin{theorem}[5.8, Serre's eigenvalue fraction]
+  \label{thm:serre}
+  \uses{def:tree-number, lem:tree-number-estimate, def:spectral-radius-tree, def:adjacency}
+  For every $d,\epsilon$ there is $c(\epsilon,d)>0$ so that every $(n,d)$-graph
+  has $\ge cn$ eigenvalues $>2\sqrt{d-1}-\epsilon$.
+\end{theorem}
+\begin{proof}
+  \uses{lem:tree-number-estimate, def:adjacency}
+  With $n_\epsilon$ the number of large eigenvalues,
+  $\Tr(A+dI)^k\le(2d)^kn_\epsilon+(d+2\sqrt{d-1}-\epsilon)^kn$; on the other hand
+  $\Tr(A+dI)^k\ge\tfrac{c'}{k^{3/2}}n(d+2\sqrt{d-1})^k$ using
+  $\Tr(A^{2l})\ge n\,t_{2l}$ and Lemma~\ref{lem:tree-number-estimate}. Comparing
+  and choosing $k=\Omega(\tfrac d\epsilon\log\tfrac d\epsilon)$ gives
+  $n_\epsilon/n\ge c$.
+\end{proof}
+
+\begin{definition}[Lollipop graph]
+  \label{def:lollipop}
+  $L_n$ is a $K_n$ glued to a path $P_{n+1}$ at a vertex; it has average degree
+  $\Theta(n)$ but $\lambda(L_n)\le2$ (showing Alon--Boppana fails for irregular
+  graphs).
+\end{definition}
+
+\begin{claim}[Largest eigenvalue of an irregular graph]
+  \label{claim:irregular-lambda1}
+  \uses{lem:rayleigh-variational}
+  $\lambda_1\ge d$, where $d=2|E|/n$ is the average degree.
+\end{claim}
+\begin{proof}
+  \uses{lem:rayleigh-variational}
+  The Rayleigh quotient of $\mathbf 1$ is $\mathbf 1A\mathbf 1^\top/n=2|E|/n=d$,
+  and $\lambda_1$ is the maximum.
+\end{proof}
+
+\begin{theorem}[5.10, Irregular Alon--Boppana (Hoory)]
+  \label{thm:hoory-irregular}
+  \uses{def:spectral-radius-tree, claim:irregular-lambda1}
+  \notready
+  If the average degree is $\ge d$ after deleting any radius-$r$ ball, then
+  $\lambda(G)\ge2\sqrt{d-1}(1-c\log r/r)$.
+\end{theorem}
+% TODO: cited to Hoory [Hoo05]; proof omitted.
+
+\begin{definition}[5.11, Ramanujan graph]
+  \label{def:ramanujan-graph}
+  \uses{def:spectral-radius-tree, def:lambda-G}
+  A $d$-regular $G$ is \emph{Ramanujan} if $\lambda(G)\le2\sqrt{d-1}$.
+\end{definition}
+
+\begin{theorem}[5.12, Existence of Ramanujan graphs]
+  \label{thm:ramanujan-existence}
+  \uses{def:ramanujan-graph}
+  \notready
+  For every prime power $q=p^k$ there are infinitely many $(q+1)$-regular
+  Ramanujan graphs.
+\end{theorem}
+% TODO: cited to LPS/Margulis/Morgenstern; number-theoretic proof omitted.
+
+\begin{construction}[LPS Ramanujan graphs $X^{p,q}$]
+  \label{constr:lps}
+  \uses{def:cayley-graph, def:ramanujan-graph, thm:ramanujan-existence}
+  \notready
+  For distinct primes $p,q\equiv1\ (4)$, $X^{p,q}$ is a $(p+1)$-regular Cayley
+  graph of $\mathrm{PGL}(2,q)$ with generators the $p+1$ Jacobi solutions of
+  $a_0^2+a_1^2+a_2^2+a_3^2=p$.
+\end{construction}
+% TODO: the eigenvalue (Ramanujan) bound is omitted in the survey.
+
+\begin{theorem}[5.13, Ramanujan graphs of every degree (conjecture)]
+  \label{conj:ramanujan-every-degree}
+  \uses{def:ramanujan-graph}
+  \notready
+  For every $d\ge3$ there are arbitrarily large $d$-regular Ramanujan graphs.
+\end{theorem}
+% TODO: open conjecture.
+
+
+\chapter{Spectrum and expansion in lifts of graphs}
+
+\begin{definition}[6.1, Covering map and lift]
+  \label{def:covering-map}
+  \uses{def:d-regular}
+  $f:V(H)\to V(G)$ is a \emph{covering map} if it maps each $\Gamma_H(v)$
+  bijectively onto $\Gamma_G(f(v))$; then $H$ is a \emph{lift} of $G$.
+\end{definition}
+
+\begin{definition}[Fibers and covering number]
+  \label{def:fiber}
+  \uses{def:covering-map}
+  For connected $G$, all vertex/edge fibers $f^{-1}(\cdot)$ have a common size
+  $n$; such $H$ is an \emph{$n$-lift}.
+\end{definition}
+
+\begin{definition}[Permutation model of $n$-lifts]
+  \label{def:n-lift}
+  \uses{def:covering-map, def:fiber}
+  $\mathcal L_n(G)$: $V(H)=V(G)\times[n]$, and each edge $e\in E(G)$ carries a
+  permutation $\pi_e\in S_n$, with fiber edges $((u,i),(v,\pi_e(i)))$.
+\end{definition}
+
+\begin{definition}[Old and new eigenvalues]
+  \label{def:old-new}
+  \uses{def:covering-map, def:adjacency}
+  If $h$ is an eigenfunction of $G$ with eigenvalue $\lambda$ then $h\circ f$ is
+  one of $H$ (an \emph{old} eigenvalue); the remaining eigenvalues of $H$ are
+  \emph{new}.
+\end{definition}
+
+\begin{proposition}[6.3, New eigenfunctions sum to zero on fibers]
+  \label{prop:new-eigenfunction-zero}
+  \uses{def:old-new, def:covering-map, def:fiber}
+  A new eigenfunction $\psi$ satisfies $\sum_{f(x)=v}\psi(x)=0$ for every $v$.
+\end{proposition}
+\begin{proof}
+  \uses{def:old-new}
+  $\psi$ is orthogonal to all old eigenfunctions $h\circ f$, so
+  $\sum_vh(v)\sum_{f(x)=v}\psi(x)=0$ for every eigenfunction $h$ of $G$; since
+  the $h$ span all functions on $V(G)$, the fiber sums vanish.
+\end{proof}
+
+\begin{definition}[Signing matrix]
+  \label{def:signing}
+  \uses{def:n-lift, def:adjacency}
+  A \emph{signing} $\tilde A$ of $A_G$ replaces some $1$-entries by $-1$
+  (symmetrically); signings correspond bijectively to $2$-lifts.
+\end{definition}
+
+\begin{proposition}[6.4, New eigenvalues of a $2$-lift]
+  \label{prop:2lift-signing}
+  \uses{def:signing, def:old-new, prop:new-eigenfunction-zero}
+  The new eigenvalues of the $2$-lift encoded by $\tilde A$ are exactly the
+  eigenvalues of $\tilde A$.
+\end{proposition}
+\begin{proof}
+  \uses{def:signing, prop:new-eigenfunction-zero}
+  The map $\psi(v,1)=-\psi(v,2)=\phi(v)$ is a bijection between eigenfunctions
+  $\phi$ of $\tilde A$ and new eigenfunctions of the lift, preserving
+  eigenvalues.
+\end{proof}
+
+\begin{definition}[6.3, Universal covering tree]
+  \label{def:universal-cover}
+  \uses{def:covering-map, def:fiber}
+  $\hat G$ is the infinite tree of non-backtracking walks from a fixed vertex;
+  every connected lift of $G$ is a quotient of $\hat G$.
+\end{definition}
+
+\begin{definition}[Spectral radius of a graph]
+  \label{def:spectral-radius}
+  \lean{spectralRadius}
+  \mathlibok
+  $\rho(H)=\sup\{|\lambda|:\lambda\in\mathrm{spec}(H)\}$.
+  % TODO: confirm Lean decl for graph/operator spectral radius.
+\end{definition}
+
+\begin{theorem}[6.6, Greenberg--Lubotzky]
+  \label{thm:greenberg-lubotzky}
+  \uses{def:universal-cover, def:spectral-radius, def:covering-map}
+  If a family $\{G_i\}$ shares universal cover $T$ then
+  $\lambda(G_i)\ge\rho(T)-o(1)$.
+\end{theorem}
+\begin{proof}
+  \uses{def:universal-cover, lem:tree-number-estimate}
+  As in Proof I of Alon--Boppana, using $f=\pm1$ on two far vertices: closed
+  walks of length $2k$ in $T$ number $\ge(\rho-o(1))^{2k}$, bounding the Rayleigh
+  quotient of $A^{2k}$.
+\end{proof}
+
+\begin{definition}[6.7, Irregular Ramanujan graph]
+  \label{def:irregular-ramanujan}
+  \uses{def:universal-cover, def:spectral-radius, def:ramanujan-graph}
+  $G$ is \emph{Ramanujan} if $\lambda(G)\le\rho(\hat G)$ (coincides with the
+  regular definition when $\hat G=\Td$).
+\end{definition}
+
+\begin{theorem}[6.8/6.9, Good $2$-lift conjectures]
+  \label{conj:good-2lift}
+  \uses{def:ramanujan-graph, def:n-lift, def:old-new, prop:2lift-signing}
+  \notready
+  Every $d$-regular (Ramanujan) graph has a $2$-lift all of whose new eigenvalues
+  lie in $[-2\sqrt{d-1},2\sqrt{d-1}]$.
+\end{theorem}
+% TODO: open conjectures 6.8/6.9 (equivalently 6.10 on signings).
+
+\begin{lemma}[6.11, Bilu--Linial signing]
+  \label{lem:bilu-linial-signing}
+  \uses{def:signing}
+  \notready
+  Every $d$-regular adjacency matrix has a signing $\tilde A$ with
+  $x\tilde Ax\le O(\sqrt d\log d\,\|x\|^2)$ for all $x\in\{-1,0,1\}^V$.
+\end{lemma}
+% TODO: proof via the Lovász Local Lemma omitted in the survey.
+
+\begin{theorem}[6.12, Bilu--Linial near-Ramanujan family]
+  \label{thm:bilu-linial}
+  \uses{lem:bilu-linial-signing, prop:2lift-signing, def:n-lift, def:lambda-G}
+  \notready
+  For every $d\ge3$ there is a mildly explicit family of $(n,d,\alpha)$-graphs
+  with $\alpha d=O(\sqrt{d\log^3d})$.
+\end{theorem}
+% TODO: construction iterates 2-lifts of Lemma 6.11 via Lemma 2.6; proof omitted.
+
+
+\chapter{The spectrum of random graphs}
+
+\begin{definition}[Random graph models]
+  \label{def:random-graph-models}
+  $G(n,p)$ is the Erdős--Rényi model (each edge independently with probability
+  $p$). The \emph{random $(n,d)$-graph} model samples $d$-regular graphs (via the
+  configuration/permutation model).
+\end{definition}
+
+\begin{definition}[Trace method]
+  \label{def:trace-method}
+  \uses{def:adjacency}
+  Estimate $\Tr(A^{2k})=\sum_i\lambda_i^{2k}$, the number of closed length-$2k$
+  walks; subtracting $\lambda_1^{2k}$ and taking $2k$-th roots bounds the second
+  eigenvalue.
+\end{definition}
+
+\begin{theorem}[7.1, Wigner semicircle law]
+  \label{thm:wigner}
+  \uses{def:trace-method}
+  \notready
+  For a random symmetric $A_n$ with i.i.d. entries (variance $\sigma^2$, finite
+  moments), the empirical eigenvalue distribution of $A_n/(2\sigma\sqrt n)$
+  converges to the semicircle $\frac2\pi\int_{-1}^x\sqrt{1-z^2}\,dz$.
+\end{theorem}
+% TODO: cited to Wigner; proof via the moment method omitted.
+
+\begin{lemma}[7.3, Closed walks in $\Td$]
+  \label{lem:tree-return-walks}
+  \uses{def:d-regular-tree, def:catalan}
+  $t_{2s+1}=0$ and
+  $t_{2s}=\sum_{j=1}^s\binom{2s-j}s\frac j{2s-j}d^j(d-1)^{s-j}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:d-regular-tree, def:catalan}
+  Trees are bipartite, so $t_{2s+1}=0$. A closed walk gives a nonnegative
+  lattice path $\delta_0=0,\dots,\delta_{2s}=0$ with $\pm1$ steps; among such
+  paths exactly $j$ visits to level $0$ number $\binom{2s-j}s\frac j{2s-j}$, and
+  each path admits $d^j(d-1)^{s-j}$ walks (factor $d$ at the root, $d-1$
+  elsewhere on away-steps; toward-steps are forced).
+\end{proof}
+
+\begin{theorem}[7.2, McKay spectral density]
+  \label{thm:mckay}
+  \uses{lem:tree-return-walks, def:trace-method, thm:tree-spectrum}
+  \notready
+  If $d$-regular $G_n$ have $o(|V|)$ cycles of each fixed length, their empirical
+  eigenvalue distribution converges to the Kesten--McKay law supported on
+  $[-2\sqrt{d-1},2\sqrt{d-1}]$.
+\end{theorem}
+% TODO: details of recovering the density from its moments omitted.
+
+\begin{theorem}[7.4, Füredi--Komlós--Vu]
+  \label{thm:furedi-komlos-vu}
+  \uses{def:trace-method}
+  \notready
+  For a random symmetric $A$ with independent bounded mean-zero entries (variance
+  $\sigma^2$), w.h.p. all eigenvalues satisfy $|\lambda_i|<2\sigma\sqrt n+O(n^{1/3}\log n)$.
+\end{theorem}
+% TODO: cited to [FK81],[Vu05]; trace-method proof omitted.
+
+\begin{definition}[Permutation model of $2d$-regular graphs]
+  \label{def:permutation-model}
+  \uses{def:random-graph-models}
+  Choose $d$ independent uniform permutations $\pi_1,\dots,\pi_d\in S_n$ and add
+  edges $(v,\pi_i(v))$; this is contiguous with the uniform $(n,2d)$-model.
+\end{definition}
+
+\begin{lemma}[Trace-to-fixed-points reduction]
+  \label{lem:trace-fixed-points}
+  \uses{def:permutation-model, def:trace-method, lem:jensen}
+  For the walk transition matrix $P$ with $\rho=\max(|\mu_2|,|\mu_n|)$,
+  $\E[\rho]\le(\E[\Tr(P^{2k})]-1)^{1/2k}$ and
+  $\E[\Tr(P^{2k})]=n\Pr[\omega(1)=1]$, where $\omega$ is a uniform word of length
+  $2k$ over $\{\pi_i^{\pm1}\}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:permutation-model, lem:jensen}
+  $\rho^{2k}\le\Tr(P^{2k})-1$ by isolating $\mu_1^{2k}=1$; Jensen gives
+  $\E[\rho]\le(\E\rho^{2k})^{1/2k}$. Closed walks correspond to words $\omega$
+  with $\omega(i)=i$, so $\Tr(P^{2k})$ counts fixed points of $\omega$ and, by
+  symmetry, $\E[\Tr(P^{2k})]=n\Pr[\omega(1)=1]$.
+\end{proof}
+
+\begin{definition}[Reduced, bad, and good words]
+  \label{def:words}
+  \uses{lem:trace-fixed-points}
+  A word \emph{reduces} by deleting adjacent $\pi_j\pi_j^{-1}$ pairs. A reduced
+  word is \emph{bad} if it has the form $\omega_a\omega_b^j\omega_a^{-1}$
+  ($j\ge2$, or empty), else \emph{good}.
+\end{definition}
+
+\begin{lemma}[7.6, Probability of a bad word]
+  \label{lem:bad-word}
+  \uses{def:words, def:permutation-model, def:catalan}
+  A uniform length-$2k$ word reduces to a bad word with probability
+  $O(k^2(2/d)^k)$.
+\end{lemma}
+\begin{proof}
+  \uses{def:words, def:catalan}
+  Bracket--star sequences encoding length-$2k$ words reducing to length $2l$
+  number $\le\binom{2k}{k-l}$; matching a fixed sequence costs $(2d)^{-(k-l)}$,
+  and badness of the reduced word costs a further $(2d)^{-l}$ (first half
+  determines the second), after choosing $|\omega_a|,|\omega_b|$ ($k^2$ ways).
+  Summing gives $\le k^2(2/d)^k$.
+\end{proof}
+
+\begin{definition}[Free, forced, coincidence]
+  \label{def:coincidence}
+  \uses{def:permutation-model, def:words}
+  Exposing a good word's walk step by step, a step is \emph{free} if the image
+  was undetermined; a \emph{coincidence} is a free step landing on a previously
+  visited vertex. Each $\Pr[C_i\mid\text{history}]\le2k/(n-2k)$.
+\end{definition}
+
+\begin{claim}[Two coincidences]
+  \label{claim:two-coincidence}
+  \uses{def:coincidence}
+  The probability of $\ge2$ coincidences is $O(k^4/n^2)$.
+\end{claim}
+\begin{proof}
+  \uses{def:coincidence}
+  Over $\le(2k)^2$ position pairs, each pair of coincidences has probability
+  $\le(2k/(n-2k))^2$.
+\end{proof}
+
+\begin{lemma}[7.7, One coincidence ending at start]
+  \label{lem:one-coincidence}
+  \uses{def:coincidence, def:words}
+  For a good word of length $s\le2k$, the probability of exactly one coincidence
+  and ending at vertex $1$ is $\le1/(n-2k)$.
+\end{lemma}
+\begin{proof}
+  \uses{def:coincidence, def:words}
+  After one coincidence the walk forms a cycle with a tail; goodness forbids
+  looping, forcing $\omega=\omega_a\omega_b\omega_a^{-1}$. The event is contained
+  in one free step hitting a specific vertex, of probability $\le1/(n-2k)$.
+\end{proof}
+
+\begin{theorem}[7.5, Broder--Shamir]
+  \label{thm:broder-shamir}
+  \uses{lem:trace-fixed-points, lem:bad-word, lem:one-coincidence, claim:two-coincidence, lem:markov, def:permutation-model}
+  Almost every $2d$-regular graph has $\lambda(G)=O(d^{3/4})$.
+\end{theorem}
+\begin{proof}
+  \uses{lem:bad-word, lem:one-coincidence, claim:two-coincidence, lem:trace-fixed-points, lem:markov}
+  Combining Lemmas~\ref{lem:bad-word} and~\ref{lem:one-coincidence} and
+  Claim~\ref{claim:two-coincidence},
+  $\Pr[\omega(1)=1]\le\frac1{n-2k}+O(k^2(2/d)^k)+O(k^4/n^2)$. Choosing
+  $k=2\log_{d/2}n$ and substituting into Lemma~\ref{lem:trace-fixed-points} gives
+  $\E[\rho]\le(2/d)^{1/4}(1+o(1))$, whence $\lambda=O(d^{3/4})$ by Markov's
+  inequality.
+\end{proof}
+
+\begin{theorem}[7.8, Friedman lift conjecture]
+  \label{conj:friedman}
+  \uses{def:n-lift, def:universal-cover, def:spectral-radius}
+  \notready
+  For almost all high lifts of any $G$, all new eigenvalues are bounded by
+  $\rho(\hat G)+o(1)$.
+\end{theorem}
+% TODO: open even in the regular case.
+
+\begin{theorem}[7.9, Friedman's lift theorem]
+  \label{thm:friedman-lifts}
+  \uses{conj:friedman, thm:broder-shamir, def:universal-cover}
+  \notready
+  For almost all high lifts of $G$ (top eigenvalue $\lambda_1$, universal cover
+  spectral radius $\rho$), all new eigenvalues are $\le\sqrt{\lambda_1\rho}+o(1)$.
+\end{theorem}
+% TODO: cited to [Fri03]; generalizes Broder--Shamir.
+
+\begin{corollary}[Friedman generalizes Broder--Shamir]
+  \label{cor:friedman-bs}
+  \uses{thm:friedman-lifts, thm:broder-shamir, def:permutation-model}
+  Theorem~\ref{thm:friedman-lifts} with $\lambda_1=2d$, $\rho=2\sqrt{d-1}$
+  recovers $O(d^{3/4})$.
+\end{corollary}
+\begin{proof}
+  \uses{thm:friedman-lifts}
+  Substitute: $\sqrt{2d\cdot2\sqrt{d-1}}=O(d^{3/4})$.
+\end{proof}
+
+\begin{theorem}[7.10, Friedman near-Ramanujan]
+  \label{thm:friedman-ramanujan}
+  \uses{def:lambda-G, conj:ramanujan-every-degree, def:random-graph-models}
+  \notready
+  For every $\epsilon>0$, a random $(n,d)$-graph has
+  $\Pr[\lambda(G)\le2\sqrt{d-1}+\epsilon]=1-o_n(1)$.
+\end{theorem}
+% TODO: cited to Friedman; long proof omitted.
+
+
+\chapter{The Margulis construction}
+
+\begin{construction}[8.1, Margulis $8$-regular graph]
+  \label{constr:margulis-graph}
+  \uses{def:d-regular}
+  On $V=\Z_n\times\Z_n$, with
+  $T_1=\left(\begin{smallmatrix}1&2\\0&1\end{smallmatrix}\right)$,
+  $T_2=\left(\begin{smallmatrix}1&0\\2&1\end{smallmatrix}\right)$,
+  $e_1,e_2$ the standard basis, join $v$ to $T_1v,T_2v,T_1v+e_1,T_2v+e_2$ and the
+  four inverses; an $8$-regular graph.
+\end{construction}
+
+\begin{definition}[8.4, Character of a finite abelian group]
+  \label{def:character}
+  \lean{AddChar}
+  \mathlibok
+  A \emph{character} of $H$ is a homomorphism $\chi:H\to\C^*$. For $H=\Z_n^2$,
+  $\chi_b(a)=\omega^{a_1b_1+a_2b_2}$ with $\omega=e^{2\pi i/n}$.
+  % TODO: confirm Lean decl (AddChar / MonoidHom to circle).
+\end{definition}
+
+\begin{proposition}[8.5, Characters form an orthonormal basis]
+  \label{prop:characters-basis}
+  \uses{def:character}
+  \mathlibok
+  A finite abelian $H$ has $|H|$ characters forming an orthonormal basis; every
+  $f$ has a unique Fourier expansion $f=\sum_x\hat f(x)\chi_x$.
+  % TODO: confirm Lean decl (Fourier on finite abelian groups).
+\end{proposition}
+
+\begin{definition}[Fourier transform on $\Z_n^2$]
+  \label{def:fourier-zn2}
+  \uses{prop:characters-basis, def:character}
+  $\hat f(x)=\sum_b\overline{f(b)}\,\omega^{b_1x_1+b_2x_2}$.
+\end{definition}
+
+\begin{proposition}[8.6, Fourier properties]
+  \label{prop:fourier-properties}
+  \uses{def:fourier-zn2, prop:characters-basis}
+  \mathlibok
+  (a) $\sum_af(a)=0\iff\hat f(0)=0$; (b) $\langle f,g\rangle=\frac1{n^2}\langle\hat
+  f,\hat g\rangle$ (Parseval); (d) inversion; (e) under an affine change $g(x)=
+  f(Ax+b)$, $\hat g(y)=\omega^{-\langle A^{-1}b,y\rangle}\hat f((A^{-1})^\top y)$.
+  % TODO: confirm Lean decls (Plancherel, inversion, modulation).
+\end{proposition}
+
+\begin{theorem}[8.2, Margulis graph is an expander (Gabber--Galil)]
+  \label{thm:margulis-expander}
+  \uses{constr:margulis-graph, def:lambda-G}
+  $\lambda(G_n)\le5\sqrt2<8$ for every $n$.
+\end{theorem}
+\begin{proof}
+  \uses{thm:margulis-variational, thm:margulis-fourier, thm:margulis-nonneg}
+  By the variational restatement (Theorem~\ref{thm:margulis-variational}) it
+  suffices to bound a quadratic form; passing to Fourier coefficients
+  (Theorem~\ref{thm:margulis-fourier}) and to nonnegative functions
+  (Theorem~\ref{thm:margulis-nonneg}) yields the bound (in a form $<8$).
+\end{proof}
+
+\begin{theorem}[Variational restatement of 8.2]
+  \label{thm:margulis-variational}
+  \uses{lem:rayleigh-variational}
+  It suffices to show: if $\sum_xf(x)=0$ then
+  $\sum_{(x,y)\in E}f(x)f(y)\le\tfrac{5\sqrt2}2\sum f^2(x)$.
+\end{theorem}
+\begin{proof}
+  \uses{thm:margulis-edge}
+  This is the variational characterization of $\lambda$ for the $8$-regular
+  graph $G_n$; writing out the edge structure gives
+  Theorem~\ref{thm:margulis-edge}.
+\end{proof}
+
+\begin{theorem}[8.3, Edge-expansion inequality]
+  \label{thm:margulis-edge}
+  \uses{constr:margulis-graph}
+  For $\sum_zf(z)=0$,
+  $\sum_zf(z)[f(T_1z)+f(T_1z+e_1)+f(T_2z)+f(T_2z+e_2)]\le\tfrac{5\sqrt2}2\sum f^2$.
+\end{theorem}
+\begin{proof}
+  \uses{thm:margulis-fourier}
+  Writing out the four neighbours of $z$, this is reduced to the Fourier form
+  Theorem~\ref{thm:margulis-fourier}.
+\end{proof}
+
+\begin{theorem}[8.7, Fourier restatement]
+  \label{thm:margulis-fourier}
+  \uses{prop:fourier-properties, def:fourier-zn2}
+  For $F$ with $F(0,0)=0$,
+  $\bigl|\sum_z\overline{F(z)}[F(T_2^{-1}z)(1+\omega^{-z_1})+F(T_1^{-1}z)(1+\omega^{-z_2})]\bigr|
+  \le\tfrac{5\sqrt2}2\sum|F(z)|^2$.
+\end{theorem}
+\begin{proof}
+  \uses{prop:fourier-properties, thm:margulis-nonneg}
+  Apply Parseval and the affine shift property (Proposition
+  \ref{prop:fourier-properties}); setting $G=|F|$ and using
+  $|1+\omega^{-t}|=2|\cos(\pi t/n)|$ reduces it to
+  Theorem~\ref{thm:margulis-nonneg}.
+\end{proof}
+
+\begin{theorem}[8.8, Nonnegative-function inequality]
+  \label{thm:margulis-nonneg}
+  \uses{prop:partial-order, constr:margulis-graph}
+  For nonnegative $G$ with $G(0,0)=0$,
+  $\sum_z2G(z)[G(T_2^{-1}z)|\cos(\pi z_1/n)|+G(T_1^{-1}z)|\cos(\pi
+  z_2/n)|]\le\tfrac{5\sqrt2}2\sum G^2$.
+\end{theorem}
+\begin{proof}
+  \uses{prop:partial-order}
+  Use $2\alpha\beta\le\gamma\alpha^2+\gamma^{-1}\beta^2$ with $\gamma$ depending
+  on a partial order ($\gamma\in\{1,5/4,4/5\}$, $\gamma(x,y)\gamma(y,x)=1$),
+  reducing to a per-$z$ inequality. Outside the diamond $|\cos(\pi z_1/n)|+|\cos(
+  \pi z_2/n)|\le\sqrt2$; inside, Proposition~\ref{prop:partial-order} bounds the
+  $\gamma$-sum, giving the bound.
+\end{proof}
+
+\begin{proposition}[8.9, Partial order on $\Z_n^2$]
+  \label{prop:partial-order}
+  \uses{constr:margulis-graph}
+  There is a partial order so that inside the diamond, for each $z$, among
+  $T_1^{\pm1}z,T_2^{\pm1}z$ either three exceed $z$ and one is below, or two
+  exceed $z$ and two are incomparable.
+\end{proposition}
+\begin{proof}
+  \uses{constr:margulis-graph}
+  Order $(z_1,z_2)>(z_1',z_2')$ if $|z_1|\ge|z_1'|$, $|z_2|\ge|z_2'|$ with one
+  strict. WLOG $z_1>z_2\ge0$ with $z_1+z_2\le n/2$; then $|z_1-2z_2|<|z_1|$ gives
+  $T_1^{-1}z<z$ while the other three exceed $z$.
+\end{proof}
+
+
+\chapter{The zig-zag product}
+
+\begin{definition}[Graph power]
+  \label{def:graph-power}
+  \uses{def:lambda-G, def:adjacency}
+  $G^k$ has an edge for every length-$k$ walk of $G$; if $G$ is an
+  $(n,d,\alpha)$-graph then $G^k$ is an $(n,d^k,\alpha^k)$-graph.
+\end{definition}
+
+\begin{definition}[Replacement product]
+  \label{def:replacement-product}
+  \uses{def:lambda-G}
+  For an $(n,m,\alpha)$-graph $G$ and an $(m,d,\beta)$-graph $H$, $G\,\textcircled
+  rH$ has vertex set $V(G)\times[m]$ (each $G$-vertex a cloud of $m$ vertices),
+  with the $G$-edges between clouds and $n$ copies of $H$ within clouds.
+\end{definition}
+
+\begin{definition}[9.3, Zig-zag product]
+  \label{def:zigzag-product}
+  \uses{def:replacement-product}
+  $G\zigzag H=(V(G)\times[m],E')$ where $((v,i),(u,j))\in E'$ iff there are
+  $k,l$ with $(i,k),(l,j)\in E(H)$ and $e_v^k=e_u^l$ (dashed--wiggly--dashed
+  walks in $G\,\textcircled rH$).
+\end{definition}
+
+\begin{lemma}[Zig-zag eigenvalue bound]
+  \label{lem:zigzag-bound}
+  \uses{def:zigzag-product, def:normalized-adjacency, lem:rayleigh-variational}
+  $\varphi(\alpha,\beta)\le\alpha+\beta+\beta^2$ for $G\zigzag H$.
+\end{lemma}
+\begin{proof}
+  \uses{def:zigzag-product, lem:rayleigh-variational}
+  Write the walk matrix $Z=\tilde{\mathbf B}P\tilde{\mathbf B}$ with
+  $\tilde{\mathbf B}=\hat B\otimes I$ and $P$ the matching involution. Decompose
+  $f=f^\parallel+f^\perp$ (cloud averages and remainders); then
+  $\tilde{\mathbf B}f^\parallel=f^\parallel$, $\|\tilde{\mathbf B}f^\perp\|\le
+  \beta\|f^\perp\|$, and $f^\parallel Pf^\parallel=g\hat A_Gg\le\alpha\|f^\parallel
+  \|^2$. Hence $|fZf|\le\alpha\|f^\parallel\|^2+2\beta\|f^\parallel\|\|f^\perp\|+
+  \beta^2\|f^\perp\|^2$, whose maximum is the top eigenvalue of
+  $\left(\begin{smallmatrix}\alpha&\beta\\\beta&\beta^2\end{smallmatrix}\right)
+  \le\alpha+\beta+\beta^2$.
+\end{proof}
+
+\begin{theorem}[9.1, Zig-zag theorem (RVW)]
+  \label{thm:zigzag-theorem}
+  \uses{def:zigzag-product, lem:zigzag-bound, def:lambda-G}
+  If $G$ is an $(n,m,\alpha)$-graph and $H$ an $(m,d,\beta)$-graph, then $G\zigzag
+  H$ is an $(nm,d^2,\varphi(\alpha,\beta))$-graph with: (1) $\varphi<1$ if
+  $\alpha,\beta<1$; (2) $\varphi\le\alpha+\beta$; (3)
+  $\varphi\le1-(1-\beta^2)(1-\alpha)/2$.
+\end{theorem}
+\begin{proof}
+  \uses{lem:zigzag-bound}
+  Lemma~\ref{lem:zigzag-bound} gives $\varphi\le\alpha+\beta+\beta^2$ and bound
+  (1). The sharper bounds (2),(3) are the harder analysis of [RVW02]/[RTV05].
+\end{proof}
+
+\begin{construction}[Building block $H$]
+  \label{constr:building-block-H}
+  \uses{def:lambda-G}
+  Fix a $(d^4,d,1/4)$-graph $H$ (it exists by a probabilistic argument and, $d$
+  being constant, is found by brute force).
+\end{construction}
+
+\begin{construction}[9.2, Zig-zag expander family]
+  \label{constr:zigzag-family}
+  \uses{constr:building-block-H, def:zigzag-product, def:graph-power}
+  $G_1=H^2$, $G_{n+1}=(G_n)^2\zigzag H$.
+\end{construction}
+
+\begin{proposition}[9.2, Parameters of the family]
+  \label{prop:zigzag-family}
+  \uses{constr:zigzag-family, thm:zigzag-theorem, constr:building-block-H}
+  $G_n$ is a $(d^{4n},d^2,1/2)$-graph for all $n$.
+\end{proposition}
+\begin{proof}
+  \uses{thm:zigzag-theorem, constr:building-block-H}
+  Base: $H^2$ is $(d^4,d^2,1/16)$. Inductively $(G_n)^2$ is
+  $(d^{4n},d^4,1/4)$; zig-zagging with $H$ (degree match $d^4$) gives via bound
+  (2) $\varphi\le1/4+1/4=1/2$, so $G_{n+1}$ is $(d^{4(n+1)},d^2,1/2)$.
+\end{proof}
+
+\begin{construction}[Reingold's graph sequence for $SL=L$]
+  \label{constr:reingold-sl}
+  \uses{def:zigzag-product, def:graph-power, def:lambda-G}
+  For input $D=d^{16}$-regular connected $G$ (so an $(n,D,\alpha)$-graph with
+  $\alpha<1-\Omega(1/n^2)$) and a $(d^{16},d,1/2)$-graph $H$, set $G_1=G$,
+  $G_{i+1}=(G_i\zigzag H)^8$, run for $k=O(\log n)$ steps.
+\end{construction}
+
+\begin{theorem}[Aleliunas et al., probabilistic logspace connectivity]
+  \label{thm:akl}
+  \uses{def:random-walk, thm:cheeger}
+  \notready
+  Undirected $s$-$t$ connectivity is solvable by a polynomial-length random walk
+  in randomized logspace ($SL\subseteq RL$).
+\end{theorem}
+% TODO: cited to [AKL79].
+
+\begin{claim}[9.4, Parameters of $G_k$]
+  \label{claim:Gk-parameters}
+  \uses{constr:reingold-sl, thm:zigzag-theorem}
+  $G_k$ is an $(nd^{16k},d^{16},3/4)$-graph.
+\end{claim}
+\begin{proof}
+  \uses{thm:zigzag-theorem, constr:reingold-sl}
+  By bound (3), $1-\mu_i\ge\tfrac38(1-\lambda_i)$, so
+  $\lambda_{i+1}=\mu_i^8\le\max(\lambda_i^2,1/2)$; after $k=O(\log n)$ steps
+  $\lambda_k\le3/4$. The size multiplies by $d^{16}$ each step.
+\end{proof}
+
+\begin{claim}[9.5, Logspace neighbourhoods of $G_k$]
+  \label{claim:Gk-logspace}
+  \uses{constr:reingold-sl, def:explicit}
+  \notready
+  Neighbour queries to $G_k$ are answerable in logspace.
+\end{claim}
+% TODO: proof omitted, referred to Reingold [Rei05].
+
+\begin{theorem}[Reingold's theorem $SL=L$]
+  \label{thm:reingold-sl}
+  \uses{claim:Gk-parameters, claim:Gk-logspace, thm:akl}
+  Undirected $s$-$t$ connectivity is in deterministic logspace, so $SL=L$.
+\end{theorem}
+\begin{proof}
+  \uses{claim:Gk-parameters, claim:Gk-logspace, thm:akl}
+  Turn $G$ into the expander $G_k$ (Claim~\ref{claim:Gk-parameters}) with
+  logspace neighbourhoods (Claim~\ref{claim:Gk-logspace}); expander components
+  have logarithmic diameter, so enumerating all logarithmically-long paths from
+  $s$ decides connectivity in logspace.
+\end{proof}
+
+
+\chapter{Lossless conductors and expanders}
+
+\begin{definition}[10.1, $k$-source]
+  \label{def:k-source}
+  \uses{def:entropies}
+  A \emph{$k$-source} is a distribution with min-entropy $\ge k$; a
+  \emph{$(k,\epsilon)$-source} is $\epsilon$-close in $\ell_1$ to a $k$-source.
+\end{definition}
+
+\begin{definition}[10.2, Conductor]
+  \label{def:conductor}
+  \uses{def:k-source, def:entropies}
+  $E:\{0,1\}^n\times\{0,1\}^d\to\{0,1\}^m$ is a
+  \emph{$(k_{\max},a,\epsilon)$-conductor} if for every $k\le k_{\max}$ and every
+  $k$-source $X$, $E(X,U_d)$ is a $(k+a,\epsilon)$-source.
+\end{definition}
+
+\begin{definition}[Extracting / lossless / buffer / permutation conductors]
+  \label{def:conductor-types}
+  \uses{def:conductor}
+  $E$ is \emph{$(a,\epsilon)$-extracting} if it is an
+  $(m-a,a,\epsilon)$-conductor; \emph{$(k_{\max},\epsilon)$-lossless} if a
+  $(k_{\max},d,\epsilon)$-conductor; $\langle E,C\rangle$ is a \emph{buffer
+  conductor} if $E$ is extracting and $\langle E,C\rangle$ is lossless; a
+  \emph{permutation conductor} if moreover $\langle E,C\rangle$ is a permutation.
+\end{definition}
+
+\begin{definition}[10.3, Lossless expander]
+  \label{def:lossless-expander}
+  \uses{def:vertex-iso}
+  A left-$D$-regular bipartite $G=(V_L,V_R;E)$, $|V_L|=N$, $|V_R|=M$, is a
+  \emph{$(K_{\max},\epsilon)$-lossless expander} if every $K\le K_{\max}$ left
+  vertices have $\ge(1-\epsilon)DK$ neighbours.
+\end{definition}
+
+\begin{claim}[Conductors are lossless expanders]
+  \label{claim:conductor-expander}
+  \uses{def:conductor-types, def:lossless-expander, def:entropies}
+  \notready
+  A $(k_{\max},\epsilon)$-lossless conductor, read as a bipartite graph with
+  $N=2^n$, $M=2^m$, $D=2^d$, is a $(2^{k_{\max}},\epsilon)$-lossless expander.
+\end{claim}
+% TODO: "easy to check"; translate the min-entropy bound to a neighbour count.
+
+\begin{definition}[10.5, Bipartite zig-zag product]
+  \label{def:zigzag-bipartite}
+  \uses{def:zigzag-product}
+  For bipartite $H$ ($d$-regular, $s$ per side) and bipartite $G$ ($s$-regular,
+  $n$ per side), $G\zigzag H$ is the $d^2$-regular bipartite graph on $sn$ per
+  side defined by dashed--wiggly--dashed steps.
+\end{definition}
+
+\begin{lemma}[10.6, Conditional min-entropy partition]
+  \label{lem:cond-min-entropy}
+  \uses{def:entropies}
+  For any $(X_1,X_2)$, $\epsilon$, $a$, there is $(Y_1,Y_2)$ $\epsilon$-close to
+  $(X_1,X_2)$ that is a convex combination of two distributions of min-entropy
+  $\ge H_\infty(X_1,X_2)-\log(1/\epsilon)$, one with $H_\infty(\hat Y_2\mid\hat
+  Y_1=x)\ge a$ throughout, the other with it $<a$ throughout.
+\end{lemma}
+\begin{proof}
+  \uses{def:entropies}
+  Split $\mathrm{Supp}(X_1)$ by whether $H_\infty(X_2\mid X_1=x)\ge a$, and
+  condition $X$ on each part. If the split probability $p\in[\epsilon,1-\epsilon]$,
+  each conditional loses $\le\log(1/\epsilon)$ min-entropy and
+  $(Y_1,Y_2)=(X_1,X_2)$ works; otherwise the heavy part alone is $\epsilon$-close
+  and has enough min-entropy.
+\end{proof}
+
+\begin{construction}[Zig-zag product for conductors]
+  \label{constr:zigzag-conductors}
+  \uses{def:conductor-types, def:zigzag-bipartite}
+  From a permutation conductor $\langle E_1,C_1\rangle$, a buffer conductor
+  $\langle E_2,C_2\rangle$, and a lossless conductor $E_3$, build $E$ by:
+  $(y_2,z_2)=\langle E_2,C_2\rangle(x_2,r_2)$;
+  $(y_1,z_1)=\langle E_1,C_1\rangle(x_1,y_2)$; $y_3=E_3(z_1z_2,r_3)$; output
+  $y_1y_3$.
+\end{construction}
+
+\begin{construction}[Specific building blocks]
+  \label{constr:specific-blocks}
+  \uses{constr:zigzag-conductors, def:conductor-types}
+  With $a=1000\log(1/\epsilon)$, $d=2a$: $\langle E_1,C_1\rangle$ an
+  $(n-30a,6a,\epsilon)$-permutation conductor, $\langle E_2,C_2\rangle$ a
+  $(14a,0,\epsilon)$-buffer conductor, $E_3$ a $(15a,a,\epsilon)$-lossless
+  conductor.
+\end{construction}
+
+\begin{claim}[10.7, The resulting lossless conductor]
+  \label{claim:final-conductor}
+  \uses{constr:specific-blocks, constr:zigzag-conductors, def:conductor-types, lem:cond-min-entropy, prop:entropy-ordering}
+  $E:\{0,1\}^n\times\{0,1\}^{2a}\to\{0,1\}^{n-3a}$ is an
+  $(n-30a,2a,4\epsilon)$-lossless conductor.
+\end{claim}
+\begin{proof}
+  \uses{lem:cond-min-entropy, prop:entropy-ordering, def:conductor-types}
+  Ignoring $\ell_1$-errors first: by Lemma~\ref{lem:cond-min-entropy} treat the
+  two extreme cases of $H_\infty(X_2\mid X_1)$, in each obtaining
+  $H_\infty(Y_1)\ge k-14a$. Conservation of entropy by the permutation and buffer
+  conductors gives $H_\infty(Y_1,Z_1,Z_2)=k+a$, so $H_\infty(Z_1,Z_2\mid
+  Y_1=y_1)\le15a$ and $E_3$ conducts $a$ more bits into $Y_3$, yielding
+  $H_\infty(Y_1,Y_3)=k+2a$. Explicitness of $E_1$ uses
+  Proposition~\ref{prop:entropy-ordering} ($H_\infty\le H_2\le2H_\infty$). The
+  four $\ell_1$-errors add to $4\epsilon$.
+\end{proof}
+
+\begin{theorem}[10.4, Existence of lossless expanders (CRVW)]
+  \label{thm:lossless-existence}
+  \uses{def:lossless-expander, def:conductor-types, claim:final-conductor, claim:conductor-expander}
+  For any $\epsilon>0$ and $M\le N$ there is an explicit family of left
+  $D$-regular bipartite $(\Omega(\epsilon M/D),\epsilon)$-lossless expanders with
+  $D\le(N/\epsilon M)^c$.
+\end{theorem}
+\begin{proof}
+  \uses{claim:final-conductor, claim:conductor-expander}
+  Iterating Construction~\ref{constr:zigzag-conductors} with the blocks of
+  Construction~\ref{constr:specific-blocks} gives, via
+  Claim~\ref{claim:final-conductor}, explicit lossless conductors; by
+  Claim~\ref{claim:conductor-expander} these are lossless expanders.
+\end{proof}
+
+\begin{theorem}[10.8, Explicit vertex expansion (open)]
+  \label{open:explicit-vertex-expansion}
+  \uses{def:small-set-expansion, def:lossless-expander}
+  \notready
+  For $\delta>0$ and large $d$, explicitly construct $(n,d)$-graphs with
+  $\Psi_V(G,\epsilon n)\ge d-2-\delta$.
+\end{theorem}
+% TODO: open problem.
+
+
+\chapter{Cayley expander graphs}
+
+\begin{definition}[11.1, Cayley graph]
+  \label{def:cayley-graph}
+  \uses{def:d-regular}
+  For a group $H$ and symmetric $S\subseteq H$, $C(H,S)$ has vertex set $H$ and
+  edge $(g,gs)$ for $s\in S$; it is $|S|$-regular and connected iff $S$
+  generates $H$.
+\end{definition}
+
+\begin{definition}[11.2, Spectral gap of a Cayley graph]
+  \label{def:lambda-cayley}
+  \uses{def:cayley-graph, def:lambda-G, def:normalized-adjacency}
+  $\lambda(H,S)=\lambda(C(H,S))$ and $g(H,S)=1-\lambda_2(H,S)$.
+\end{definition}
+
+\begin{definition}[11.3, Vertex-transitive graph]
+  \label{def:vertex-transitive}
+  A graph is \emph{vertex transitive} if its automorphism group acts
+  transitively on vertices.
+\end{definition}
+
+\begin{claim}[11.4, Cayley graphs are vertex transitive]
+  \label{claim:cayley-transitive}
+  \uses{def:cayley-graph, def:vertex-transitive}
+  Every Cayley graph is vertex transitive.
+\end{claim}
+\begin{proof}
+  \uses{def:cayley-graph, def:vertex-transitive}
+  $x\mapsto hg^{-1}x$ is an automorphism of $C(H,S)$ sending $g$ to $h$.
+\end{proof}
+
+\begin{proposition}[11.5, Abelian groups need many generators]
+  \label{prop:abelian-generators}
+  \uses{def:cayley-graph, def:lambda-cayley, thm:diameter}
+  If $H$ is abelian and $\lambda(H,S)\le1/2$ then $|S|\ge\tfrac13\log|H|$.
+\end{proposition}
+\begin{proof}
+  \uses{thm:diameter}
+  By Theorem~\ref{thm:diameter} the diameter is $<3\log n$, so each element is a
+  product of $\le3\log n$ generators. In an abelian group the number of length-$l$
+  products of $m=|S|$ generators is $\binom{l+m-1}l$; requiring
+  $\sum_{j\le3\log n}\binom{j+m-1}j\ge n$ forces $m=\Omega(\log n)$ (via
+  $\binom kl\le(ke/l)^l$).
+\end{proof}
+
+\begin{theorem}[11.6, Alon--Roichman]
+  \label{thm:alon-roichman-cayley}
+  \uses{def:cayley-graph, def:lambda-cayley}
+  \notready
+  A random $S\subseteq H$ of size $100\log|H|$ has $\lambda(C(H,S))<1/2$ with
+  probability $\ge0.5$.
+\end{theorem}
+% TODO: cited to [AR94]; representation-theoretic proof omitted.
+
+\begin{definition}[Unitary representation]
+  \label{def:representation}
+  \lean{Representation}
+  \mathlibok
+  A \emph{representation} of $H$ is a homomorphism $\rho:H\to U(V)$ to the
+  unitary group of a Hermitian space $V$.
+  % TODO: confirm Lean decl (Representation, unitary).
+\end{definition}
+
+\begin{definition}[11.9, Regular representation]
+  \label{def:regular-representation}
+  \uses{def:representation}
+  \mathlibok
+  On $V=\C^H$, $[r(h)f](x)=f(xh)$.
+  % TODO: confirm Lean decl (regular representation).
+\end{definition}
+
+\begin{definition}[11.11, Irreducible representation]
+  \label{def:irreducible}
+  \uses{def:representation}
+  \mathlibok
+  A representation with no nontrivial invariant subspace.
+  % TODO: confirm Lean decl (Representation.IsIrreducible).
+\end{definition}
+
+\begin{proposition}[11.13, Maschke decomposition]
+  \label{prop:maschke}
+  \uses{def:representation, def:irreducible}
+  \mathlibok
+  Every unitary representation decomposes orthogonally into irreducibles,
+  uniquely up to isomorphism.
+  % TODO: confirm Lean decl (Maschke's theorem).
+\end{proposition}
+
+\begin{proposition}[11.14, Regular contains every irreducible]
+  \label{prop:regular-contains-irreps}
+  \uses{def:regular-representation, def:irreducible, prop:maschke}
+  \mathlibok
+  Every irreducible representation of $H$ appears in the regular representation.
+  % TODO: confirm Lean decl.
+\end{proposition}
+
+\begin{definition}[Averaging operator $A_\rho$]
+  \label{def:A-rho}
+  \uses{def:representation, def:cayley-graph}
+  $A_\rho=\tfrac1{|S|}\sum_{s\in S}\rho(s)$.
+\end{definition}
+
+\begin{proposition}[11.7, Characters are eigenvectors]
+  \label{prop:character-eigenvector}
+  \uses{def:cayley-graph, def:character, def:normalized-adjacency}
+  For abelian $H$, $(\chi(h))_{h}$ is an eigenvector of the normalized adjacency
+  matrix of $C(H,S)$ with eigenvalue $\tfrac1{|S|}\sum_{s\in S}\chi(s)$.
+\end{proposition}
+\begin{proof}
+  \uses{def:character}
+  $(M\chi)(x)=\tfrac1{|S|}\sum_s\chi(xs)=\tfrac1{|S|}(\sum_s\chi(s))\chi(x)$ by
+  the homomorphism property.
+\end{proof}
+
+\begin{lemma}[11.15, Eigenvalues via irreducibles]
+  \label{lem:eigenvalues-irreps}
+  \uses{def:A-rho, def:regular-representation, def:irreducible, prop:maschke, prop:regular-contains-irreps, def:cayley-graph}
+  The normalized adjacency matrix of $C(H,S)$ is $A_r$; its eigenvalues are the
+  union, over irreducibles $\rho$, of the eigenvalues of $A_\rho$, and
+  conversely.
+\end{lemma}
+\begin{proof}
+  \uses{prop:maschke, prop:regular-contains-irreps}
+  $A_r=\tfrac1{|S|}\sum_sr(s)$ is the normalized adjacency matrix; decompose $r$
+  into irreducibles (Proposition~\ref{prop:maschke}); the converse is
+  Proposition~\ref{prop:regular-contains-irreps}.
+\end{proof}
+
+\begin{definition}[Group action and Schreier graph]
+  \label{def:schreier-graph}
+  \uses{def:cayley-graph}
+  An \emph{action} of $H$ on $X$ is a homomorphism $\pi:H\to\mathrm{Sym}(X)$;
+  $\mathrm{Sch}(H,X,S)$ has vertex set $X$ and edges $(x,\pi(s)x)$. Cayley graphs
+  are the special case $X=H$.
+\end{definition}
+
+\begin{proposition}[11.17, Schreier eigenvalues bounded by Cayley]
+  \label{prop:schreier-component}
+  \uses{def:schreier-graph, def:lambda-cayley, lem:eigenvalues-irreps}
+  Every connected component $Z$ of $\mathrm{Sch}(H,X,S)$ has
+  $\lambda(Z)\le\lambda(H,S)$.
+\end{proposition}
+\begin{proof}
+  \uses{lem:eigenvalues-irreps}
+  The permutation representation's $A_\rho$ has eigenvalues among those of $A_r$
+  by Lemma~\ref{lem:eigenvalues-irreps}; restricting to a component only removes
+  eigenvalues.
+\end{proof}
+
+\begin{theorem}[11.16, Gross: every even-regular graph is a Schreier graph]
+  \label{thm:gross}
+  \uses{def:schreier-graph}
+  \notready
+  Every finite $2d$-regular graph is a Schreier graph of some group action.
+\end{theorem}
+% TODO: idea via 2-factorization; full proof omitted.
+
+\begin{lemma}[Spectral gap as displacement]
+  \label{lem:displacement}
+  \uses{lem:eigenvalues-irreps, def:lambda-cayley, def:regular-representation, lem:rayleigh-variational}
+  $g(H,S)=\min_{v\perp\mathbf 1}\tfrac1{2|S|}\sum_{h\in S}\tfrac{\|r(h)v-v\|^2}{\|v\|^2}$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:eigenvalues-irreps, lem:rayleigh-variational}
+  Variational form of $\lambda_2$ via $A_r$, with the unitary identity
+  $\|r(h)v-v\|^2=2(\|v\|^2-v^\top r(h)v)$.
+\end{proof}
+
+\begin{definition}[11.18, Kazhdan constant]
+  \label{def:kazhdan}
+  \uses{def:regular-representation, def:irreducible, prop:regular-contains-irreps}
+  $K(H,S)=\min_{v\perp\mathbf 1}\max_{h\in S}\tfrac{\|r(h)v-v\|^2}{\|v\|^2}$,
+  equivalently the minimum over nontrivial irreducibles.
+\end{definition}
+
+\begin{proposition}[Kazhdan constant vs. spectral gap]
+  \label{prop:kazhdan-gap}
+  \uses{def:kazhdan, lem:displacement, def:lambda-cayley}
+  $K(H,S)/(2|S|)<g(H,S)<K(H,S)/2$.
+\end{proposition}
+\begin{proof}
+  \uses{def:kazhdan, lem:displacement}
+  In Lemma~\ref{lem:displacement} the max over $S$ both lower- and upper-bounds
+  the average (within a factor $|S|$).
+\end{proof}
+
+\begin{claim}[11.19, Kazhdan constant under generation length]
+  \label{claim:kazhdan-product}
+  \uses{def:kazhdan}
+  \notready
+  If each element of $\tilde S$ is a product of $\le m$ elements of $S$, then
+  $K(H,S)\ge K(H,\tilde S)/m$.
+\end{claim}
+% TODO: triangle-inequality argument stated without proof.
+
+\begin{definition}[11.20--11.21, Action on a group and semidirect product]
+  \label{def:semidirect}
+  An action of $B$ on $A$ is a homomorphism $B\to\mathrm{Aut}(A)$; the
+  \emph{semidirect product} $A\rtimes B$ has multiplication
+  $(a_1,b_1)(a_2,b_2)=(a_1\phi_{b_1}(a_2),b_1b_2)$.
+\end{definition}
+
+\begin{theorem}[11.22, Replacement product as Cayley graph (ALW)]
+  \label{thm:alw}
+  \uses{def:semidirect, def:cayley-graph, def:replacement-product}
+  If $B$ acts on $A$ so that the generating set $S_A$ is a single $B$-orbit of
+  $x$, then $S=\{(1,s):s\in S_B\}\cup\{(x,1)\}$ generates $A\rtimes B$ and
+  $C(A\rtimes B,S)$ is the replacement product of $C(A,S_A)$ and $C(B,S_B)$.
+\end{theorem}
+\begin{proof}
+  \uses{def:semidirect, def:cayley-graph, def:replacement-product}
+  Each $(a,b)=(a,1)(1,b)$, and $(1,s_b)(x,1)(1,s_b^{-1})=(\phi_{s_b}(x),1)$ ranges
+  over $(S_A,1)$, so $S$ generates. Within-cloud edges come from $(1,S_B)$ and
+  between-cloud edges $(a,b)(x,1)=(a\phi_b(x),b)$ realize the $C(A,S_A)$ edges,
+  matching the replacement product.
+\end{proof}
+
+\begin{definition}[Group ring]
+  \label{def:group-ring}
+  \uses{def:semidirect}
+  \mathlibok
+  $F_p[H]$ is the group ring of $H$ over $F_p$; the construction sets
+  $H_{i+1}=F_{p_i}[H_i]\rtimes H_i$.
+  % TODO: confirm Lean decl (MonoidAlgebra).
+\end{definition}
+
+\begin{theorem}[11.25, Sufficient condition for group-ring expansion]
+  \label{thm:mw-condition}
+  \uses{def:group-ring, def:irreducible, thm:alw}
+  \notready
+  If the number of irreducibles of $H$ of dimension $<r$ is $<c^r$, then a
+  constant number of orbits makes $F_p[H]$ an expander.
+\end{theorem}
+% TODO: cited; proof omitted.
+
+\begin{theorem}[11.24, Meshulam--Wigderson group-ring expanders]
+  \label{thm:mw-expanders}
+  \uses{def:group-ring, def:lambda-cayley, thm:alw, thm:mw-condition}
+  \notready
+  There are groups $H_i=F_{p_{i-1}}[H_{i-1}]\rtimes H_{i-1}$ and generating sets
+  $U_i$ with $\lambda(H_n,U_n)\le1/2$ and
+  $|U_n|\le\log^{(n/2)}|H_n|$ (iterated log).
+\end{theorem}
+% TODO: cited to [MW02]; proof omitted.
+
+\begin{definition}[Wreath product]
+  \label{def:wreath}
+  \uses{def:semidirect}
+  $H\wr S_d=H^d\rtimes S_d$ with $S_d$ permuting coordinates; the construction
+  sets $H_1=A_d$, $H_{i+1}=H_i^d\rtimes A_d$.
+\end{definition}
+
+\begin{theorem}[11.26, RSW single-orbit expansion]
+  \label{thm:rsw}
+  \uses{def:wreath, def:lambda-cayley, def:cayley-graph}
+  \notready
+  If every $h\in H$ is a commutator, $U$ is expanding with second eigenvalue
+  $\le1/4$, and $|U|<d/10^6$, then $\lambda(H^d,U^{(d)})<1/2$ for the single
+  $S_d$-orbit $U^{(d)}$.
+\end{theorem}
+% TODO: cited to [RSW04]; proof omitted.
+
+\begin{theorem}[11.27, Kassabov: expanders on $A_d$]
+  \label{thm:kassabov}
+  \uses{def:cayley-graph, def:lambda-cayley}
+  \notready
+  $A_d$ has an explicit generating set $U$ of $d$-independent size with
+  $\lambda(A_d,U)<1/100$.
+\end{theorem}
+% TODO: cited to [Kas05b]; proof omitted.
+
+\begin{corollary}[11.28, Iterated wreath-product expanders]
+  \label{cor:rsw-wreath}
+  \uses{thm:rsw, thm:kassabov, def:wreath, thm:alw}
+  For large $d$, the groups $H_1=A_d$, $H_{i+1}=H_i^d\rtimes A_d$ admit generating
+  sets $U_i$ with $\lambda(H_i,U_i)\le1/2$ and $|U_i|$ independent of $i$.
+\end{corollary}
+\begin{proof}
+  \uses{thm:rsw, thm:kassabov}
+  Theorem~\ref{thm:kassabov} starts the induction; Theorem~\ref{thm:rsw} carries
+  it ($U^{(d)}$ expands $H^d$ while $A_d$ contributes a small generating set).
+\end{proof}
+
+\begin{theorem}[11.29, Expansion is not a group property]
+  \label{thm:expansion-not-group}
+  \uses{thm:alw, prop:schreier-component, def:replacement-product, thm:kassabov, def:lambda-cayley}
+  There is a group with two bounded generating sets, one giving an expanding
+  Cayley family and the other not.
+\end{theorem}
+\begin{proof}
+  \uses{thm:alw, def:replacement-product, thm:kassabov}
+  For $F_2^{p+1}\rtimes SL_2(p)$, one generating set (two random orbits plus
+  $SL_2(p)$ generators) is a replacement product of expanders, hence expanding;
+  the other (standard basis orbit) is a replacement product with the
+  non-expanding cube $C(F_2^{p+1},\{e_i\})$, and a replacement product never
+  beats a constituent's second eigenvalue. Alternatively $S_d$ expands via
+  Theorem~\ref{thm:kassabov} but not via $\{(12),(12\ldots d)^{\pm1}\}$.
+\end{proof}
+
+\begin{definition}[Edge cut per generator]
+  \label{def:edge-cut-generator}
+  \uses{def:cayley-graph, def:edge-expansion}
+  For a cut $E(T,V\setminus T)$ of $C(H,S)$, $\epsilon_{s,T}$ counts cut edges
+  using generator $s^{\pm1}$.
+\end{definition}
+
+\begin{theorem}[11.30, Kahn--Kalai--Linial]
+  \label{thm:kkl}
+  \uses{def:edge-cut-generator, def:discrete-cube}
+  \notready
+  For $T\subseteq\{0,1\}^n$ with $|T|=2^{n-1}$, some coordinate $j$ has
+  $\epsilon_{j,T}\ge\Omega(\tfrac{\log n}n2^n)$, and this is tight.
+\end{theorem}
+% TODO: cited to [KKL88]; hypercontractive proof omitted.
+
+
+\chapter{Error correcting codes}
+
+\begin{definition}[Error correcting code]
+  \label{def:ecc}
+  \uses{def:hamming-distance}
+  A \emph{code} is $C\subseteq\{0,1\}^n$; its \emph{distance} is
+  $\mathrm{dist}(C)=\min_{x\neq y\in C}d_H(x,y)$ and its \emph{rate} is
+  $\log|C|/n$.
+\end{definition}
+
+\begin{claim}[Nearest-codeword decoding]
+  \label{claim:nearest-decoding}
+  \uses{def:ecc}
+  Decoding to the nearest codeword corrects up to
+  $\lfloor(\mathrm{dist}(C)-1)/2\rfloor$ bit flips.
+\end{claim}
+\begin{proof}
+  \uses{def:ecc, def:hamming-distance}
+  If $\le\lfloor(\mathrm{dist}(C)-1)/2\rfloor$ bits flip, the triangle inequality
+  makes the sent codeword strictly closer to the received word than any other.
+\end{proof}
+
+\begin{definition}[12.1, Asymptotically good and efficient codes]
+  \label{def:good-code}
+  \uses{def:ecc}
+  A family $C_n$ is \emph{asymptotically good} if $\mathrm{dist}(C)>\delta n$ and
+  rate $>r$ for fixed $\delta,r>0$, and \emph{efficient} if encoding/decoding
+  (up to $\delta n/2$ errors) is polynomial-time.
+\end{definition}
+
+\begin{definition}[Linear code]
+  \label{def:linear-code}
+  \uses{def:ecc}
+  A \emph{linear code} is a subspace $C\subseteq\F_2^n$.
+\end{definition}
+
+\begin{lemma}[Distance equals minimum weight]
+  \label{lem:distance-min-weight}
+  \uses{def:linear-code}
+  The distance of a linear code equals the minimum weight of a nonzero codeword.
+\end{lemma}
+\begin{proof}
+  \uses{def:linear-code, def:ecc}
+  $d_H(x,y)=\wt(x+y)$ over $\F_2$, and $x+y$ ranges over nonzero codewords.
+\end{proof}
+
+\begin{definition}[Hamming ball volume]
+  \label{def:ball-volume}
+  \uses{def:ecc}
+  $v(n,r)=\sum_{i=0}^r\binom ni$.
+\end{definition}
+
+\begin{definition}[Binary entropy function]
+  \label{def:binary-entropy}
+  \lean{Real.binEntropy}
+  \mathlibok
+  $H(\delta)=-\delta\log\delta-(1-\delta)\log(1-\delta)$; $\tfrac1n\log\binom
+  n{\delta n}\to H(\delta)$.
+  % TODO: confirm Lean decl.
+\end{definition}
+
+\begin{theorem}[12.2, Gilbert--Varshamov]
+  \label{thm:gilbert-varshamov}
+  \uses{def:ecc, def:linear-code, def:ball-volume, lem:distance-min-weight}
+  There is a (linear) length-$n$ code of distance $\ge d$ and size
+  $\ge2^n/v(n,d)$.
+\end{theorem}
+\begin{proof}
+  \uses{def:ball-volume, lem:distance-min-weight}
+  Greedily add codewords, each removing $\le v(n,d)$ points within distance $d$,
+  for $\ge2^n/v(n,d)$ steps. Linearly: build a parity-check matrix column by
+  column so that no $<d$ columns are dependent; this is possible while
+  $\sum_{r<d}\binom{j-1}r<2^m$, giving a code of dimension $\ge n-m$.
+\end{proof}
+
+\begin{corollary}[12.3, Asymptotic Gilbert--Varshamov]
+  \label{cor:gv-asymptotic}
+  \uses{thm:gilbert-varshamov, def:binary-entropy}
+  For $\delta\le1/2$ there are codes of normalized distance $\delta$ and rate
+  $\ge1-H(\delta)$.
+\end{corollary}
+\begin{proof}
+  \uses{thm:gilbert-varshamov, def:binary-entropy}
+  The rate is $\ge1-\tfrac1n\log\binom n{\delta n}\to1-H(\delta)$.
+\end{proof}
+
+\begin{theorem}[12.4, Sphere-packing bound]
+  \label{thm:sphere-packing}
+  \uses{def:ecc, def:ball-volume}
+  Any length-$n$, distance-$d$ code has $|C|\le2^n/v(n,d/2)$.
+\end{theorem}
+\begin{proof}
+  \uses{def:ball-volume}
+  The radius-$d/2$ balls around codewords are disjoint, so their number is
+  $\le2^n/v(n,d/2)$.
+\end{proof}
+
+\begin{corollary}[12.5, Sphere-packing rate]
+  \label{cor:sphere-packing-rate}
+  \uses{thm:sphere-packing, def:binary-entropy}
+  A code of relative distance $\delta$ has rate $\le1-H(\delta/2)$.
+\end{corollary}
+\begin{proof}
+  \uses{thm:sphere-packing, def:binary-entropy}
+  Take logarithms in Theorem~\ref{thm:sphere-packing}.
+\end{proof}
+
+\begin{theorem}[12.6, MRRW bound]
+  \label{thm:mrrw}
+  \uses{def:ecc, def:binary-entropy}
+  \notready
+  A code of relative distance $\delta$ has rate $\le H(1/2-\sqrt{\delta(1-\delta)})$.
+\end{theorem}
+% TODO: cited to [MRRW77]; proof omitted.
+
+\begin{construction}[Code from a bipartite graph]
+  \label{constr:code-from-graph}
+  \uses{def:linear-code, def:ecc}
+  For a bipartite $G$ ($n$ left variables, $m$ right constraints), $C(G)=\{x:
+  Ax=0\}$ where $A$ is the bipartite adjacency matrix (each constraint = mod-2
+  sum of incident variables).
+\end{construction}
+
+\begin{definition}[12.7, Left vertex expansion ratio]
+  \label{def:left-expansion}
+  \uses{constr:code-from-graph, def:lossless-expander}
+  For a $k$-left-regular bipartite $G$, $L(G,d)=\min_{0<|S|\le d}|\Gamma(S)|/|S|$.
+\end{definition}
+
+\begin{theorem}[12.8, Sipser--Spielman distance]
+  \label{thm:ss-distance}
+  \uses{def:left-expansion, constr:code-from-graph, lem:distance-min-weight}
+  If $L(G,d)>k/2$ then $\mathrm{dist}(C(G))\ge d$.
+\end{theorem}
+\begin{proof}
+  \uses{def:left-expansion, lem:distance-min-weight}
+  Expansion $>k/2$ gives every $S$ with $|S|\le d$ a unique neighbour (average
+  $S$-degree of $\Gamma(S)$ is $<2$). So if a nonzero codeword had support
+  $|S|<d$, some constraint would be violated; hence min weight $\ge d$.
+\end{proof}
+
+\begin{construction}[Belief-propagation decoding]
+  \label{constr:belief-propagation}
+  \uses{constr:code-from-graph}
+  Given $y\notin C$, flip any bit $i$ for which $|A(y+e_i)|<|Ay|$ (more violated
+  than satisfied constraints), repeating until a codeword is reached.
+\end{construction}
+
+\begin{theorem}[12.9, Sipser--Spielman decoding]
+  \label{thm:ss-decoding}
+  \uses{def:left-expansion, constr:code-from-graph, constr:belief-propagation}
+  If $L(G,d)>\tfrac34k$ and $d_H(y,x)\le d/2$ for a codeword $x$, then
+  belief-propagation returns $x$ in a linear number of steps.
+\end{theorem}
+\begin{proof}
+  \uses{def:left-expansion, constr:belief-propagation}
+  Let $A$ be the error set, $U$/$S$ its unsatisfied/satisfied neighbours. Then
+  $|S|+|U|=|\Gamma(A)|>\tfrac34k|A|$ and $|U|+2|S|\le k|A|$, giving
+  $|U|>\tfrac12k|A|$; so some variable has a majority of violated constraints and
+  is flipped, decreasing $|U|$. Since $|A|$ changes by $1$ and starts $\le d/2$,
+  it never reaches $d$, so the algorithm converges to $x$.
+\end{proof}
+
+\begin{claim}[Good codes from lossless expanders]
+  \label{claim:lossless-codes}
+  \uses{def:left-expansion, constr:code-from-graph, def:lossless-expander}
+  \notready
+  The lossless expanders of the conductor chapter give explicit constant-rate
+  codes with $L(G,d)>0.99k$ for $d=\Omega(n)$, hence efficient asymptotically
+  good codes.
+\end{claim}
+% TODO: cited to [CRVW02]; details omitted.
+
+
+\chapter{Metric embedding}
+
+\begin{definition}[Metric space]
+  \label{def:metric-space}
+  \lean{MetricSpace}
+  \mathlibok
+  A set $X$ with $d:X\times X\to\R^+$ symmetric, vanishing only on the diagonal,
+  and satisfying the triangle inequality.
+  % TODO: confirm Lean decl.
+\end{definition}
+
+\begin{definition}[Distortion of an embedding]
+  \label{def:distortion}
+  \uses{def:metric-space}
+  For $f:X\to(\R^n,\ell_2)$, $\mathrm{distortion}(f)=
+  \mathrm{expansion}(f)\cdot\mathrm{contraction}(f)$, the product of the largest
+  ratios $\|f(x)-f(y)\|/d(x,y)$ and $d(x,y)/\|f(x)-f(y)\|$.
+\end{definition}
+
+\begin{claim}[A star metric is not isometrically $\ell_2$-embeddable]
+  \label{claim:star-not-embeddable}
+  \uses{def:distortion}
+  The $4$-point metric with one centre at distance $1$ and the others at
+  distance $2$ has no isometric Euclidean embedding.
+\end{claim}
+\begin{proof}
+  \uses{def:distortion, def:metric-space}
+  Each leaf--centre--leaf triple would be collinear, forcing all four points
+  onto a line, contradicting the mutual distance $2$ of the leaves.
+\end{proof}
+
+\begin{definition}[Least $\ell_2$ distortion]
+  \label{def:c2}
+  \uses{def:distortion}
+  $c_2(X,d)$ is the least distortion of an embedding of $(X,d)$ into Euclidean
+  space (achievable with $n\le|X|$).
+\end{definition}
+
+\begin{theorem}[13.1, Bourgain's embedding]
+  \label{thm:bourgain}
+  \uses{def:c2, def:distortion}
+  \notready
+  Every $n$-point metric embeds into Euclidean space with distortion $O(\log n)$.
+\end{theorem}
+% TODO: cited to [Bou85]; proof omitted.
+
+\begin{definition}[$\ell_p$ metric]
+  \label{def:lp-metric}
+  \uses{def:metric-space}
+  An \emph{$\ell_2$ ($\ell_1$) metric} is one isometric to a finite subset of
+  $(\R^n,\ell_2)$ (resp. $\ell_1$).
+\end{definition}
+
+\begin{theorem}[13.3, Johnson--Lindenstrauss]
+  \label{thm:jl}
+  \uses{def:lp-metric, def:distortion}
+  \notready
+  Any $n$-point $\ell_2$ metric embeds into $O(\log n/\epsilon^2)$ dimensions
+  with distortion $\le1+\epsilon$.
+\end{theorem}
+% TODO: cited to [JL84]; random-projection proof omitted.
+
+\begin{theorem}[13.4, $c_2$ is polynomial-time computable (LLR)]
+  \label{thm:c2-computable}
+  \uses{def:c2, def:distortion}
+  $c_2(X,d)$ is computable in polynomial time by semidefinite programming.
+\end{theorem}
+\begin{proof}
+  \uses{def:c2, def:distortion}
+  Scaling contraction to $1$, $\mathrm{distortion}\le\gamma$ iff there is a PSD
+  Gram matrix $Z$ with $d(x_i,x_j)^2\le z_{ii}+z_{jj}-2z_{ij}\le\gamma^2
+  d(x_i,x_j)^2$; this feasibility problem is solved by the ellipsoid method.
+\end{proof}
+
+\begin{claim}[13.5, Self-duality of the PSD cone]
+  \label{claim:psd-duality}
+  \uses{thm:c2-computable}
+  $Z$ is PSD iff $\sum_{ij}q_{ij}z_{ij}\ge0$ for every PSD $Q$.
+\end{claim}
+\begin{proof}
+  \uses{thm:c2-computable}
+  ($\Leftarrow$) take $Q=vv^\top$ to get $v^\top Zv\ge0$. ($\Rightarrow$) every
+  PSD $Q$ is a sum of rank-one PSD matrices $vv^\top$, on each of which the
+  inequality holds.
+\end{proof}
+
+\begin{theorem}[13.6, SDP-dual formula for $c_2$ (LLR)]
+  \label{thm:c2-dual}
+  \uses{thm:c2-computable, claim:psd-duality, def:c2}
+  $c_2(X,d)=\max_{P\in\mathrm{PSD},\,P\mathbf 1=0}
+  \sqrt{\frac{\sum_{p_{ij}>0}p_{ij}d(x_i,x_j)^2}{-\sum_{p_{ij}<0}p_{ij}d(x_i,x_j)^2}}$.
+\end{theorem}
+\begin{proof}
+  \uses{thm:c2-computable, claim:psd-duality}
+  Dualizing the feasibility problem of Theorem~\ref{thm:c2-computable}: a
+  contradicting nonnegative combination selects a PSD $P$ with $P\mathbf 1=0$
+  (to cancel diagonal terms), yielding $0\ge\sum_{p_{ij}>0}p_{ij}d^2+\gamma^2
+  \sum_{p_{ij}<0}p_{ij}d^2$, contradictory exactly below the stated ratio.
+\end{proof}
+
+\begin{definition}[$c_2$ of a graph]
+  \label{def:c2-graph}
+  \uses{def:c2, def:metric-space}
+  $c_2(G)=c_2(V(G),d_G)$ for the shortest-path metric.
+\end{definition}
+
+\begin{claim}[Enflo: distortion of the cube]
+  \label{claim:cube-distortion}
+  \uses{def:c2-graph, thm:c2-dual, def:discrete-cube}
+  $c_2(Q_r)=\sqrt r$.
+\end{claim}
+\begin{proof}
+  \uses{thm:c2-dual, def:discrete-cube}
+  The identity embedding gives distortion $\sqrt r$. For the lower bound take
+  $P$ with $P(x,x)=r-1$, $P(x,y)=-1$ for edges, $+1$ for antipodes; then
+  $P\mathbf 1=0$, $P$ is PSD, and Theorem~\ref{thm:c2-dual} gives
+  $\sqrt{2^rr^2/(2^rr)}=\sqrt r$.
+\end{proof}
+
+\begin{lemma}[Dirac's theorem]
+  \label{thm:dirac}
+  \mathlibok
+  A graph on $n$ vertices with minimum degree $\ge n/2$ has a Hamiltonian cycle.
+  % TODO: confirm Lean decl (Dirac's theorem).
+\end{lemma}
+
+\begin{lemma}[13.7, Far-distance perfect matching]
+  \label{lem:far-matching}
+  \uses{def:c2-graph, thm:dirac}
+  For $k$-regular $G$ of even order $n$, the graph $H$ joining vertices at
+  $G$-distance $\ge\lfloor\log_kn\rfloor$ has a perfect matching.
+\end{lemma}
+\begin{proof}
+  \uses{def:c2-graph, thm:dirac}
+  At most $n/2$ vertices lie within distance $\lfloor\log_kn\rfloor-1$, so $H$
+  has minimum degree $\ge n/2$; by Dirac's theorem $H$ has a Hamiltonian cycle,
+  hence (even $n$) a perfect matching.
+\end{proof}
+
+\begin{theorem}[13.8, Expanders have $\Omega(\log n)$ distortion (LLR)]
+  \label{thm:expander-distortion}
+  \uses{thm:c2-dual, lem:far-matching, def:c2-graph, def:lambda-G, lem:rayleigh-variational}
+  If $G$ is an $(n,k)$-graph with $\lambda_2\le k-\epsilon$, then
+  $c_2(G)=\Omega(\log n)$.
+\end{theorem}
+\begin{proof}
+  \uses{thm:c2-dual, lem:far-matching, lem:rayleigh-variational}
+  Let $B$ be a perfect matching of the far-graph $H$
+  (Lemma~\ref{lem:far-matching}) and $P=kI-A_G+\tfrac\epsilon2(B-I)$. Then
+  $P\mathbf 1=0$, and for $x\perp\mathbf 1$, $x^\top(kI-A_G)x\ge\epsilon\|x\|^2$
+  while $x^\top(B-I)x\ge-2\|x\|^2$, so $P$ is PSD. In
+  Theorem~\ref{thm:c2-dual}, $-\sum_{p_{ij}<0}d^2p_{ij}=kn$ and
+  $\sum_{p_{ij}>0}d^2p_{ij}\ge\tfrac\epsilon2n\lfloor\log_kn\rfloor^2$, giving
+  $c_2(G)=\Omega(\log n)$.
+\end{proof}
+
+\begin{theorem}[13.9, Poincaré inequality for graphs]
+  \label{thm:poincare-graph}
+  \uses{def:lambda-G, lem:rayleigh-variational, def:c2-graph}
+  For $k$-regular $G$ and any $f:V\to\R^n$,
+  $\E_{u,v}\|f(u)-f(v)\|^2\le\tfrac k{k-\lambda_2}\E_{(u,v)\in E}\|f(u)-f(v)\|^2$.
+\end{theorem}
+\begin{proof}
+  \uses{lem:rayleigh-variational}
+  Reduce to scalar zero-average $f$ (both sides additive over coordinates and
+  shift-invariant); the inequality is then the variational characterization of
+  $\lambda_2$.
+\end{proof}
+
+\begin{problem}[Computing the expansion ratio]
+  \label{prob:expansion-computation}
+  \uses{def:edge-expansion}
+  Computing $h(G)$ is co-$\mathbf{NP}$-hard; up to a constant it reduces to the
+  sparsest cut $\min_S|E(S,\overline S)|/(|S|(n-|S|))$.
+\end{problem}
+
+\begin{definition}[All-pairs multicommodity flow]
+  \label{def:multicommodity-flow}
+  \uses{prob:expansion-computation}
+  Ship $\delta$ units between every pair under unit edge capacities; $\delta_{\max}
+  (G)$ is the maximum feasible $\delta$ (a linear program).
+\end{definition}
+
+\begin{definition}[Cut cone and cut metrics]
+  \label{def:cut-cone}
+  \uses{def:lp-metric}
+  The \emph{cut cone} is the convex cone of $\ell_1$ metrics; its extreme rays
+  are the cut metrics $d_S(x,y)=\mathbf 1[|\{x,y\}\cap S|=1]$.
+\end{definition}
+
+\begin{theorem}[13.10, Leighton--Rao]
+  \label{thm:leighton-rao}
+  \uses{def:multicommodity-flow, prob:expansion-computation, thm:bourgain, def:cut-cone}
+  $\delta_{\max}(G)\le\min_S\frac{|E(S,\overline S)|}{|S|(n-|S|)}\le
+  O(\delta_{\max}(G)\log n)$.
+\end{theorem}
+\begin{proof}
+  \uses{def:multicommodity-flow, thm:bourgain, def:cut-cone}
+  The left inequality is capacity counting. By LP duality $\delta_{\max}$ is the
+  minimum of $\sum_{(i,j)\in E}d_{ij}/\sum_{ij}d_{ij}$ over metrics; over
+  $\ell_1$ metrics the minimum is attained at a cut metric, giving the sparsest
+  cut, and by Bourgain's theorem restricting to $\ell_1$ loses only $O(\log n)$.
+\end{proof}
+
+\begin{definition}[Negative-type metric]
+  \label{def:negative-type}
+  \uses{def:lp-metric, def:cut-cone}
+  $(X,d)$ is of \emph{negative type} if $\sqrt d$ is an $\ell_2$ metric; every
+  $\ell_1$ metric is of negative type.
+\end{definition}
+
+\begin{theorem}[13.12, Negative-type into $\ell_1$ (refuted conjecture)]
+  \label{conj:negative-type-l1}
+  \uses{def:negative-type, def:lp-metric, def:distortion}
+  \notready
+  Whether every negative-type metric embeds into $\ell_1$ with bounded
+  distortion (refuted by Khot--Vishnoi with an $(\log\log n)^c$ lower bound).
+\end{theorem}
+% TODO: conjecture, since refuted; recorded for completeness.

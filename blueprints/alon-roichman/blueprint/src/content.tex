@@ -1,0 +1,736 @@
+% Blueprint for "Random Cayley Graphs and Expanders" by Noga Alon and Yuval
+% Roichman (February 22, 2002).
+%
+% Two-kind model:
+%   * SETTLED leaves (already in Mathlib): \mathlibok + \lean{...}, no proof.
+%   * NOVEL nodes (the paper's content): full statement + full proof, \uses on
+%     both, and NO \leanok/\mathlibok.
+% Where the paper genuinely omits a proof (or defers to an external reference we
+% cannot honestly reconstruct), the node is kept and flagged \notready with a
+% TODO describing the gap.
+
+\chapter{Preliminaries and library prerequisites}
+
+% --------------------------------------------------------------------------- %
+%  Settled dependencies (already in Mathlib): leaves only, no proof.
+% --------------------------------------------------------------------------- %
+
+\begin{definition}[Adjacency matrix of a graph]
+  \label{def:adj-matrix}
+  \lean{SimpleGraph.adjMatrix}
+  \mathlibok
+  For a finite simple graph $H$ on vertex set $V$, the \emph{adjacency matrix}
+  $\adj_H$ is the $V \times V$ matrix with $(\adj_H)_{uv} = 1$ if $u$ and $v$
+  are adjacent and $0$ otherwise. It is a real symmetric matrix, hence has real
+  eigenvalues. (Recalled so later nodes can speak of its eigenvalues.)
+\end{definition}
+
+\begin{lemma}[Trace of a power equals the power sum of eigenvalues]
+  \label{lem:trace-pow-eig}
+  \uses{def:adj-matrix}
+  \mathlibok
+  % TODO: confirm exact Mathlib decl name (Matrix.IsHermitian.trace / spectrum).
+  Let $A$ be a real symmetric $n \times n$ matrix with eigenvalues
+  $\mu_0, \dots, \mu_{n-1}$ (with multiplicity). Then for every natural number
+  $k$, $\Tr(A^{k}) = \sum_{i=0}^{n-1} \mu_i^{k}$.
+\end{lemma}
+
+\begin{lemma}[Jensen's inequality]
+  \label{lem:jensen}
+  \mathlibok
+  % TODO: confirm exact Mathlib decl name (ConvexOn.map_sum_le / inner_le_...).
+  If $\varphi$ is a concave function and $Y$ an integrable random variable then
+  $\E(\varphi(Y)) \le \varphi(\E(Y))$; dually for convex $\varphi$ the
+  inequality reverses. We use it for $\varphi(y) = y^{1/2m}$ (concave on
+  $[0,\infty)$): $\E(Y^{1/2m}) \le (\E(Y))^{1/2m}$.
+\end{lemma}
+
+\begin{lemma}[Azuma's inequality]
+  \label{lem:azuma}
+  \mathlibok
+  % TODO: confirm exact Mathlib decl name (MeasureTheory.azuma / azuma_le).
+  Let $F_0, F_1, \dots, F_d$ be a martingale with $|F_{i+1} - F_i| \le b_i$ for
+  all $i$. Then for every $t > 0$,
+  $\Prob\!\left(|F_d - F_0| \ge t\right) \le 2\exp\!\big(-t^2 / (2\sum_i b_i^2)\big)$.
+\end{lemma}
+
+\begin{definition}[Characters of a finite abelian group]
+  \label{def:character}
+  \lean{AddChar}
+  \mathlibok
+  A \emph{character} of a finite abelian group $A$ is a homomorphism
+  $\chi : A \to \mathbb{C}^{\times}$ into the multiplicative group of complex
+  numbers. The characters of $A$ form a group isomorphic to $A$ (Pontryagin
+  duality), there are exactly $|A|$ of them, and the trivial character sends
+  every element to $1$.
+\end{definition}
+
+\begin{definition}[Structure of finite abelian groups]
+  \label{def:abelian-structure}
+  \mathlibok
+  % TODO: confirm exact Mathlib decl name (e.g. AddCommGroup.equiv_directSum_zmod...).
+  Every finite abelian group $A$ is isomorphic to a direct sum of cyclic groups,
+  $A \cong \mathbb{Z}_{p_1} \oplus \mathbb{Z}_{p_2} \oplus \dots \oplus
+  \mathbb{Z}_{p_k}$. Consequently every nontrivial character of $A$ is a product
+  of characters of the cyclic summands, at least one of which is nontrivial.
+\end{definition}
+
+% --------------------------------------------------------------------------- %
+%  Novel basic objects defined in the paper's introduction.
+% --------------------------------------------------------------------------- %
+
+\begin{definition}[Cayley graph $\Cay(G,S)$]
+  \label{def:cayley-graph}
+  Let $G$ be a finite group and $S \subseteq G$ a set of elements. The
+  (undirected) \emph{Cayley graph} $\Cay(G,S)$ has vertex set $G$ and edge set
+  the unordered pairs $\{\{g, gs\} : g \in G,\ s \in S\}$. It is a regular graph
+  of degree $|S \cup S^{-1}| \le 2|S|$.
+\end{definition}
+
+\begin{lemma}[A Cayley graph is regular and vertex transitive]
+  \label{lem:cayley-vertex-transitive}
+  \uses{def:cayley-graph}
+  For every finite group $G$ and $S \subseteq G$, the graph $\Cay(G,S)$ is
+  regular of degree $d = |S \cup S^{-1}|$ and is vertex transitive: for any two
+  vertices $g, h \in G$ the left translation $x \mapsto h g^{-1} x$ is a graph
+  automorphism sending $g$ to $h$.
+\end{lemma}
+\begin{proof}
+  \uses{def:cayley-graph}
+  Each vertex $g$ is adjacent precisely to $\{ gs : s \in S \cup S^{-1}\}$,
+  which has $|S \cup S^{-1}| = d$ elements, so the graph is $d$-regular. For
+  vertex transitivity, fix $g,h$ and let $\sigma(x) = hg^{-1}x$. Then
+  $\sigma(g) = h$, and $\{x, xs\}$ is an edge iff $\{\sigma(x), \sigma(x)s\} =
+  \{hg^{-1}x, hg^{-1}xs\}$ is an edge, since $\sigma(xs) = \sigma(x)s$. Hence
+  $\sigma$ is an automorphism, and as $g,h$ were arbitrary the automorphism
+  group acts transitively on vertices.
+\end{proof}
+
+\begin{definition}[Second largest eigenvalue; normalized adjacency matrix]
+  \label{def:second-eigenvalue}
+  \uses{def:adj-matrix}
+  For a graph $H$ let $\muone[H]$ denote the second largest eigenvalue, in
+  absolute value, of the adjacency matrix $\adj_H$. If $H$ is $d$-regular, its
+  \emph{normalized adjacency matrix} is the doubly stochastic matrix
+  $\nadj_H = \tfrac1d \adj_H$, and $\nmuone[H]$ denotes the second largest
+  eigenvalue, in absolute value, of $\nadj_H$. Clearly $\nmuone[H] = \tfrac1d
+  \muone[H]$.
+\end{definition}
+
+\begin{definition}[$c$-expander]
+  \label{def:expander}
+  A graph $H$ is called a \emph{$c$-expander} if for every set of vertices $S$,
+  $|\Gnbr(S)| > c\,|S|\,(1 - |S|/|H|)$, where $\Gnbr(S)$ is the set of all
+  neighbours of $S$.
+\end{definition}
+
+% --------------------------------------------------------------------------- %
+%  The expander / spectral-gap link used (only the easy direction is needed).
+% --------------------------------------------------------------------------- %
+
+\begin{lemma}[Spectral gap forces expansion (easy direction)]
+  \label{lem:expander-eigenvalue-equiv}
+  \uses{def:expander, def:second-eigenvalue}
+  \notready
+  A regular graph $\Gamma$ of constant degree is an
+  $\varepsilon(\delta)$-expander whenever the second largest eigenvalue, in
+  absolute value, of its normalized adjacency matrix is at most $1 - \delta$.
+  (Quantitatively, a normalized second eigenvalue of $1-\delta$ yields an
+  expansion constant $\varepsilon(\delta)$.)
+\end{lemma}
+% TODO: this is the "easy direction" of the eigenvalue/expansion connection,
+% proved in [Ta] (Tanner) and [AM] (Alon--Milman); the paper only cites it. The
+% converse (hard direction) is [Al]. Reconstruct from the Alon--Milman /
+% Cheeger-type argument or cite before marking ready.
+
+\chapter{Random Cayley graphs of general groups}
+
+% --------------------------------------------------------------------------- %
+%  2.1  Proof of Theorem 1.
+% --------------------------------------------------------------------------- %
+
+\begin{lemma}[Wigner trace bound for the second eigenvalue]
+  \label{lem:wigner-trace-bound}
+  \uses{def:second-eigenvalue}
+  Let $A$ be a real symmetric matrix with eigenvalues
+  $|\mu_0| \ge |\mu_1| \ge \dots \ge |\mu_{n-1}|$. Then for every natural number
+  $m$,
+  \[
+    |\mu_1| \le \big(\Tr(A^{2m}) - \mu_0^{2m}\big)^{1/2m}.
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{lem:trace-pow-eig}
+  By Lemma~\ref{lem:trace-pow-eig}, $\Tr(A^{2m}) = \sum_{i=0}^{n-1}\mu_i^{2m}$.
+  All terms are nonnegative (even powers), so
+  $\Tr(A^{2m}) - \mu_0^{2m} = \sum_{i \ge 1}\mu_i^{2m} \ge \mu_1^{2m}$. Taking
+  $2m$-th roots gives $|\mu_1| \le (\Tr(A^{2m}) - \mu_0^{2m})^{1/2m}$.
+\end{proof}
+
+\begin{definition}[Closed-walk probability $P_{2m}$]
+  \label{def:closed-walk-prob}
+  \uses{def:cayley-graph}
+  For the random Cayley graph $\Cay(G,S)$ with $|S| = c\log_2 n$ elements chosen
+  randomly in $G$, let $P_{2m}$ denote the probability that a fixed walk of
+  length $2m$ in the graph (starting at a given vertex, with prescribed sequence
+  of generator-steps) is closed, i.e.\ returns to its start.
+\end{definition}
+
+\begin{lemma}[Expectation bound via traces]
+  \label{lem:expected-mu-bound}
+  \uses{lem:wigner-trace-bound, lem:cayley-vertex-transitive, def:closed-walk-prob, def:second-eigenvalue}
+  Over the probability space of all normalized adjacency matrices of Cayley
+  graphs $\Cay(G,S)$ with $|S| = c\log_2 n$ random elements, for every positive
+  integer $m$, writing $n = |G|$,
+  \[
+    \E(|\nmuone|) \le \big(n\,\E(P_{2m}) - 1\big)^{1/2m}. \tag{1}
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{lem:wigner-trace-bound, lem:jensen, lem:cayley-vertex-transitive, def:closed-walk-prob}
+  Let $A = \nadj$ be the normalized adjacency matrix; its largest eigenvalue is
+  $\mu_0 = 1$ (the all-ones eigenvector). By Lemma~\ref{lem:wigner-trace-bound},
+  $|\nmuone| \le (\Tr(A^{2m}) - 1)^{1/2m}$. Since $y \mapsto y^{1/2m}$ is
+  concave, Jensen's inequality (Lemma~\ref{lem:jensen}) gives
+  $\E(|\nmuone|) \le (\E(\Tr(A^{2m})) - 1)^{1/2m}$. The diagonal entry
+  $(A^{2m})_{gg}$ is the probability that a length-$2m$ walk from $g$ is closed;
+  by vertex transitivity (Lemma~\ref{lem:cayley-vertex-transitive}) this is the
+  same for every $g$, so $\Tr(A^{2m}) = n\,P_{2m}$ and
+  $\E(\Tr(A^{2m})) = n\,\E(P_{2m})$. Substituting yields~(1).
+\end{proof}
+
+\begin{lemma}[Fact: identity-sequence probability in a free monoid]
+  \label{lem:identity-sequence}
+  \notready
+  Let $U$ be a random word of length $2t$ in the free monoid $M_{2d}$ generated
+  by $d$ letters and their inverses. Then
+  \[
+    (2/d)^{t} \ge \Prob(U \text{ is an identity sequence}),
+  \]
+  where an identity sequence is one that reduces to the empty word in the free
+  group $F_d$.
+\end{lemma}
+% TODO: stated as a "simple fact whose proof can be found in [BS] or [Lu] 4.5";
+% the paper gives no proof. Reconstruct (Catalan-number count of reductions) or
+% cite before marking ready.
+
+\begin{lemma}[Bound on $\Pr(A)$: short reduced words]
+  \label{lem:prA-bound}
+  \uses{lem:identity-sequence, def:closed-walk-prob}
+  In the dynamic process producing the random walk, let $A$ be the event that
+  the reduced word $W$ in the free group $F_{c\log_2 n}$ has length
+  $l(W) < l(w) := 2m(1 - \ln\ln 2m / \ln 2m)$. Then
+  \[
+    \Prob(A) \le 2^{2m}\,(2/c\log_2 n)^{\,m\ln\ln 2m / \ln 2m}. \tag{3}
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{lem:identity-sequence}
+  The number of ways to choose which positions of the $2m$-letter word form the
+  sub-block that reduces to the identity is at most $2^{2m}$. This block has
+  length at least $2m\ln\ln 2m / \ln 2m$, and with $d = c\log_2 n$ distinct
+  letters the probability that such a block is an identity sequence is, by
+  Lemma~\ref{lem:identity-sequence}, at most $(2/d)^{(\text{block length})/2}
+  = (2/c\log_2 n)^{m\ln\ln 2m / \ln 2m}$. Multiplying the count of placements by
+  this probability gives~(3).
+\end{proof}
+
+\begin{lemma}[Bound on $\Pr(B)$: no singleton letter]
+  \label{lem:prB-bound}
+  \uses{def:closed-walk-prob}
+  Let $B$ be the event that the reduced word $W$ has length at least
+  $2m(1 - \ln\ln 2m / \ln 2m)$ and no letter appears exactly once in it. Then,
+  writing $l(W)$ for the reduced length,
+  \[
+    \Prob(B) \le 2^{l(W)}\,(l(W)/2c\log_2 n)^{l(W)/2}
+            \le 2^{l(W)}\,(m/c\log_2 n)^{l(W)/2}, \tag{4}
+  \]
+  where $l(W) \ge 2m(1 - \ln\ln 2m / \ln 2m)$.
+\end{lemma}
+\begin{proof}
+  \uses{def:closed-walk-prob}
+  If no letter appears exactly once then the number of distinct letters in $W$
+  is at most $l(W)/2$. Expose the letters of $W$ in two stages: first the
+  first occurrence of each distinct letter (at most $2^{l(W)}$ ways to place
+  this sub-block of size at most $l(W)/2$), then the remaining occurrences. Each
+  remaining letter must coincide with one already exposed, an event of
+  probability at most $l(W)/2c\log_2 n$, and there are at least $l(W)/2$ such
+  remaining letters. Hence $\Prob(B) \le 2^{l(W)}(l(W)/2c\log_2 n)^{l(W)/2}$.
+  Since $l(W) \le 2m$, the second inequality follows.
+\end{proof}
+
+\begin{lemma}[Bound on $\Pr(C)$: collapse after assignment]
+  \label{lem:prC-bound}
+  \uses{def:closed-walk-prob}
+  Let $C$ be the event that neither $A$ nor $B$ holds, yet after assigning to
+  each letter a random element of $G$ the reduced word evaluates to the identity.
+  Then
+  \[
+    \Prob(C) \le \frac{1}{n - 2m} = \frac1n + O(m/n^2). \tag{5}
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{def:closed-walk-prob}
+  Since neither $A$ nor $B$ holds, the reduced word has a letter $\tau$ that
+  appears exactly once. Expose the assignments of all letters except $\tau$;
+  write $x(\tau)$ for the (still random) assignment of $\tau$. The event that
+  the word evaluates to the identity becomes a single equation
+  $g\,x(\tau)\,h = 1$ with $g,h \in G$ known. As $x(\tau)$ is uniform over the at
+  least $n - 2m$ group elements not yet used, this equation has probability at
+  most $1/(n-2m) = 1/n + O(m/n^2)$.
+\end{proof}
+
+\begin{lemma}[Lemma 1: bound on $\E(P_{2m})$]
+  \label{lem:lemma1}
+  \uses{lem:prA-bound, lem:prB-bound, lem:prC-bound, def:closed-walk-prob}
+  With $l(w) = 2m(1 - \ln\ln 2m / \ln 2m)$,
+  \[
+    \E(P_{2m}) \le 2^{2m}\big(2/c\log_2 n\big)^{m\ln\ln 2m/\ln 2m}
+      + 2^{l(w)}\big(m/c\log_2 n\big)^{l(w)/2}
+      + \frac1n + O(m/n^2).
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{lem:prA-bound, lem:prB-bound, lem:prC-bound, lem:identity-sequence}
+  Following [BS], realize the random pair (set $S$, walk) by a dynamic process:
+  (a) choose a random word of length $2m$ in the free monoid $M_{2c\log_2 n}$;
+  (b) reduce it in the free group $F_{c\log_2 n}$; (c) assign to each letter a
+  random element of $G$. This is equivalent to first choosing the random Cayley
+  graph with $|S| = c\log_2 n$ and then a random walk of length $2m$. The event
+  ``the walk of length $2m$ is closed'' is contained in $A \cup B \cup C$, so
+  \[
+    \E(P_{2m}) \le \Prob(A) + \Prob(B) + \Prob(C). \tag{2}
+  \]
+  Substituting the bounds (3), (4), (5) from
+  Lemmas~\ref{lem:prA-bound}, \ref{lem:prB-bound}, \ref{lem:prC-bound} gives the
+  claim. (When the right-hand side of (4) is at most $1$ it is monotone
+  decreasing in $l(W)$, so its maximum is at the minimal $l(W) = l(w)$;
+  otherwise the estimate is trivial.)
+\end{proof}
+
+\begin{theorem}[Theorem 1: random Cayley graphs are spectral expanders]
+  \label{thm:theorem1}
+  \uses{lem:expected-mu-bound, lem:lemma1, def:second-eigenvalue, def:cayley-graph}
+  For every $1 > \delta > 0$ there is a $c(\delta) > 0$ such that the following
+  holds. Let $G$ be a group of order $n$ and let $S$ be a set of
+  $c(\delta)\log_2 n$ random elements of $G$. Then
+  \[
+    \E\big(|\nmuone[\Cay(G,S)]|\big) < 1 - \delta.
+  \]
+  Moreover for $0 < \delta < 1 - \tfrac1e$ one may take
+  $c(\delta) \le (1 + o(1))\,2e^4\ln 2 / [(1-\delta)e - 1]^2$.
+\end{theorem}
+\begin{proof}
+  \uses{lem:expected-mu-bound, lem:lemma1}
+  Combine Lemma~\ref{lem:lemma1} with the trace bound (1) of
+  Lemma~\ref{lem:expected-mu-bound}:
+  \begin{align*}
+    \E(|\nmuone|)
+      &\le \big(n\,\E(P_{2m}) - 1\big)^{1/2m}
+       \le \big(n(\Prob(A)+\Prob(B)+\Prob(C)) - 1\big)^{1/2m} \\
+      &\le n^{1/2m}\Big(2\big(\tfrac{2}{c\log_2 n}\big)^{\frac12 \ln\ln 2m/\ln 2m}
+            + 2^{1-o(1)}\big(\tfrac{m}{c\log_2 n}\big)^{\frac12 - o(1)}\Big)
+            + (O(m/n))^{1/2m}.
+  \end{align*}
+  Set $2m \sim \ln n / b$ for an absolute constant $b$. For large $n$ the upper
+  bound becomes
+  \[
+    (1 + o(1))\Big(e^{b}\big(\tfrac{\ln 4}{cb}\big)^{1/2} + \tfrac{1}{e^{b}}\Big).
+  \]
+  For every fixed $1 > \delta > 0$ one can choose $b$ and $c$ so this is smaller
+  than $1 - \delta$; in particular if $\delta < 1 - \tfrac1e$ then $b = 1$ and
+  $c \ge (1+o(1))\,2e^4\ln 2 / [(1-\delta)e - 1]^2$ suffice, giving
+  $\E|\nmuone| \le 1 - \delta$.
+\end{proof}
+
+\begin{proposition}[Proposition 1: matching-coloured complete graph version]
+  \label{prop:prop1}
+  \uses{thm:theorem1, def:second-eigenvalue}
+  \notready
+  For every $1 > \delta > 0$ there is a $c(\delta) > 0$ such that the following
+  holds. Let $K$ be a complete graph on $n$ vertices whose edges are coloured by
+  $n - 1$ colours so that each colour class is a perfect matching. Let $H$ be the
+  subgraph of $K$ consisting of all edges whose colours belong to a randomly
+  chosen set of $c(\delta)\log_2 n$ colours. Then
+  $\E(|\muone[H]|) < (1-\delta)\,c(\delta)\log_2 n$.
+\end{proposition}
+% TODO: the paper states this as a remark, "the group structure is not essential
+% ... it is easy to modify [the proof of Theorem 1]", with the detailed proof
+% omitted. Reconstruct by adapting the trace argument before marking ready.
+
+% --------------------------------------------------------------------------- %
+%  2.2  Proof of Corollary 1.
+% --------------------------------------------------------------------------- %
+
+\begin{lemma}[Lemma 2: concentration of the second eigenvalue]
+  \label{lem:lemma2}
+  \uses{def:cayley-graph, def:second-eigenvalue}
+  Let $G$ be a group and let $S$ be a random set of $d$ elements in $G$. Put
+  $\muone = \muone[\Cay(G,S)]$. Then for every $c > 0$,
+  \[
+    \Prob\big(|\muone - \E\muone| \ge 2cd^{1/2}\big) \le 4\,e^{-c^2/2}.
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{lem:azuma, lem:cayley-vertex-transitive}
+  Choose the elements $x_1, \dots, x_d$ of $S$ one by one in order of index, and
+  let $d = \lambda_0 \ge \lambda_1 \ge \dots \ge \lambda_{n-1}$ be the
+  eigenvalues of $\Cay(G,S)$. Fix $j$ with $1 \le j \le n-1$ and let
+  $F_i^{j} = \E(\lambda_j(\Cay(G,S)) \mid x_1, \dots, x_i)$ be the conditional
+  expectation given the first $i$ generators. Then $(F_0^{j}, \dots, F_d^{j})$ is
+  a martingale, and by the variational (min--max) characterization of the $j$-th
+  eigenvalue, changing a single generator moves $\lambda_j$ by at most $2$, so
+  $|F_{i+1}^{j} - F_i^{j}| \le 2$. Azuma's inequality
+  (Lemma~\ref{lem:azuma}) gives
+  $\Prob(|\lambda_j - \E\lambda_j| \ge 2cd^{1/2}) =
+   \Prob(|F_d^{j} - F_0^{j}| \ge 2cd^{1/2}) \le 2e^{-c^2/2}$.
+  The second largest eigenvalue in absolute value is either $\lambda_1$ or
+  $\lambda_{n-1}$; applying the bound to both and taking a union bound yields
+  the factor $4$.
+\end{proof}
+
+\begin{corollary}[Corollary 1: almost every random Cayley graph is an expander]
+  \label{cor:corollary1}
+  \uses{thm:theorem1, lem:lemma2, lem:expander-eigenvalue-equiv, def:expander}
+  For every $1 > \varepsilon > 0$ there exists a $c(\varepsilon) > 0$ such that
+  the following holds. Let $G$ be a group of order $n$ and let $S$ be a random
+  set of $c(\varepsilon)\log_2 n$ elements of $G$. Then the Cayley graph
+  $\Cay(G,S)$ is an $\varepsilon$-expander almost surely, i.e.\ the probability
+  that it is such an expander tends to $1$ as $n \to \infty$.
+\end{corollary}
+\begin{proof}
+  \uses{thm:theorem1, lem:lemma2, lem:expander-eigenvalue-equiv}
+  By Theorem~\ref{thm:theorem1}, with the appropriate $c$, the expected
+  normalized second eigenvalue is at most $1 - \delta$ for a $\delta = \delta(
+  \varepsilon)$. By the concentration Lemma~\ref{lem:lemma2}, $\nmuone$ deviates
+  from its mean by more than $o(1)$ with probability tending to $0$; hence almost
+  surely $\nmuone[\Cay(G,S)] \le 1 - \delta + o(1) \le 1 - \delta/2$. The easy
+  direction of the eigenvalue/expansion connection
+  (Lemma~\ref{lem:expander-eigenvalue-equiv}) then makes $\Cay(G,S)$ an
+  $\varepsilon$-expander almost surely.
+\end{proof}
+
+\chapter{Cayley graphs of abelian groups}
+
+% --------------------------------------------------------------------------- %
+%  3.1  Random Cayley graphs of abelian groups.
+% --------------------------------------------------------------------------- %
+
+\begin{lemma}[Eigenvalues of an abelian Cayley graph are character sums]
+  \label{lem:abelian-eigenvalues-characters}
+  \uses{def:cayley-graph, def:character, def:second-eigenvalue}
+  Let $G$ be a finite abelian group and $S \subseteq G$. The eigenvalues of the
+  adjacency matrix of $\Cay(G,S)$ are exactly the $|G|$ quantities
+  \[
+    \sum_{s \in S \cup S^{-1}} \chi(s),
+  \]
+  one for each character $\chi$ of $G$.
+\end{lemma}
+\begin{proof}
+  \uses{def:character, def:cayley-graph}
+  For a character $\chi$, regard the vector $v_\chi = (\chi(g))_{g \in G}$. The
+  $g$-entry of $\adj v_\chi$ is $\sum_{s \in S \cup S^{-1}} \chi(gs) =
+  \chi(g)\sum_{s \in S\cup S^{-1}} \chi(s)$, since $\chi$ is a homomorphism.
+  Hence $v_\chi$ is an eigenvector with eigenvalue
+  $\sum_{s \in S \cup S^{-1}}\chi(s)$. The $|G|$ characters give an orthogonal
+  basis of $\mathbb{C}^{G}$, so these are all the eigenvalues. (This is the
+  standard fact recorded e.g.\ in Lov\'asz's problem book.)
+\end{proof}
+
+\begin{lemma}[Sphere-packing (Hamming) bound]
+  \label{lem:sphere-packing}
+  A binary linear code of length $l$ and minimum distance at least $\delta l/2$,
+  with $2^{m}$ codewords, satisfies the volume bound
+  \[
+    \sum_{j < \delta l / 4} \binom{l}{j}\, 2^{m} < 2^{l}.
+  \]
+\end{lemma}
+\begin{proof}
+  The Hamming balls of radius $\lfloor (\delta l/2 - 1)/2 \rfloor \ge
+  \delta l/4 - 1$ centred at the $2^{m}$ codewords are pairwise disjoint, since
+  the minimum distance exceeds twice that radius. Each ball contains
+  $\sum_{j \le \text{radius}} \binom{l}{j}$ words of $\Zt^{l}$, and the disjoint
+  union has at most $2^{l}$ words. Hence
+  $\sum_{j < \delta l/4}\binom{l}{j}2^{m} < 2^{l}$.
+\end{proof}
+
+\begin{proposition}[Proposition 2: lower bound on $|S|$ for $\Zt^{m}$]
+  \label{prop:prop2}
+  \uses{lem:abelian-eigenvalues-characters, lem:sphere-packing, def:second-eigenvalue}
+  Suppose $G = \Zt^{m}$ and $\Cay(G,S)$ is a Cayley graph of $G$ whose second
+  largest eigenvalue in absolute value is at most $(1-\delta)|S|$. Then
+  \[
+    |S| \ge \big(1 + \Omega(\delta\log(1/\delta))\big)\,m.
+  \]
+\end{proposition}
+\begin{proof}
+  \uses{lem:abelian-eigenvalues-characters, lem:sphere-packing}
+  By Lemma~\ref{lem:abelian-eigenvalues-characters} the eigenvalues are the
+  character sums $\sum_{s \in S\cup S^{-1}}\chi(s)$. For $G = \Zt^{m}$, form the
+  $m \times |S|$ binary matrix $B = (b_{ij})$ whose columns are the elements of
+  $S$. Put $l = |S|$ and let $U \subseteq \Zt^{l}$ be the subspace spanned by the
+  rows of $B$. For $u \in U$ let $e(u)$ be the number of $0$-entries minus the
+  number of $1$-entries of $u$. Then $\{e(u) : u \in U\}$ is exactly the set of
+  eigenvalues. Therefore $|\muone| < (1-\delta)l$ iff the Hamming weight of every
+  nonzero codeword $u$ lies in $[\delta l/2,\ l - \delta l/2]$; in particular the
+  code generated by the rows of $B$ has minimum distance at least $\delta l/2$.
+  By the sphere-packing bound (Lemma~\ref{lem:sphere-packing}),
+  $\sum_{j < \delta l/4}\binom{l}{j}2^{m} < 2^{l}$. Taking logarithms and using
+  the entropy estimate $\sum_{j<\delta l/4}\binom{l}{j} \le 2^{H(\delta/4)l}$
+  gives $m \le (1 - H(\delta/4))l = (1 - \Omega(\delta\log(1/\delta)))l$, i.e.\
+  $l \ge (1 + \Omega(\delta\log(1/\delta)))m$.
+\end{proof}
+
+\begin{lemma}[Character of a random element is bounded away from $2$]
+  \label{lem:char-sigma-bound}
+  \uses{def:character, def:abelian-structure}
+  Let $A$ be a finite abelian group, $\chi$ a fixed nontrivial character, and
+  $\sigma$ a uniformly random element of $A$. Then
+  \[
+    \Prob\big(\chi(\sigma + \sigma^{-1}) \ge 1.8\big) \le \tfrac12
+    \qquad\text{and}\qquad
+    \Prob\big(\chi(\sigma + \sigma^{-1}) \le -1.8\big) \le \tfrac12 .
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{def:character, def:abelian-structure}
+  Here $\chi(\sigma + \sigma^{-1})$ abbreviates $\chi(\sigma) + \chi(\sigma^{-1})
+  = 2\,\mathrm{Re}\,\chi(\sigma)$. As $\chi$ is nontrivial, its values are
+  roots of unity whose real parts average to $0$ over $\sigma$. The constant
+  $1.8$ is not optimal; one only needs an absolute constant strictly smaller
+  than $2$. (If $\sigma$ has order $2$ then $\sigma = \sigma^{-1}$ and
+  $\chi(\sigma) \in \{-1, 1\}$, so $\chi(\sigma + \sigma^{-1}) = 2\chi(\sigma)
+  \in \{-2, 2\}$ is handled separately, still leaving each tail probability at
+  most $1/2$.) A direct check on each cyclic summand
+  (Definition~\ref{def:abelian-structure}) gives the two tail bounds.
+\end{proof}
+
+\begin{theorem}[Theorem 2: sharp $(1+\varepsilon)\log_2 n$ for abelian groups]
+  \label{thm:theorem2}
+  \uses{lem:abelian-eigenvalues-characters, lem:char-sigma-bound, def:abelian-structure, def:second-eigenvalue}
+  For each small $\delta > 0$ there exists an
+  $\varepsilon = O(\delta\log(1/\delta))$ such that for any abelian group $A$ of
+  order $n$ the Cayley graph $\Cay(A,S)$ of $A$ with respect to a (multi-)subset
+  $S$ of $(1+\varepsilon)\log_2 n$ random elements (not necessarily distinct)
+  satisfies $|\nmuone[\Cay(A,S)]| \le 1 - \delta$ almost surely (with probability
+  tending to $1$ as $n \to \infty$).
+\end{theorem}
+\begin{proof}
+  \uses{lem:abelian-eigenvalues-characters, lem:char-sigma-bound, def:abelian-structure}
+  Write $A = \mathbb{Z}_{p_1}\oplus\dots\oplus\mathbb{Z}_{p_k}$
+  (Definition~\ref{def:abelian-structure}). Fix a nontrivial character $\chi$.
+  By Lemma~\ref{lem:char-sigma-bound}, for a random $\sigma$ both
+  $\Prob(\chi(\sigma+\sigma^{-1}) \ge 1.8) \le 1/2$ and
+  $\Prob(\chi(\sigma+\sigma^{-1}) \le -1.8) \le 1/2$. The eigenvalue attached to
+  $\chi$ is $\sum_{s \in S \cup S^{-1}}\chi(s)$
+  (Lemma~\ref{lem:abelian-eigenvalues-characters}), a sum of
+  $(1+\varepsilon)\log_2 n$ independent contributions. By a Chernoff-type count,
+  for an absolute constant $c$,
+  \[
+    \Prob(|\mu^{*}| \ge 1 - \delta)
+      \le 2\binom{(1+\varepsilon)\log_2 n}{c\delta(1+\varepsilon)\log_2 n}
+            (1/2)^{(1 - c\delta)(1+\varepsilon)\log_2 n}.
+  \]
+  There are $n - 1$ nontrivial characters, so by the union bound the probability
+  that some normalized eigenvalue exceeds $1 - \delta$ in absolute value is at
+  most
+  \[
+    2(n-1)\binom{(1+\varepsilon)\log_2 n}{c\delta(1+\varepsilon)\log_2 n}
+            (1/2)^{(1 - c\delta)(1+\varepsilon)\log_2 n},
+  \]
+  which tends to $0$ provided $\varepsilon \ge c'\delta\log(1/\delta)$ for an
+  appropriate $c' = c'(c)$. This completes the proof.
+\end{proof}
+
+\begin{proposition}[Proposition 3: diameter lower bound on $|S|$ for abelian groups]
+  \label{prop:prop3}
+  \uses{def:cayley-graph, def:expander}
+  For every fixed $\delta > 0$ there is a constant $c = c(\delta) > 0$ such that
+  the following holds: if $A$ is an abelian group of order $n$ and $\Cay(A,S)$ is
+  a $\delta$-expander, then $|S| \ge c\log_2 n$.
+\end{proposition}
+\begin{proof}
+  \uses{def:cayley-graph, def:expander}
+  Put $|S| = d$ and let $D$ be the diameter of $\Cay(A,S)$. Since $A$ is abelian,
+  every element of $A$ is a product $s_1^{a_1} s_2^{a_2}\cdots s_d^{a_d}$ with
+  $S = \{s_1,\dots,s_d\}$, each $a_i$ an integer and $\sum_{i=1}^{d}|a_i| \le D$.
+  The number of such products is at most $2^{d}\binom{D+d}{d}$: there are at most
+  $\binom{D+d}{d}$ ways to choose the absolute values $|a_i|$ with
+  $\sum |a_i| \le D$, and at most $2^{d}$ sign assignments. Hence
+  \[
+    n \le 2^{d}\binom{D + d}{d}. \tag{6}
+  \]
+  If $\Cay(A,S)$ is a $\delta$-expander then its diameter satisfies
+  $D \le c'\log_2 n$ for some $c' = c'(\delta)$. Combined with (6) this forces
+  $d \ge c\log_2 n$ for an appropriate $c = c(c')$.
+\end{proof}
+
+\begin{proposition}[Claim: linear groups need logarithmically many generators]
+  \label{prop:gl-expander}
+  \uses{prop:prop3, def:expander, def:cayley-graph}
+  For every fixed $n$ and $\delta > 0$ there is a constant $c = c(\delta, n)$
+  such that if $G_q = \mathrm{GL}(n,q)$, $S_q \subseteq G_q$, and the family of
+  Cayley graphs $\{\Cay(G_q, S_q)\}$ is a family of $\delta$-expanders, then
+  $|S_q| \ge c\log|G_q|$.
+\end{proposition}
+\begin{proof}
+  \uses{prop:prop3}
+  If $G$ is a group, $S \subseteq G$ and $H$ is a factor (quotient) of $G$, then
+  the diameter of the Cayley graph of $H$ with respect to the image set $S'$ is
+  at most that of $\Cay(G,S)$. Thus if $G$ has an abelian factor of order $q$,
+  the bound (6) of Proposition~\ref{prop:prop3} applied to that factor gives
+  $2^{d}\binom{D+d}{d} \ge q$ with $d = |S|$. Hence if $\Cay(G,S)$ is a
+  $\delta$-expander and $q \ge |G|^{\epsilon}$ for some fixed $\epsilon > 0$,
+  then $|S| \ge c(\delta,\epsilon)\log|G|$. For $G_q = \mathrm{GL}(n,q)$ the
+  quotient $\mathrm{GL}(n,q)/\mathrm{SL}(n,q) \cong \mathbb{Z}_{q-1}$ is an
+  abelian factor of order $q - 1 = |G_q|^{\Omega(1)}$ (for fixed $n$), so the
+  claim follows.
+\end{proof}
+
+% --------------------------------------------------------------------------- %
+%  3.2  Some explicit constructions.
+% --------------------------------------------------------------------------- %
+
+\begin{definition}[$[l,m,\varepsilon]$-code]
+  \label{def:lmeps-code}
+  An $[l,m,\varepsilon]$-code is a binary linear code of length $l$ and dimension
+  $m$ in which the Hamming weight of each nontrivial codeword lies between
+  $\tfrac{1-\varepsilon}{2}\,l$ and $\tfrac{1+\varepsilon}{2}\,l$.
+\end{definition}
+
+\begin{lemma}[Eigenvalue/code-weight equivalence for $\Zt^{m}$]
+  \label{lem:eigenvalue-code-equiv}
+  \uses{lem:abelian-eigenvalues-characters, def:lmeps-code, def:second-eigenvalue, def:cayley-graph}
+  For $S \subseteq \Zt^{m}$ let $B = B(S)$ be the $m \times |S|$ binary matrix
+  whose columns are the elements of $S$, and put $|S| = l$. The Cayley graph
+  $H = \Cay(\Zt^{m}, S)$ satisfies $|\muone[H]| \le \varepsilon l$ if and only if
+  the Hamming weight of every nonzero codeword of the linear code generated by
+  the rows of $B$ lies between $\tfrac{1-\varepsilon}{2}\,l$ and
+  $\tfrac{1+\varepsilon}{2}\,l$; equivalently, iff that code is an
+  $[l,m,\varepsilon]$-code.
+\end{lemma}
+\begin{proof}
+  \uses{lem:abelian-eigenvalues-characters, def:lmeps-code}
+  By Lemma~\ref{lem:abelian-eigenvalues-characters} the eigenvalues of $H$ are
+  the numbers $e(u) = \#\{0\text{-entries}\} - \#\{1\text{-entries}\}$ of the
+  codewords $u$ of the row code, which equals $l - 2\,\wt(u)$. Hence
+  $|e(u)| \le \varepsilon l$ iff $\wt(u) \in [\tfrac{1-\varepsilon}{2}l,
+  \tfrac{1+\varepsilon}{2}l]$. The second largest $|e(u)|$ over nonzero $u$ is
+  $\muone[H]$, giving the stated equivalence with
+  Definition~\ref{def:lmeps-code}.
+\end{proof}
+
+\begin{lemma}[General spectral lower bound for regular graphs]
+  \label{lem:eigenvalue-lower-bound-general}
+  \uses{def:second-eigenvalue}
+  \notready
+  The second largest eigenvalue, in absolute value, of any regular graph with
+  $n$ vertices and degree $d$ is at least
+  $2\sqrt{d-1}\,\big(1 - O(\log^2 d / \log^2 n)\big)$, and this estimate is
+  essentially optimal (achieved by Ramanujan graphs and by random regular
+  graphs).
+\end{lemma}
+% TODO: cited as background from [Al], [Ni], [Fr1], [Ka] (Alon, Nilli, Friedman,
+% Kahale); no proof in this paper. Cite or reconstruct before marking ready.
+
+\begin{proposition}[Proposition 4: explicit expander from Justesen-type codes]
+  \label{prop:prop4}
+  \uses{lem:eigenvalue-code-equiv, def:lmeps-code, def:cayley-graph}
+  \notready
+  There exists an absolute constant $c > 0$ such that for every fixed
+  $\varepsilon > 0$ and every $m$ one can describe explicitly a Cayley graph
+  $H = \Cay(\Zt^{m}, S_m)$ with
+  $|S_m| \le c\,\tfrac{1}{\varepsilon^{3}}\,m\ \big(= c\,\tfrac{1}{\varepsilon^{3}}
+  \log_2 |\Zt^{m}|\big)$, so that $|\muone[H]| \le \varepsilon|S_m|$.
+\end{proposition}
+% TODO: obtained in [ABNNR] by combining the Justesen construction with explicit
+% Ramanujan graphs to get explicit [l,m,eps]-codes with l = O(m/eps); the paper
+% gives no self-contained proof. Cite or reconstruct before marking ready.
+
+\begin{proposition}[Proposition 5: explicit quadratic-residue construction]
+  \label{prop:prop5}
+  \uses{lem:eigenvalue-code-equiv, def:lmeps-code, def:cayley-graph}
+  \notready
+  There exists an absolute constant $c > 0$ such that for every $\varepsilon > 0$
+  and every $m$ one can describe explicitly a Cayley graph
+  $H = \Cay(\Zt^{m}, S_m)$ with $l = |S_m| \le c\,m^2/\varepsilon^2$, so that
+  $|\muone[H]| \le \varepsilon|S_m| = O(\sqrt{lm})$. Explicitly: take a prime
+  $l \ge (2m/\varepsilon + 1)^2$ and define $B = (b_{ij})$ for $1 \le i \le m$,
+  $1 \le j \le l$ by $b_{ij} = 0$ if $i - j$ is a quadratic residue in the field
+  $\mathbb{Z}_l$, and $b_{ij} = 1$ otherwise.
+\end{proposition}
+% TODO: the generating matrix is given explicitly, but the eigenvalue bound is
+% the [AGHP] estimate on the quadratic-residue (Paley-type) construction, which
+% the paper does not prove here. Cite or reconstruct before marking ready.
+
+\begin{proposition}[Proposition 6: explicit construction via the MRRW bound]
+  \label{prop:prop6}
+  \uses{lem:eigenvalue-code-equiv, def:lmeps-code, def:cayley-graph}
+  \notready
+  There exists an absolute constant $c > 0$ such that for every
+  $1 > \varepsilon > 0$ and every $m$ there exists a Cayley graph
+  $H = \Cay(\Zt^{m}, S_m)$ with $l = |S_m| \le c\,m/\varepsilon^2$, so that
+  $|\muone[H]| \le \varepsilon|S_m| = O(\sqrt{l\sqrt{m}})$.
+\end{proposition}
+% TODO: derived from the McEliece-Rodemich-Rumsey-Welch bound ([MS], p.559),
+% extended to small eps as in [AGHP]; no self-contained proof here.
+
+\begin{proposition}[Proposition 7: spectral lower bound for $\Zt^{m}$ Cayley graphs]
+  \label{prop:prop7}
+  \uses{lem:eigenvalue-code-equiv, def:second-eigenvalue, def:cayley-graph}
+  \notready
+  There exists an absolute constant $\gamma > 0$ such that for every
+  $m \le l \le 2^{\gamma m}$, the second largest eigenvalue of any Cayley graph
+  $\Cay(\Zt^{m}, S)$ with $|S| = l$ is at least
+  $\Omega(\sqrt{lm}/\sqrt{\log l})$. In particular, for large $m$ no such graph
+  $H$ with degree a small power of the number of vertices can be Ramanujan
+  (i.e.\ satisfy $|\muone[H]| \le 2\sqrt{l-1}$).
+\end{proposition}
+% TODO: lower bound coming from the MRRW upper bound on code weights ([MS]); the
+% paper states it without a self-contained proof. Cite or reconstruct.
+
+\begin{proposition}[Proposition 6': random abelian Cayley graphs]
+  \label{prop:prop6prime}
+  \uses{lem:abelian-eigenvalues-characters, def:second-eigenvalue, def:cayley-graph}
+  \notready
+  For every abelian group $G$ of order $n$ and for every $l$, if $S$ is a set of
+  $l$ random members of $G$ then almost surely
+  $|\muone[\Cay(G,S)]| \le O(\sqrt{l\sqrt{\log n}})$.
+\end{proposition}
+% TODO: generalization of Prop 6 to arbitrary abelian groups; the eigenvalue
+% sum over a nontrivial character is a sum of l independent bounded variables,
+% and the bound follows from standard concentration estimates ([AS]). The paper
+% only sketches this. Reconstruct the concentration argument before marking ready.
+
+\begin{proposition}[Proposition 7': spectral lower bound for abelian Cayley graphs]
+  \label{prop:prop7prime}
+  \uses{lem:abelian-eigenvalues-characters, def:second-eigenvalue, def:cayley-graph}
+  For every abelian group $G$ of order $n$ and for every
+  $l = \Omega(\log n / \log\log n)$, if $S$ is an arbitrary set of $l$ members of
+  $G$ then
+  \[
+    |\muone[\Cay(G,S)]| \ge \Omega\!\Big(\sqrt{l}\,\sqrt{\tfrac{\log n}{\log l}}\Big).
+  \]
+\end{proposition}
+\begin{proof}
+  \uses{lem:abelian-eigenvalues-characters, def:second-eigenvalue, lem:trace-pow-eig}
+  Let $n$ be the number of vertices. Suppose $l \ge 2m$ and count the closed
+  walks of length $2m$ in $\Cay(G,S)$. Their number is at least $n$ times the
+  number of words of length $2m$ made of a single appearance of $x_i$ and a
+  single appearance of $x_i^{-1}$ for $m$ distinct members $x_i$ of $S$:
+  \[
+    n\,\frac{(2m)!}{2^{m} m!}\,l(l-1)\cdots(l-m+1) \ge n\Big(\tfrac{ml}{4}\Big)^{m},
+  \]
+  where $\frac{(2m)!}{2^{m}m!}$ counts the ways to split a length-$2m$ sequence
+  into $m$ pairs (each pair the occurrence of some $x_i$ and $x_i^{-1}$) and
+  $l(l-1)\cdots(l-m+1)$ lower-bounds the choices of the elements $x_i$. The
+  number of closed walks equals $\Tr(\adj^{2m}) = \sum_i \lambda_i^{2m}
+  \le \lambda_0^{2m} + (n-1)\muone^{2m}$ with $\lambda_0 = 2l$ (the degree,
+  counting $S \cup S^{-1}$). Hence
+  \[
+    |\muone[\Cay(G,S)]| \ge \Big(\frac{n(ml/4)^{m} - (2l)^{2m}}{n-1}\Big)^{1/2m}.
+  \]
+  Taking $2m \sim \log n / \log 2l$ (which is at most $l$ provided
+  $l \ge c\log n/\log\log n$) yields
+  $|\muone| \ge \Omega(\sqrt{l}\,\sqrt{\log n / \log l})$.
+\end{proof}

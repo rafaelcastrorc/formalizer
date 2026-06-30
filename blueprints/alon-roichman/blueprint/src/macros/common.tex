@@ -1,0 +1,33 @@
+% In this file you should put all LaTeX macros and settings to be used both by
+% the pdf version and the web version.
+% This should be most of your macros.
+
+% The theorem-like environments defined below are those that appear by default
+% in the dependency graph. See the README of leanblueprint if you need help to
+% customize this.
+% The configuration below use the theorem counter for all those environments
+% (this is what the [theorem] arguments mean) and never resets it.
+% If you want for instance to number them within chapters then you can add
+% [chapter] at the end of the next line.
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{fact}[theorem]{Fact}
+\newtheorem{claim}[theorem]{Claim}
+
+% ---- Shared notation for the Alon--Roichman blueprint ----------------------
+\newcommand{\Cay}{X}                                  % Cayley graph X(G,S)
+\newcommand{\Gnbr}{\Gamma}                            % neighbourhood
+\newcommand{\adj}{A}                                  % adjacency matrix
+\newcommand{\nadj}{A^{*}}                             % normalized adjacency matrix
+\newcommand{\muone}{\mu_{1}}                          % 2nd largest |eigenvalue|
+\newcommand{\nmuone}{\mu_{1}^{*}}                     % normalized version
+\newcommand{\Tr}{\operatorname{Tr}}                  % trace
+\newcommand{\Prob}{\operatorname{Pr}}                % probability
+\newcommand{\E}{\mathbb{E}}                          % expectation
+\newcommand{\Zt}{\mathbb{Z}_2}                       % the field with two elements
+\newcommand{\wt}{\operatorname{wt}}                  % Hamming weight

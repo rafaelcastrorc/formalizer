@@ -1,0 +1,8 @@
+# Per-blueprint metadata. `name` MUST match the folder name; it is
+# used as the URL subpath (the blueprint is published at site/<name>/).
+name: alon-roichman
+title: "Random Cayley Graphs and Expanders"
+description: "Almost every Cayley graph on c(delta) log n random generators of a group of order n is an expander (Alon-Roichman, 2002)"
+build_pdf: false        # if true, also build + link a PDF (requires TeX in CI)
+home: "https://www.tau.ac.il/~nogaa/PDFS/raicr.pdf"                # optional URL shown as a "home" link on the landing card
+github: ""              # optional repo URL shown as a "GitHub" link on the landing card
