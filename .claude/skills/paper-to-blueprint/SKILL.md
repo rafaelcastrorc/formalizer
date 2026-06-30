@@ -165,8 +165,12 @@ Use the project's Python that has `requirements.txt` installed. Detect it:
 prefer `./.venv/bin/python` if present; else use a `python3` for which
 `python3 -c "import plasTeX, yaml, jinja2"` succeeds. If none works, tell the
 user to run `python -m venv .venv && .venv/bin/pip install -r requirements.txt`
-(plus system `graphviz`/`libgraphviz-dev`) and stop. Never install or invoke
-Lean, elan, lake, or Mathlib.
+(plus system `graphviz`/`libgraphviz-dev`, **and a LaTeX install** — plasTeX
+needs `kpsewhich` + the class/package files to resolve `\documentclass` and
+`\usepackage`, even though math is rendered client-side by MathJax; on
+Debian/Ubuntu: `texlive-latex-base texlive-latex-recommended
+texlive-fonts-recommended texlive-latex-extra`) and stop. Never install or
+invoke Lean, elan, lake, or Mathlib.
 
 ## Conventions
 - Labels by kind: `def:`, `lem:`, `prop:`, `thm:`, `cor:`, `constr:`, `alg:`,

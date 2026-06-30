@@ -202,7 +202,16 @@ def discover_blueprints() -> list[Blueprint]:
 # --------------------------------------------------------------------------- #
 def _run(cmd: list[str], cwd: Path) -> None:
     print(f"    $ {' '.join(cmd)}   (cwd={cwd.relative_to(REPO_ROOT)})")
-    subprocess.run(cmd, cwd=str(cwd), check=True)
+    proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
+    if proc.returncode != 0:
+        # Surface the real error (plasTeX/latexmk output) so CI logs are
+        # self-contained instead of just reporting "exit status 1".
+        combined = (proc.stdout or "") + (proc.stderr or "")
+        tail = "\n".join(combined.splitlines()[-40:])
+        print("    ----- command output (last 40 lines) -----", file=sys.stderr)
+        print(tail, file=sys.stderr)
+        print("    ----- end command output -----", file=sys.stderr)
+        raise subprocess.CalledProcessError(proc.returncode, cmd, proc.stdout, proc.stderr)
 
 
 def build_pdf(bp: Blueprint) -> None:

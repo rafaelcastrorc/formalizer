@@ -32,6 +32,13 @@ jobs:
       - name: Install graphviz
         run: sudo apt-get update && sudo apt-get install -y graphviz libgraphviz-dev
 
+      # plasTeX needs a LaTeX installation (kpsewhich + the class/package files)
+      # to resolve \documentclass{report} and \usepackage{amssymb,amsmath,
+      # amsthm,hyperref}; without it the web build fails. Math itself is still
+      # rendered client-side by MathJax -- this is just for parsing.
+      - name: Install LaTeX (required by plasTeX even for the web build)
+        run: sudo apt-get install -y texlive-latex-base texlive-latex-recommended texlive-fonts-recommended texlive-latex-extra
+
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
@@ -44,9 +51,9 @@ jobs:
           echo "need_tex=$need_tex" >> "$GITHUB_OUTPUT"
           echo "needs TeX: $need_tex"
 
-      - name: Install TeX (only when a blueprint sets build_pdf)
+      - name: Install extra TeX for PDF builds (only when a blueprint sets build_pdf)
         if: steps.pdf.outputs.need_tex == 'true'
-        run: sudo apt-get update && sudo apt-get install -y texlive-xetex texlive-latex-extra texlive-fonts-recommended latexmk
+        run: sudo apt-get install -y texlive-xetex latexmk
 
       - name: Build site
         run: python scripts/build.py
