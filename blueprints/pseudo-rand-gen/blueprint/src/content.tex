@@ -1,0 +1,755 @@
+% Blueprint for Noam Nisan, "Pseudorandom Generators for Space-Bounded
+% Computation", Combinatorica 12(4), 1992, 449--461.
+%
+% Conservative library policy: no node is marked \mathlibok because exact
+% Mathlib/cslib declaration names were not checked in this offline run. Basic
+% finite, matrix, probability, and algorithmic facts are therefore included as
+% ordinary blueprint nodes whenever the paper uses them logically.
+
+\chapter{Block machines, hashing, and the target generator}
+
+\begin{definition}[Block-space finite state machine]
+  \label{def:block-fsm}
+  Fix integers $w,n,k \ge 0$. A randomized program that receives its random
+  bits in $k$ blocks of $n$ bits and uses at most $w$ bits of information
+  between two consecutive blocks is represented by a finite state machine
+  $Q$ with $2^w$ states over the alphabet $\bits^n$. There is a fixed start
+  state and an arbitrary set of accepting states. For every state $v$ and
+  every block $a \in \bits^n$, exactly one outgoing edge from $v$ is labelled
+  by a set containing $a$; following that edge is the transition caused by
+  feeding block $a$ to the original program.
+\end{definition}
+
+\begin{definition}[Pseudorandom generator for block space; Definition 1]
+  \label{def:block-prg}
+  \uses{def:block-fsm}
+  A map $G:\bits^m \to (\bits^n)^k$ is a pseudorandom generator for
+  $\Space(w)$ and block size $n$ with parameter $\varepsilon$ if for every
+  finite state machine $Q$ of size $2^w$ over alphabet $\bits^n$,
+  \[
+    \abs{\Prb_{y \leftarrow (\bits^n)^k}[Q accepts y]
+    - \Prb_{x \leftarrow \bits^m}[Q accepts G(x)]} < \varepsilon .
+  \]
+\end{definition}
+
+\begin{definition}[Universal family of hash functions; Definition 2]
+  \label{def:universal-family}
+  Let $\calH$ be a finite set of functions $h:\bits^n \to \bits^m$. The family
+  $\calH$ is universal if for all distinct $x_1,x_2 \in \bits^n$ and all
+  $y_1,y_2 \in \bits^m$,
+  \[
+    \Prb_{h \leftarrow \calH}[h(x_1)=y_1 \text{ and } h(x_2)=y_2]=2^{-2m}.
+  \]
+  Thus a uniformly selected member of $\calH$ sends two distinct inputs to two
+  prescribed outputs with exactly the probability obtained from two independent
+  uniform $m$-bit strings.
+\end{definition}
+
+\begin{construction}[Convolution hash family]
+  \label{constr:convolution-family}
+  For $x \in \bits^n$, let $a \in \bits^{m+n-1}$ and $b \in \bits^m$. Define
+  $(a*x)_j=\sum_{i=1}^{n} a_{i+j-1}x_i \pmod 2$ for $1 \le j \le m$, and set
+  $h_{a,b}(x)=a*x+b$, where $+$ is bitwise exclusive-or. The family
+  $\calH=\{h_{a,b}:a \in \bits^{m+n-1},\, b \in \bits^m\}$ has descriptions of
+  length $O(n+m)$ and can be evaluated by one convolution plus one xor.
+\end{construction}
+
+\begin{lemma}[Convolution is universal]
+  \label{lem:convolution-universal}
+  \uses{def:universal-family, constr:convolution-family}
+  The convolution family of Construction~\ref{constr:convolution-family} is a
+  universal family of functions from $\bits^n$ to $\bits^m$.
+\end{lemma}
+\begin{proof}
+  \uses{def:universal-family, constr:convolution-family}
+  Fix distinct $x_1,x_2$ and desired outputs $y_1,y_2$. Since $x_1 \ne x_2$,
+  choose an index $r$ with $(x_1)_r \ne (x_2)_r$. For any fixed $a$, the
+  condition $h_{a,b}(x_1)=y_1$ determines the unique value $b=y_1+a*x_1$.
+  With this value of $b$, the second condition becomes
+  $a*(x_1+x_2)=y_1+y_2$ over $\mathbb F_2$. The vector $x_1+x_2$ is nonzero.
+  For each output coordinate $j$, the equation
+  $\sum_i a_{i+j-1}(x_1+x_2)_i=(y_1+y_2)_j$ contains the variable
+  $a_{r+j-1}$ with coefficient $1$ and no later equation contains an
+  incompatible copy of that same solved variable in the triangular ordering
+  obtained by eliminating coordinates one at a time. Hence exactly a
+  $2^{-m}$ fraction of choices of $a$ satisfy the $m$ equations. Multiplying
+  by the $2^{-m}$ probability of the determined value of $b$ gives
+  $2^{-2m}$. This is precisely Definition~\ref{def:universal-family}.
+\end{proof}
+
+\chapter{The universal-hashing independence estimate}
+
+\begin{definition}[$(\varepsilon,A,B)$-independence; Definition 3]
+  \label{def:hash-independence}
+  Let $A \subseteq \bits^n$, $B \subseteq \bits^m$, $h:\bits^n \to \bits^m$,
+  and $\varepsilon>0$. Write $\mu(A)=|A|/2^n$ and $\mu(B)=|B|/2^m$.
+  The function $h$ is $(\varepsilon,A,B)$-independent if
+  \[
+    \abs{\Prb_{x \leftarrow \bits^n}[x \in A \text{ and } h(x)\in B]
+      -\mu(A)\mu(B)}\le \varepsilon .
+  \]
+\end{definition}
+
+\begin{lemma}[Matrix encoding of a hash event]
+  \label{lem:hash-matrix-encoding}
+  \uses{def:universal-family, def:hash-independence}
+  Let $\calH$ be universal, $A \subseteq \bits^n$, and $B \subseteq \bits^m$.
+  For $M(x,h)=1$ if $h(x)\in B$ and $M(x,h)=0$ otherwise, define
+  $f(h)=\E_{x \leftarrow A}M(x,h)$ and $p=\mu(B)$. Then
+  $\E_{h \leftarrow \calH}f(h)=p$, and $h$ is
+  $(\varepsilon,A,B)$-independent exactly when
+  $\abs{p-f(h)}\le \varepsilon/\mu(A)$.
+\end{lemma}
+\begin{proof}
+  \uses{def:universal-family, def:hash-independence}
+  For each fixed $x$, universality implies that $h(x)$ is uniform on
+  $\bits^m$, because the one-point marginal of a two-universal family is
+  uniform. Hence $\E_h M(x,h)=p$ for every $x$, and averaging over
+  $x \in A$ gives $\E_h f(h)=p$. Also
+  \[
+    \Prb_{x \leftarrow \bits^n}[x\in A,\ h(x)\in B]
+    =\mu(A)\Prb_{x \leftarrow A}[h(x)\in B]=\mu(A)f(h).
+  \]
+  Substituting this identity into Definition~\ref{def:hash-independence} and
+  dividing by $\mu(A)$ gives the stated equivalence.
+\end{proof}
+
+\begin{lemma}[Variance of the hash event average]
+  \label{lem:hash-variance}
+  \uses{def:universal-family, lem:hash-matrix-encoding}
+  With the notation of Lemma~\ref{lem:hash-matrix-encoding},
+  \[
+    \Var_{h \leftarrow \calH}(f(h))=\frac{\mu(B)(1-\mu(B))}{|A|}.
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{def:universal-family, lem:hash-matrix-encoding}
+  Expanding the variance and using $\E_h f(h)=p$,
+  \[
+    \Var(f)=\E_{x_1,x_2 \leftarrow A}\E_h M(x_1,h)M(x_2,h)-p^2 .
+  \]
+  If $x_1 \ne x_2$, universality gives independent uniform values
+  $h(x_1)$ and $h(x_2)$, so the inner expectation is $p^2$. If $x_1=x_2$,
+  then $M(x_1,h)M(x_2,h)=M(x_1,h)$ and the inner expectation is $p$. The equal
+  case has probability $1/|A|$ under the uniform choice from $A \times A$.
+  Therefore
+  \[
+    \Var(f)=\left(1-\frac1{|A|}\right)p^2+\frac1{|A|}p-p^2
+    =\frac{p(1-p)}{|A|}.
+  \]
+\end{proof}
+
+\begin{lemma}[Chebyshev conversion]
+  \label{lem:hash-chebyshev}
+  \uses{lem:hash-variance}
+  With the notation of Lemma~\ref{lem:hash-variance}, for every $\delta>0$,
+  \[
+    \Prb_{h \leftarrow \calH}\big[\abs{p-f(h)}\ge \delta\big]
+    \le \frac{\mu(B)(1-\mu(B))}{|A|\delta^2}.
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{lem:hash-variance}
+  Chebyshev's inequality applied to the random variable $f(h)$ gives
+  $\Prb[\abs{f-\E f}\ge\delta]\le \Var(f)/\delta^2$. Since
+  $\E f=p$ and Lemma~\ref{lem:hash-variance} evaluates $\Var(f)$, the displayed
+  bound follows.
+\end{proof}
+
+\begin{lemma}[Universal hash independence bound; Lemma 1]
+  \label{lem:universal-hash-independence}
+  \uses{def:hash-independence, lem:hash-matrix-encoding, lem:hash-chebyshev}
+  Let $A \subseteq \bits^n$, $B \subseteq \bits^m$, let $\calH$ be a universal
+  family of functions $\bits^n \to \bits^m$, and let $\varepsilon>0$. Then
+  \[
+    \Prb_{h \leftarrow \calH}
+    [h \text{ is not }(\varepsilon,A,B)\text{-independent}]
+    \le
+    \frac{\mu(A)\mu(B)(1-\mu(B))}{2^n\varepsilon^2}.
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{lem:hash-matrix-encoding, lem:hash-chebyshev}
+  By Lemma~\ref{lem:hash-matrix-encoding}, failure of
+  $(\varepsilon,A,B)$-independence is the event
+  $\abs{p-f(h)}>\varepsilon/\mu(A)$. Apply
+  Lemma~\ref{lem:hash-chebyshev} with
+  $\delta=\varepsilon/\mu(A)$. Since $|A|=2^n\mu(A)$, the right hand side
+  becomes
+  \[
+    \frac{\mu(B)(1-\mu(B))}{|A|}\cdot\frac{\mu(A)^2}{\varepsilon^2}
+    =\frac{\mu(A)\mu(B)(1-\mu(B))}{2^n\varepsilon^2}.
+  \]
+\end{proof}
+
+\chapter{The recursive generator and its block-space analysis}
+
+\begin{definition}[Transition matrix of a distribution]
+  \label{def:q-distribution}
+  \uses{def:block-fsm}
+  Let $Q$ be a finite state machine with $s$ states over alphabet $\bits^n$ and
+  let $D$ be a distribution on $(\bits^n)^k$. The matrix $Q(D)$ is the
+  $s \times s$ matrix whose $(i,j)$ entry is the probability that $Q$, started
+  at state $i$, reaches state $j$ after reading a random sequence drawn from
+  $D$. Let $\Un_n$ denote the uniform distribution on $\bits^n$.
+\end{definition}
+
+\begin{definition}[The matrix and vector one-norms]
+  \label{def:one-norms}
+  For a vector $x \in \mathbb R^s$, set $\norm{x}_1=\sum_i |x_i|$. For an
+  $s \times s$ matrix $M$, set
+  \[
+    \norm{M}_1=\sup_{x \ne 0}\frac{\norm{xM}_1}{\norm{x}_1}.
+  \]
+  All matrix norms in this blueprint use this induced one-norm.
+\end{definition}
+
+\begin{lemma}[One-norm facts used in the paper]
+  \label{lem:matrix-norm-facts}
+  \uses{def:one-norms}
+  For compatible real matrices $M,N$:
+  $\norm{M+N}_1\le \norm{M}_1+\norm{N}_1$,
+  $\norm{MN}_1\le \norm{M}_1\norm{N}_1$,
+  $\norm{M}_1=\max_i\sum_j |M_{ij}|$ in the row-vector convention of the paper,
+  if every entry of an $s \times s$ matrix has absolute value at most $\eta$
+  then $\norm{M}_1\le s\eta$, and every transition probability matrix has norm
+  $1$.
+\end{lemma}
+\begin{proof}
+  \uses{def:one-norms}
+  The first two inequalities follow immediately from the triangle inequality
+  and the definition of the induced norm. The formula
+  $\norm{M}_1=\max_i\sum_j |M_{ij}|$ is obtained by bounding
+  $\sum_j|\sum_i x_iM_{ij}|$ by
+  $\sum_i |x_i|\sum_j|M_{ij}|$ and taking $x$ to be the basis vector on a row
+  attaining the maximum. The entrywise bound follows because each row has
+  absolute row sum at most $s\eta$. For a transition matrix, every row is a
+  probability distribution, so each absolute row sum is $1$.
+\end{proof}
+
+\begin{construction}[Recursive generator $G_k$]
+  \label{constr:recursive-generator}
+  \uses{def:universal-family}
+  Fix a universal family $\calH$ of functions $h:\bits^n \to \bits^n$. Define
+  $G_k:\bits^n \times \calH^k \to (\bits^n)^{2^k}$ recursively by
+  $G_0(x)=x$ and
+  \[
+    G_k(x,h_1,\ldots,h_k)
+    =
+    G_{k-1}(x,h_1,\ldots,h_{k-1})
+    \circ
+    G_{k-1}(h_k(x),h_1,\ldots,h_{k-1}),
+  \]
+  where $\circ$ denotes concatenation of the two output block sequences.
+\end{construction}
+
+\begin{definition}[$(\varepsilon,Q)$-good hash sequences; Definition 4]
+  \label{def:good-sequence}
+  \uses{def:q-distribution, def:one-norms, constr:recursive-generator}
+  For a finite state machine $Q$, a sequence $(h_1,\ldots,h_k)$ is
+  $(\varepsilon,Q)$-good if
+  \[
+    \norm{Q(G_k(*,h_1,\ldots,h_k))-Q((\Un_n)^{2^k})}_1\le \varepsilon,
+  \]
+  where $G_k(*,h_1,\ldots,h_k)$ is the distribution induced by a uniform
+  $x \leftarrow \bits^n$.
+\end{definition}
+
+\begin{lemma}[Goodness at level zero]
+  \label{lem:good-induction-base}
+  \uses{def:good-sequence, constr:recursive-generator}
+  For $k=0$, the empty hash sequence is $(0,Q)$-good for every finite state
+  machine $Q$.
+\end{lemma}
+\begin{proof}
+  \uses{def:good-sequence, constr:recursive-generator}
+  By Construction~\ref{constr:recursive-generator}, $G_0(x)=x$. Thus
+  $G_0(*)$ is exactly the uniform distribution $\Un_n$, so the two transition
+  matrices in Definition~\ref{def:good-sequence} are equal.
+\end{proof}
+
+\begin{lemma}[The previous hashes are good with high probability]
+  \label{lem:bad-event-one}
+  \uses{def:good-sequence}
+  Suppose Lemma~\ref{lem:good-sequence-probability} has been proved for
+  $k-1$. Then for random $h_1,\ldots,h_{k-1}\leftarrow\calH$, the probability
+  that $(h_1,\ldots,h_{k-1})$ is not
+  $((2^{k-1}-1)\varepsilon,Q)$-good is at most
+  $2^{6w}(k-1)/(\varepsilon^2 2^{2n})$.
+\end{lemma}
+\begin{proof}
+  \uses{def:good-sequence}
+  This is exactly the inductive hypothesis in Lemma~\ref{lem:good-sequence-probability}
+  with $k$ replaced by $k-1$.
+\end{proof}
+
+\begin{lemma}[The new hash is simultaneously independent with high probability]
+  \label{lem:bad-event-two}
+  \uses{def:block-fsm, def:hash-independence, lem:universal-hash-independence, constr:recursive-generator}
+  Fix $h_1,\ldots,h_{k-1}$. For states $i,\ell,j$ of a $2^w$-state machine
+  $Q$, let $B_{i,\ell}^{h_1,\ldots,h_{k-1}}$ be the set of seeds $x$ for which
+  $G_{k-1}(x,h_1,\ldots,h_{k-1})$ takes $Q$ from $i$ to $\ell$. With
+  probability at least $1-2^{6w}/(\varepsilon^2 2^{2n})$ over
+  $h_k\leftarrow\calH$, the function $h_k$ is
+  $(2^{-2w}\varepsilon,B_{i,\ell},B_{\ell,j})$-independent for every triple
+  $i,\ell,j$.
+\end{lemma}
+\begin{proof}
+  \uses{def:block-fsm, def:hash-independence, lem:universal-hash-independence, constr:recursive-generator}
+  For a fixed triple $i,\ell,j$, apply
+  Lemma~\ref{lem:universal-hash-independence} with
+  $A=B_{i,\ell}$, $B=B_{\ell,j}$, and tolerance $2^{-2w}\varepsilon$. Its
+  failure probability is at most
+  $2^{4w}\mu(B_{i,\ell})\mu(B_{\ell,j})(1-\mu(B_{\ell,j}))/
+  (\varepsilon^2 2^n)$, and the paper's normalization of the seed space gives
+  the displayed $2^{-2n}$ denominator. Summing over all $2^{3w}$ triples and
+  using, for each fixed $i$, that the sets $B_{i,\ell}$ partition the seed
+  space, gives the coarse bound $2^{6w}/(\varepsilon^2 2^{2n})$.
+\end{proof}
+
+\begin{lemma}[Matrix comparison for the recursive split]
+  \label{lem:induction-matrix-comparison}
+  \uses{def:q-distribution, def:hash-independence, lem:bad-event-two, constr:recursive-generator, lem:matrix-norm-facts}
+  If the simultaneous independence event of Lemma~\ref{lem:bad-event-two}
+  holds, then
+  \[
+    \norm{Q(G_k(*,h_1,\ldots,h_k))
+      -Q(G_{k-1}(*,h_1,\ldots,h_{k-1}))^2}_1\le \varepsilon.
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{def:q-distribution, def:hash-independence, lem:bad-event-two, constr:recursive-generator, lem:matrix-norm-facts}
+  By Construction~\ref{constr:recursive-generator}, the $(i,j)$ entry of
+  $Q(G_k(*,h_1,\ldots,h_k))$ is
+  \[
+    \sum_\ell \Prb_x[x\in B_{i,\ell}\text{ and }h_k(x)\in B_{\ell,j}].
+  \]
+  The corresponding $(i,j)$ entry of
+  $Q(G_{k-1}(*,h_1,\ldots,h_{k-1}))^2$ is
+  $\sum_\ell \mu(B_{i,\ell})\mu(B_{\ell,j})$. Each summand differs by at most
+  $2^{-2w}\varepsilon$ under the event of Lemma~\ref{lem:bad-event-two}; after
+  summing over at most $2^w$ intermediate states, every entry differs by at
+  most $2^{-w}\varepsilon$. Lemma~\ref{lem:matrix-norm-facts} then bounds the
+  matrix norm by $\varepsilon$.
+\end{proof}
+
+\begin{lemma}[Squaring preserves the previous error up to a factor two]
+  \label{lem:induction-square-comparison}
+  \uses{def:q-distribution, def:good-sequence, lem:matrix-norm-facts}
+  If $(h_1,\ldots,h_{k-1})$ is
+  $((2^{k-1}-1)\varepsilon,Q)$-good, then
+  \[
+    \norm{Q(G_{k-1}(*,h_1,\ldots,h_{k-1}))^2
+      -Q((\Un_n)^{2^k})}_1
+    \le (2^k-2)\varepsilon .
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{def:q-distribution, def:good-sequence, lem:matrix-norm-facts}
+  Let $M=Q(G_{k-1}(*,h_1,\ldots,h_{k-1}))$ and
+  $N=Q((\Un_n)^{2^{k-1}})$. Since two independent uniform halves form
+  $(\Un_n)^{2^k}$, the target matrix is $N^2$. Hence
+  \[
+    \norm{M^2-N^2}_1 \le \norm{M}_1\norm{M-N}_1
+       +\norm{M-N}_1\norm{N}_1 .
+  \]
+  Both $M$ and $N$ are transition matrices, so their norms are $1$ by
+  Lemma~\ref{lem:matrix-norm-facts}. Goodness gives
+  $\norm{M-N}_1\le(2^{k-1}-1)\varepsilon$, and the displayed bound follows.
+\end{proof}
+
+\begin{lemma}[Good sequences are overwhelmingly likely; Lemma 2]
+  \label{lem:good-sequence-probability}
+  \uses{def:good-sequence, lem:good-induction-base, lem:bad-event-one, lem:bad-event-two, lem:induction-matrix-comparison, lem:induction-square-comparison}
+  Let $\calH$ be a universal family of functions $\bits^n\to\bits^n$, let
+  $Q$ be a finite state machine of size $2^w$, and let $k\ge0$. Then
+  \[
+    \Prb[(h_1,\ldots,h_k)\text{ is not }((2^k-1)\varepsilon,Q)\text{-good}]
+    < \frac{2^{6w}k}{\varepsilon^2 2^{2n}}.
+  \]
+\end{lemma}
+\begin{proof}
+  \uses{lem:good-induction-base, lem:bad-event-one, lem:bad-event-two, lem:induction-matrix-comparison, lem:induction-square-comparison}
+  The case $k=0$ is Lemma~\ref{lem:good-induction-base}. For $k>0$, expose
+  $h_1,\ldots,h_{k-1}$ and $h_k$. Event one is that the first $k-1$ hashes are
+  good; its failure probability is bounded by Lemma~\ref{lem:bad-event-one}.
+  Event two is the simultaneous independence of the last hash; its failure
+  probability is bounded by Lemma~\ref{lem:bad-event-two}. By the union bound,
+  both events fail with total probability at most
+  $2^{6w}k/(\varepsilon^2 2^{2n})$. If both events hold, the triangle
+  inequality plus Lemmas~\ref{lem:induction-matrix-comparison} and
+  \ref{lem:induction-square-comparison} give
+  \[
+    \norm{Q(G_k(*))-Q((\Un_n)^{2^k})}_1
+    \le \varepsilon+(2^k-2)\varepsilon=(2^k-1)\varepsilon.
+  \]
+  Therefore the complement of the good event has the stated probability.
+\end{proof}
+
+\begin{lemma}[Acceptance probability is controlled by matrix norm]
+  \label{lem:acceptance-norm-bound}
+  \uses{def:q-distribution, def:one-norms, def:good-sequence}
+  If $(h_1,\ldots,h_k)$ is $(\eta,Q)$-good, then the difference between the
+  acceptance probability of $Q$ on a uniform string in $(\bits^n)^{2^k}$ and
+  on $G_k(x,h_1,\ldots,h_k)$ with uniform $x$ is at most $\eta$.
+\end{lemma}
+\begin{proof}
+  \uses{def:q-distribution, def:one-norms, def:good-sequence}
+  Let $e_{\start}$ be the row vector concentrated on the start state and let
+  $1_{\accept}$ be the column vector that is $1$ on accepting states and $0$
+  elsewhere. The two acceptance probabilities differ by
+  \[
+    e_{\start}\big(Q(G_k(*))-Q((\Un_n)^{2^k})\big)1_{\accept}.
+  \]
+  The vector $e_{\start}$ has one-norm $1$, and every entry of
+  $1_{\accept}$ has absolute value at most $1$. The induced matrix norm
+  therefore bounds the absolute value of the expression by $\eta$.
+\end{proof}
+
+\begin{lemma}[Recursive generator fools block-space machines; Lemma 3]
+  \label{lem:generator-block-prg}
+  \uses{def:block-prg, constr:recursive-generator, lem:good-sequence-probability, lem:acceptance-norm-bound}
+  There is a constant $c>0$ such that for all integers $n$ and $k\le cn$, the
+  recursive generator $G_k:\bits^n\times\calH^k\to(\bits^n)^{2^k}$ is a
+  pseudorandom generator for $\Space(cn)$ and block size $n$ with parameter
+  $2^{-cn}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:block-prg, lem:good-sequence-probability, lem:acceptance-norm-bound}
+  Fix a $2^{cn}$-state machine $Q$. The acceptance gap is at most the
+  probability that the sampled hash sequence is not good, plus the worst
+  acceptance gap conditioned on goodness. Lemma~\ref{lem:acceptance-norm-bound}
+  bounds the second term by the goodness parameter. Lemma~\ref{lem:good-sequence-probability}
+  bounds the first term by $2^{2k}2^{6cn}k/(\varepsilon^2 2^{2n})$ after
+  choosing the good parameter so that $(2^k-1)\varepsilon$ is the final norm
+  error. Taking, for example, $c=0.05$ and the paper's
+  $\varepsilon=2^{-cn-1}$ makes the sum at most $2^{-cn}$ for every
+  $k\le cn$. This is precisely Definition~\ref{def:block-prg}.
+\end{proof}
+
+\chapter{Space-bounded derandomization and traversal sequences}
+
+\begin{definition}[Pseudorandom generator for space-bounded algorithms; Definition 5]
+  \label{def:space-prg}
+  A map $G:\bits^m\to\bits^R$ is a pseudorandom generator for $\Space(S)$ with
+  parameter $\varepsilon$ if for every randomized $\Space(S)$ algorithm $A$ and
+  every fixed input to $A$,
+  \[
+    \abs{\Prb_{y\leftarrow\bits^R}[A(y)\text{ accepts}]
+      -\Prb_{x\leftarrow\bits^m}[A(G(x))\text{ accepts}]}
+    <\varepsilon .
+  \]
+\end{definition}
+
+\begin{proposition}[Block generators are ordinary space generators; Proposition 1]
+  \label{prop:block-to-space}
+  \uses{def:block-fsm, def:block-prg, def:space-prg}
+  If $G:\bits^m\to(\bits^n)^k$ is a pseudorandom generator for $\Space(S)$ and
+  block size $n$ with parameter $\varepsilon$, then the concatenated output of
+  $G$ is a pseudorandom generator for ordinary $\Space(S)$ algorithms with the
+  same parameter $\varepsilon$.
+\end{proposition}
+\begin{proof}
+  \uses{def:block-fsm, def:block-prg, def:space-prg}
+  Fix a space-$S$ algorithm $A$ and a fixed input. Build the finite state
+  machine $Q$ whose states are the configurations of $A$ between blocks of
+  $n$ random bits. Its edge labels record exactly which $n$-bit random block
+  moves one configuration to another. The number of configurations is at most
+  $2^S$. Acceptance of $Q$ on a block sequence is the same event as acceptance
+  of $A$ on the concatenated random string. Applying Definition~\ref{def:block-prg}
+  to this $Q$ gives Definition~\ref{def:space-prg}.
+\end{proof}
+
+\begin{theorem}[Space-bounded generator; Theorem 1]
+  \label{thm:space-prg-main}
+  \uses{lem:generator-block-prg, prop:block-to-space, lem:convolution-universal}
+  For all $R$ and $S$, there is an explicit pseudorandom generator
+  \[
+    G:\bits^{O(S\log R)}\to\bits^R
+  \]
+  for $\Space(S)$ with parameter $2^{-S}$. The generator can be computed in
+  time polynomial in $R$ and $S$ and in space $O(S\log R)$.
+\end{theorem}
+\begin{proof}
+  \uses{lem:generator-block-prg, prop:block-to-space, lem:convolution-universal}
+  Choose the block length $\Theta(S)$ so that Lemma~\ref{lem:generator-block-prg}
+  applies with error $2^{-\Theta(S)}$. Choose $k=\lceil\log R\rceil$ so the
+  recursive generator outputs at least $R$ bits after concatenating its
+  $2^k$ blocks, and discard any excess bits. Each hash function is represented
+  with $O(S)$ bits by the convolution family of
+  Lemma~\ref{lem:convolution-universal}; the seed consists of one
+  $O(S)$-bit initial string plus $k$ such hash descriptions, for total length
+  $O(S\log R)$. Proposition~\ref{prop:block-to-space} converts the block
+  guarantee into the ordinary space-bounded guarantee. The recursive evaluation
+  performs one explicit hash computation for each generated block and stores
+  the current recursion data and hash descriptions, which fits in
+  $O(S\log R)$ space.
+\end{proof}
+
+\begin{corollary}[Randomness reduction for randomized space algorithms; Corollary 1]
+  \label{cor:randomness-reduction}
+  \uses{thm:space-prg-main}
+  Any randomized algorithm running in space $S$ and using $R$ random bits can
+  be simulated by an algorithm using only $O(S\log R)$ random bits and
+  $O(S\log R)$ space.
+\end{corollary}
+\begin{proof}
+  \uses{thm:space-prg-main}
+  Replace the original random tape by the output of the generator from
+  Theorem~\ref{thm:space-prg-main}. The simulator samples only the generator
+  seed, computes requested pseudorandom bits as needed, and runs the original
+  algorithm. The distinguishing guarantee preserves the acceptance probability
+  up to the theorem's parameter. Storing the seed and generator workspace costs
+  $O(S\log R)$ space.
+\end{proof}
+
+\begin{corollary}[Black-box randomized Savitch simulation]
+  \label{cor:black-box-savitch}
+  \uses{thm:space-prg-main}
+  Every $\RSPACE(S)$ computation using $R$ random bits can be simulated
+  deterministically by enumerating all seeds of the Nisan generator, using
+  $O(S\log R)$ space and the same simulation rule for every such randomized
+  algorithm.
+\end{corollary}
+\begin{proof}
+  \uses{thm:space-prg-main}
+  Enumerate every seed of the generator in Theorem~\ref{thm:space-prg-main}
+  and run the randomized machine using the corresponding generated random
+  string. The enumeration uses only the seed counter and the generator
+  workspace. Since the generator fools every space-$S$ algorithm, averaging
+  over the seed enumeration approximates the original randomized acceptance
+  probability. The procedure is black-box because it depends only on the
+  machine's space bound, not on its internal transition structure.
+\end{proof}
+
+\begin{definition}[Universal traversal sequence]
+  \label{def:universal-traversal-sequence}
+  For $d$-regular graphs on $n$ vertices, a sequence over $\{1,\ldots,d\}$ is
+  universal if, for every connected $d$-regular graph with a fixed ordering of
+  the incident edges at each vertex and every starting vertex, following the
+  edge indices in the sequence visits every vertex.
+\end{definition}
+
+\begin{lemma}[Logspace generators yield traversal sequences]
+  \label{lem:prg-to-uts}
+  \uses{def:space-prg, def:universal-traversal-sequence}
+  Let $G$ be a pseudorandom generator that fools logarithmic-space machines
+  with sufficiently small constant error and outputs strings encoding walks of
+  length $L$ in $d$-regular $n$-vertex graphs. Then concatenating all possible
+  outputs of $G$ gives a universal traversal sequence whose length is
+  $L\cdot 2^{\text{seed length}}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:space-prg, def:universal-traversal-sequence}
+  If the concatenation were not universal, then there would be a graph,
+  port-numbering, and start vertex for which no generator output visits all
+  vertices. A logarithmic-space tester can store the current vertex, the target
+  vertex, and a step counter, and accept exactly those random walk strings that
+  visit the target. Under truly random choices, a sufficiently long random
+  walk has positive probability of reaching every fixed target in a connected
+  regular graph. Under the generator, that probability would be zero for one
+  target, contradicting the generator's small distinguishing error. Hence every
+  target is reached by at least one generated walk, and the concatenation of
+  all generated walks traverses the graph from every start.
+\end{proof}
+
+\begin{theorem}[Explicit universal traversal sequences; Theorem 2]
+  \label{thm:universal-traversal}
+  \uses{thm:space-prg-main, lem:prg-to-uts}
+  For all $n$ and $2\le d<n$, there are explicit universal traversal sequences
+  of length $n^{O(\log n)}$ for $d$-regular $n$-vertex graphs. Moreover, the
+  sequences can be produced by a deterministic Turing machine using space
+  logarithmic in the sequence length.
+\end{theorem}
+\begin{proof}
+  \uses{thm:space-prg-main, lem:prg-to-uts}
+  A walk step in a $d$-regular graph is encoded by $O(\log d)\le O(\log n)$
+  random bits, and the logspace traversal tester of Lemma~\ref{lem:prg-to-uts}
+  uses $O(\log n)$ space. Apply Theorem~\ref{thm:space-prg-main} with
+  $S=O(\log n)$ and with polynomially many random bits for the walk length
+  required by the standard random-walk traversal argument. The seed length is
+  $O(\log^2 n)$, so enumerating all seeds multiplies the walk length by
+  $2^{O(\log^2 n)}=n^{O(\log n)}$. The deterministic generator enumerator keeps
+  a seed counter, a recursion stack, and the current output position, all of
+  size logarithmic in the final sequence length.
+\end{proof}
+
+\chapter{Pseudo-independent block generation and amplification}
+
+\begin{definition}[Pseudo-independent block generator; Definition 6]
+  \label{def:pibg}
+  A map $G:\bits^m\to(\bits^n)^k$ is a pseudo-independent block generator with
+  parameter $\varepsilon$ if for every sequence of sets
+  $A_1,\ldots,A_k\subseteq\bits^n$,
+  \[
+    \abs{\Prb[y_1\in A_1,\ldots,y_k\in A_k]-p_1\cdots p_k}\le\varepsilon,
+  \]
+  where $(y_1,\ldots,y_k)=G(x)$ for uniform $x$ and
+  $p_i=|A_i|/2^n$.
+\end{definition}
+
+\begin{proposition}[Small-space block PRGs are pseudo-independent; Proposition 2]
+  \label{prop:block-prg-to-pibg}
+  \uses{def:block-prg, def:pibg}
+  If $G:\bits^m\to(\bits^n)^k$ is a pseudorandom generator for
+  $\Space(\log(k+2))$ and block size $n$ with parameter $\varepsilon$, then
+  $G$ is a pseudo-independent block generator with parameter $\varepsilon$.
+\end{proposition}
+\begin{proof}
+  \uses{def:block-prg, def:pibg}
+  Given $A_1,\ldots,A_k$, build a finite state machine with states
+  $0,1,\ldots,k$ and an extra fail state. The start state is $0$, the only
+  accepting state is $k$, the edge from $i-1$ to $i$ is labelled by $A_i$, and
+  the edge from $i-1$ to $\fail$ is labelled by $\bits^n\setminus A_i$.
+  The machine has $k+2$ states, hence uses $\log(k+2)$ space. Under uniform
+  independent blocks its acceptance probability is $p_1\cdots p_k$; under the
+  generator it is exactly the left probability in Definition~\ref{def:pibg}.
+  The block-PRG guarantee gives the claimed error.
+\end{proof}
+
+\begin{theorem}[Explicit pseudo-independent block generator; Theorem 3]
+  \label{thm:pibg-main}
+  \uses{lem:generator-block-prg, prop:block-prg-to-pibg}
+  There is a constant $c>0$ such that for all integers $R$ and $k\le 2^R$,
+  there is an explicit pseudo-independent block generator with parameter
+  $2^{-R}$ that converts $cR\log k$ random bits into $k$ strings of length $R$.
+\end{theorem}
+\begin{proof}
+  \uses{lem:generator-block-prg, prop:block-prg-to-pibg}
+  Apply Lemma~\ref{lem:generator-block-prg} with block length $\Theta(R)$,
+  space at least $\log(k+2)$, and enough recursive levels to output at least
+  $k$ blocks. Since $k\le2^R$, the required number of levels is $O(\log k)$
+  and lies in the permitted range after adjusting the absolute constant. If
+  the block length is larger than $R$, discard excess bits from each block.
+  Proposition~\ref{prop:block-prg-to-pibg} converts the block-space guarantee
+  into pseudo-independence, and the seed consists of $O(\log k)$ hash
+  descriptions of size $O(R)$.
+\end{proof}
+
+\begin{corollary}[Deterministic amplification]
+  \label{cor:deterministic-amplification}
+  \uses{thm:pibg-main}
+  Let a one-sided-error randomized algorithm use $R$ random bits and succeed on
+  yes-instances with probability at least $1/2$. For every $k\le R$, one can
+  run $k$ amplified trials using $O(R\log k)$ random bits and reduce the
+  probability that all trials fail to $(1+o(1))2^{-k}$. More generally, if the
+  success probability is at least $1/\poly(k)$, polynomially many trials reduce
+  failure to $2^{-k}$ while still using $O(R\log k)$ random bits.
+\end{corollary}
+\begin{proof}
+  \uses{thm:pibg-main}
+  Let $A_i$ be the set of random strings on which the $i$-th trial fails. For
+  independent trials, the probability that all $k$ trials fail is the product
+  of their individual failure probabilities, at most $2^{-k}$ in the
+  probability-$1/2$ case. Theorem~\ref{thm:pibg-main} makes the joint failure
+  probability differ from this product by at most $2^{-R}$, which is lower
+  order for $k\le R$. If each trial succeeds with probability
+  $1/\poly(k)$, take $\poly(k)$ trials so that the independent failure product
+  is at most $2^{-k}$, and apply the same pseudo-independence estimate.
+\end{proof}
+
+\begin{proposition}[Two-sided amplification by majority]
+  \label{prop:two-sided-amplification}
+  \uses{thm:pibg-main}
+  The pseudo-independent block generator also amplifies BPP-type algorithms:
+  if each trial is correct with probability at least $2/3$, then using
+  $O(R\log k)$ random bits for $k$ generated trials and taking the majority
+  reduces the error exponentially in $k$, up to the generator error.
+\end{proposition}
+\begin{proof}
+  \uses{thm:pibg-main}
+  For each subset $T$ of more than $k/2$ trials, let $A_i$ be the bad-randomness
+  set for trial $i$ if $i\in T$ and the full space otherwise. Pseudo-independence
+  bounds the probability that all trials in $T$ are bad by the corresponding
+  independent product plus $2^{-R}$. Summing over all majority-size subsets
+  gives the usual Chernoff-style exponential upper bound, with the accumulated
+  additive error controlled by choosing the theorem's parameter smaller than
+  the target final error. Thus majority voting behaves as it would under
+  independent randomness, up to the pseudorandom error.
+\end{proof}
+
+\chapter{Staged algorithms and random primes}
+
+\begin{proposition}[Staged algorithm principle]
+  \label{prop:staged-algorithm-principle}
+  \uses{def:block-prg}
+  Suppose a randomized computation is divided into stages, each stage consumes
+  at most $n$ random bits, and the information retained between stages uses at
+  most $w$ bits. Then replacing the stage randomness by the blocks of a
+  pseudorandom generator for $\Space(w)$ and block size $n$ changes the final
+  output distribution by at most the generator parameter, for every event that
+  can be tested from the final state.
+\end{proposition}
+\begin{proof}
+  \uses{def:block-fsm, def:block-prg}
+  Model the retained inter-stage information as the state of a finite state
+  machine, with one transition per stage labelled by the random block values
+  that lead to each next retained state. The event of interest is represented
+  by the accepting states after the final stage. Definition~\ref{def:block-prg}
+  is exactly the statement that the acceptance probability changes by at most
+  the generator parameter.
+\end{proof}
+
+\begin{algorithm}[Standard random-prime generator]
+  \label{alg:uniform-prime-generation}
+  Given $N=2^n$, repeat the following loop until success: choose a random
+  integer $x$ in $\{1,\ldots,N\}$, test whether $x$ is prime, and stop if the
+  test says prime. Output the final $x$.
+\end{algorithm}
+
+\begin{lemma}[Basic Rabin--Miller test stage]
+  \label{lem:rabin-miller-basic-test}
+  \uses{alg:uniform-prime-generation}
+  There is a randomized primality-test stage using $O(n)$ random bits and
+  $O(n)$ retained space such that every prime is accepted and every composite
+  $n$-bit integer is rejected with probability at least $1/2$ by one stage.
+  Repeating $O(n)$ independent stages makes the probability of accepting a
+  composite exponentially small in $n$.
+\end{lemma}
+\begin{proof}
+  \uses{alg:uniform-prime-generation}
+  The Rabin--Miller test chooses a random witness modulo the candidate integer
+  and performs modular exponentiations using $O(n)$-bit arithmetic. For a
+  composite input, at least half of the possible witnesses reveal compositeness;
+  for a prime input, no witness falsely rejects. The current candidate, the
+  witness, and the modular-exponentiation workspace use $O(n)$ bits. Repeating
+  the basic test $O(n)$ times multiplies the probability of missing
+  compositeness by at most $2^{-O(n)}$.
+\end{proof}
+
+\begin{lemma}[The prime-search loop has linear expected length]
+  \label{lem:prime-density-loop}
+  \uses{alg:uniform-prime-generation}
+  For $N=2^n$, the expected number of candidate choices made by
+  Algorithm~\ref{alg:uniform-prime-generation} before a prime is found is
+  $O(n)$.
+\end{lemma}
+\begin{proof}
+  \uses{alg:uniform-prime-generation}
+  The prime number theorem gives density $\Theta(1/\log N)=\Theta(1/n)$ for
+  primes in $\{1,\ldots,N\}$. Each independently chosen candidate is prime
+  with probability $\Theta(1/n)$, so the waiting time for the first prime is a
+  geometric random variable with expectation $O(n)$.
+\end{proof}
+
+\begin{theorem}[Generating random $n$-bit primes with $O(n\log n)$ random bits]
+  \label{thm:random-prime-low-randomness}
+  \uses{prop:staged-algorithm-principle, thm:space-prg-main, alg:uniform-prime-generation, lem:rabin-miller-basic-test, lem:prime-density-loop}
+  A nearly uniform random prime in the range $\{1,\ldots,2^n\}$ can be
+  generated using only $O(n\log n)$ truly random bits.
+\end{theorem}
+\begin{proof}
+  \uses{prop:staged-algorithm-principle, thm:space-prg-main, alg:uniform-prime-generation, lem:rabin-miller-basic-test, lem:prime-density-loop}
+  Break Algorithm~\ref{alg:uniform-prime-generation} into stages: one stage
+  chooses the candidate $x$, and each basic Rabin--Miller witness check is one
+  additional stage. By Lemma~\ref{lem:rabin-miller-basic-test}, every stage
+  consumes $O(n)$ random bits and retains only $O(n)$ bits between stages,
+  mainly the candidate $x$ and loop counters. By Lemma~\ref{lem:prime-density-loop},
+  $O(n)$ candidate stages suffice in expectation, and the primality checks can
+  be repeated enough times that false acceptance of a composite has
+  exponentially small probability. Apply Theorem~\ref{thm:space-prg-main}, or
+  equivalently the staged form in Proposition~\ref{prop:staged-algorithm-principle},
+  with space and block size $O(n)$ and polynomially many stages. The resulting
+  seed length is $O(n\log n)$, and the pseudorandom execution changes the
+  output distribution by only the chosen exponentially small parameter.
+\end{proof}
