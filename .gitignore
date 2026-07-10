@@ -22,3 +22,6 @@ Papers/
 
 # Local scratch notes (not part of the project)
 notes/
+
+# Cloudflare Wrangler local account/project cache
+.wrangler/
