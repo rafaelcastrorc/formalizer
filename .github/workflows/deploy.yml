@@ -24,7 +24,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.13"
           cache: pip
           cache-dependency-path: requirements.txt
 
@@ -58,9 +58,9 @@ jobs:
       - name: Build site
         run: python scripts/build.py
 
-      # Direct Upload to Cloudflare Pages. The project (auto-blueprint) must
-      # already exist as a "Direct Upload" Pages project. Required repo secrets:
-      #   CLOUDFLARE_API_TOKEN  -- token with the "Cloudflare Pages: Edit" permission
+      # Direct Upload to Cloudflare Pages.
+      # Required repo secrets:
+      #   CLOUDFLARE_API_TOKEN  -- token with Cloudflare Pages edit permission
       #   CLOUDFLARE_ACCOUNT_ID -- your Cloudflare account id
       # Sanity check: fail loudly (and visibly) if the build produced no site/.
       - name: Verify site/ was built
@@ -69,9 +69,16 @@ jobs:
           ls -la site || { echo "::error::site/ does not exist"; exit 1; }
           test -f site/index.html || { echo "::error::site/index.html missing"; exit 1; }
 
-      # Call wrangler directly (instead of cloudflare/wrangler-action) so the
-      # `site` directory argument is passed verbatim -- this is the exact
-      # invocation verified to work locally.
+      # Create the Pages project on first deploy if it does not already exist.
+      # This avoids the Cloudflare dashboard's one-time manual upload flow.
+      - name: Ensure Cloudflare Pages project exists
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npx --yes wrangler@4 pages project create auto-blueprint --production-branch=main || true
+
+      # Call wrangler directly so the `site` directory argument is passed verbatim.
       - name: Deploy to Cloudflare Pages
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
