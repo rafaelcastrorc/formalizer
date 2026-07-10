@@ -1,3 +1,4 @@
 leanblueprint        # pulls in plastex, plastexdepgraph, pygraphviz, plastexshowmore
 pyyaml               # read per-blueprint meta.yml
 jinja2               # render the landing page
+pypdf                # extract text from uploaded/local paper PDFs
