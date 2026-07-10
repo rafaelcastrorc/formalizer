@@ -36,6 +36,7 @@ from pathlib import Path
 
 import yaml
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from validate_blueprint import print_result, validate_blueprint
 
 # --------------------------------------------------------------------------- #
 # Paths
@@ -288,6 +289,10 @@ def copy_to_site(bp: Blueprint) -> None:
 
 def build_blueprint(bp: Blueprint) -> None:
     print(f"==> {bp.name}")
+    validation = validate_blueprint(REPO_ROOT, bp.name)
+    print_result(validation)
+    if not validation.ok:
+        raise ValueError(f"blueprint validation failed for {bp.name!r}")
     if bp.build_pdf:
         build_pdf(bp)
     build_web(bp)

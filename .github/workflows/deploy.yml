@@ -56,7 +56,7 @@ jobs:
         run: sudo apt-get install -y texlive-xetex latexmk
 
       - name: Build site
-        run: python scripts/build.py
+        run: python scripts/build.py --strict
 
       # Direct Upload to Cloudflare Pages.
       # Required repo secrets:
