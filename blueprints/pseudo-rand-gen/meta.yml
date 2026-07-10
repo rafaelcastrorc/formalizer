@@ -1,0 +1,8 @@
+# Per-blueprint metadata. `name` MUST match the folder name; it is
+# used as the URL subpath (the blueprint is published at site/<name>/).
+name: my-paper
+title: "Pseudorandom Generators for Space-Bounded Computation"
+description: "Nisan's universal-hashing generator stretches O(S log R) random bits into R bits that fool space-bounded computation, with applications to traversal sequences, amplification, and random primes."
+build_pdf: false        # if true, also build + link a PDF (requires TeX in CI)
+home: "https://doi.org/10.1007/BF01305237"                # optional URL shown as a "home" link on the landing card
+github: ""              # optional repo URL shown as a "GitHub" link on the landing card
