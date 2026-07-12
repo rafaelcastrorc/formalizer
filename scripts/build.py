@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """Build every blueprint plus the landing page into ``site/``.
 
-This project hosts multiple leanblueprint/plasTeX *blueprints* without any Lean
-toolchain. We deliberately do **not** invoke the ``leanblueprint`` CLI: its
-module errors out at import time unless it finds a Git repository *and* a
-``lakefile.lean``/``lakefile.toml`` (it is written for Lean projects). Instead
-we run plasTeX exactly the way ``leanblueprint web`` does internally::
+This project hosts multiple leanblueprint/plasTeX *blueprints*. The website
+build deliberately does **not** invoke Lean or the ``leanblueprint`` CLI; the
+formalization loop is a separate layer. Instead we run plasTeX exactly the way
+``leanblueprint web`` does internally::
 
     plastex -c plastex.cfg web.tex          # run from inside blueprint/src/
 
-That needs no Lean, no lake, no git remote -- only Python packages and graphviz.
-See the README section "Why we call plasTeX directly" for the full rationale.
+That needs no Lean, no Lake, and no git remote -- only Python packages and
+graphviz. See the README section "Why we call plasTeX directly" for the full
+rationale.
 
 Usage::
 
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import os
 import shutil
 import subprocess
 import sys
@@ -121,6 +122,11 @@ class Blueprint:
     def print_dir(self) -> Path:
         # latexmk is invoked with -output-directory=../print from src/.
         return self.dir / "blueprint" / "print"
+
+    @property
+    def lean_dir(self) -> Path:
+        # Passing formalizations are saved here by refine_blueprint_with_lean.py.
+        return self.dir / "blueprint" / "lean"
 
     @property
     def web_dir(self) -> Path:
@@ -257,24 +263,36 @@ def build_web(bp: Blueprint) -> None:
 
 
 # Spliced into every rendered page so readers can get back to the landing page.
-# plasTeX has no notion of the multi-blueprint landing page, so we inject it
-# after rendering. The marker keeps the pass idempotent across rebuilds.
+# plasTeX has no notion of the multi-blueprint landing page or our saved Lean
+# artifact, so we inject those links after rendering. The marker keeps the pass
+# idempotent across rebuilds.
 HOME_LINK_MARKER = 'class="bp-home-link"'
-HOME_LINK_HTML = '\n<a class="bp-home-link" href="../index.html">← All blueprints</a>'
+LEAN_LINK_MARKER = 'class="bp-lean-link"'
 
 
-def inject_home_link(dest: Path) -> None:
-    """Add a 'back to all blueprints' link to each generated HTML page's header."""
+def _href_from(html: Path, target: Path) -> str:
+    return os.path.relpath(target, start=html.parent).replace(os.sep, "/")
+
+
+def inject_header_links(dest: Path) -> None:
+    """Add landing-page and saved-Lean links to each generated HTML header."""
+    lean_file = dest / "lean" / "formalization.lean"
     for html in dest.rglob("*.html"):
         text = html.read_text(encoding="utf-8")
-        if HOME_LINK_MARKER in text or "<header>" not in text:
+        if "<header>" not in text:
             continue
-        text = text.replace("<header>", "<header>" + HOME_LINK_HTML, 1)
-        html.write_text(text, encoding="utf-8")
+        links: list[str] = []
+        if HOME_LINK_MARKER not in text:
+            links.append(f'\n<a class="bp-home-link" href="{_href_from(html, SITE_DIR / "index.html")}">← All blueprints</a>')
+        if lean_file.is_file() and LEAN_LINK_MARKER not in text:
+            links.append(f'\n<a class="bp-lean-link" href="{_href_from(html, lean_file)}">Lean formalization</a>')
+        if links:
+            text = text.replace("<header>", "<header>" + "".join(links), 1)
+            html.write_text(text, encoding="utf-8")
 
 
 def copy_to_site(bp: Blueprint) -> None:
-    """Copy the rendered blueprint (and PDF, if any) into ``site/<name>/``."""
+    """Copy the rendered blueprint plus saved artifacts into ``site/<name>/``."""
     dest = SITE_DIR / bp.name
     if dest.exists():
         shutil.rmtree(dest)
@@ -284,7 +302,15 @@ def copy_to_site(bp: Blueprint) -> None:
     if bp.build_pdf and pdf.is_file():
         shutil.copy(pdf, dest / "blueprint.pdf")
 
-    inject_home_link(dest)
+    if bp.lean_dir.is_dir():
+        lean_files = sorted(bp.lean_dir.glob("*.lean"))
+        if lean_files:
+            lean_dest = dest / "lean"
+            lean_dest.mkdir(parents=True, exist_ok=True)
+            for lean_file in lean_files:
+                shutil.copy(lean_file, lean_dest / lean_file.name)
+
+    inject_header_links(dest)
 
 
 def build_blueprint(bp: Blueprint) -> None:
@@ -315,6 +341,7 @@ def render_landing(blueprints: list[Blueprint]) -> None:
     cards = []
     for bp in blueprints:
         has_pdf = (SITE_DIR / bp.name / "blueprint.pdf").is_file()
+        has_lean = (SITE_DIR / bp.name / "lean" / "formalization.lean").is_file()
         cards.append(
             {
                 "name": bp.name,
@@ -322,6 +349,7 @@ def render_landing(blueprints: list[Blueprint]) -> None:
                 "description": bp.description,
                 "url": f"./{bp.name}/",
                 "pdf_url": f"./{bp.name}/blueprint.pdf" if has_pdf else None,
+                "lean_url": f"./{bp.name}/lean/formalization.lean" if has_lean else None,
                 "home": bp.home,
                 "github": bp.github,
             }

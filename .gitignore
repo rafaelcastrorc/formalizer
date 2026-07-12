@@ -23,5 +23,8 @@ Papers/
 # Local scratch notes (not part of the project)
 notes/
 
+# Disposable Lean attempts and refinement reports.
+.auto-blueprint/
+
 # Cloudflare Wrangler local account/project cache
 .wrangler/
