@@ -78,7 +78,18 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          npx --yes wrangler@4 pages project create auto-blueprint --production-branch=main
+          set +e
+          output="$(npx --yes wrangler@4 pages project create auto-blueprint --production-branch=main 2>&1)"
+          status=$?
+          set -e
+          echo "$output"
+          if [ "$status" -ne 0 ]; then
+            if echo "$output" | grep -qi "project with this name already exists"; then
+              echo "Cloudflare Pages project already exists; continuing."
+            else
+              exit "$status"
+            fi
+          fi
 
       # Call wrangler directly so the `site` directory argument is passed verbatim.
       - name: Deploy to Cloudflare Pages
