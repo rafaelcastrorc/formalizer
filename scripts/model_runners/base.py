@@ -10,6 +10,10 @@ Two runner modes matter:
 
 * ``mode = "agent"``: the runner may edit files in the repo.
 * ``mode = "api"``: the runner only returns text; Python code writes files.
+
+Constructing any runner with ``readonly=True`` guarantees it cannot change the
+repo or run commands: agent backends restrict their tools/sandbox accordingly,
+and API backends already satisfy this by construction.
 """
 from __future__ import annotations
 
@@ -54,9 +58,11 @@ class ModelRunner(abc.ABC):
         *,
         context_files: list[str | Path] | None = None,
         timeout: int = 3600,
+        readonly: bool = False,
     ):
         self.model = model or self.default_model()
         self.timeout = timeout
+        self.readonly = readonly
         self.contexts = [load_context_file(p) for p in (context_files or [])]
 
     @classmethod

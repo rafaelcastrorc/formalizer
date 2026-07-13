@@ -21,6 +21,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -107,12 +108,12 @@ def _run_lean(path: Path, lean_command: list[str]) -> LeanAttempt:
         )
 
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             lean_command + [str(path)],
             cwd=str(REPO_ROOT),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=600,
         )
     except FileNotFoundError as exc:
         raise FileNotFoundError(
@@ -120,11 +121,30 @@ def _run_lean(path: Path, lean_command: list[str]) -> LeanAttempt:
             "  uv run python scripts/setup_lean.py --install-elan"
         ) from exc
 
+    start = time.time()
+    while True:
+        try:
+            stdout, stderr = proc.communicate(timeout=30)
+            break
+        except subprocess.TimeoutExpired:
+            elapsed = int(time.time() - start)
+            if elapsed >= 600:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+                return LeanAttempt(
+                    ok=False,
+                    command=lean_command + [str(path)],
+                    stdout=stdout or "",
+                    stderr=stderr or "",
+                    reason="Lean check timed out after 600s.",
+                )
+            print(f"  lean still checking... {elapsed}s elapsed", flush=True)
+
     return LeanAttempt(
         ok=proc.returncode == 0,
         command=lean_command + [str(path)],
-        stdout=proc.stdout or "",
-        stderr=proc.stderr or "",
+        stdout=stdout or "",
+        stderr=stderr or "",
     )
 
 
@@ -142,10 +162,17 @@ Hard constraints:
 - Give each generated declaration the Lean name listed in the node summary.
 - If the blueprint is missing a lemma/hypothesis/dependency, let Lean fail.
   Do not patch around missing blueprint content.
+- Do not compile or run `lake`/`lean` yourself; you have read-only access. A
+  separate checker compiles your reply, and its errors come back to you on the
+  next trial. Write the complete file in one pass and return it.
 
-Start with:
-
-import AutoBlueprint
+Imports:
+- Import only the specific Mathlib modules your file needs, e.g.
+  `import Mathlib.Analysis.InnerProductSpace.Basic`.
+- Confirm each module path exists by checking the Mathlib source under
+  `.lake/packages/mathlib/Mathlib/` before using it.
+- Do not use the blanket `import Mathlib` or `import AutoBlueprint`; they load
+  every Mathlib module and make each compile check several times slower.
 
 Blueprint name: {name}
 
@@ -294,6 +321,18 @@ def main(argv: list[str] | None = None) -> int:
         **runner_kwargs,
     )
 
+    # Lean generation is read-only: the model writes one Lean file as its reply
+    # and this script runs the single compile check. Without shell access the
+    # agent cannot burn its session repeatedly self-checking against a full
+    # Mathlib import. The repair step keeps the unrestricted runner.
+    gen_runner = get_runner(
+        args.runner,
+        context_files=[SKILL_PATH],
+        timeout=args.timeout,
+        readonly=True,
+        **runner_kwargs,
+    )
+
     report_lines = [
         f"# Lean-Guided Blueprint Refinement: `{args.name}`",
         "",
@@ -316,8 +355,12 @@ def main(argv: list[str] | None = None) -> int:
 
         blueprint_source = _read_blueprint_source(args.name)
 
-        print(f"==> Trial {trial}/{args.max_trials}: generating disposable Lean attempt", flush=True)
-        lean_result = runner.run(
+        print(
+            f"==> Trial {trial}/{args.max_trials}: generating disposable Lean attempt "
+            "(read-only model call; Lean check runs locally afterwards)",
+            flush=True,
+        )
+        lean_result = gen_runner.run(
             _lean_prompt(args.name, blueprint_source, validation.nodes),
             cwd=REPO_ROOT,
             retries=0,
@@ -325,7 +368,18 @@ def main(argv: list[str] | None = None) -> int:
         trial_dir = SCRATCH_DIR / args.name
         trial_dir.mkdir(parents=True, exist_ok=True)
         lean_path = trial_dir / f"trial_{trial:02d}.lean"
-        lean_path.write_text(_extract_lean_code(lean_result.text).rstrip() + "\n", encoding="utf-8")
+        lean_code = _extract_lean_code(lean_result.text).rstrip() + "\n"
+        lean_path.write_text(lean_code, encoding="utf-8")
+        print(
+            f"  wrote {lean_path.relative_to(REPO_ROOT)} "
+            f"({len(lean_code.splitlines())} lines, model took {lean_result.duration_s:.0f}s)",
+            flush=True,
+        )
+        if re.search(r"^import (Mathlib|AutoBlueprint)\s*$", lean_code, re.MULTILINE):
+            print(
+                "  note: attempt uses a blanket Mathlib import; the compile check will be slower",
+                flush=True,
+            )
 
         print(f"==> Trial {trial}/{args.max_trials}: running Lean", flush=True)
         attempt = _run_lean(lean_path, lean_command)
@@ -343,6 +397,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         critic_output = attempt.output
+        print(f"  lean failed on trial {trial}; last lines of output:", flush=True)
+        for line in critic_output.strip().splitlines()[-8:]:
+            print(f"    {line}", flush=True)
         report_lines.append("- result: failed")
         report_lines.append("")
         report_lines.append("```text")
@@ -355,11 +412,12 @@ def main(argv: list[str] | None = None) -> int:
 
         print(f"==> Trial {trial}/{args.max_trials}: repairing blueprint from Lean output", flush=True)
         if runner.mode == "agent":
-            runner.run(
+            repair = runner.run(
                 _agent_refine_prompt(args.name, blueprint_source, critic_output, trial, paper_text),
                 cwd=REPO_ROOT,
                 retries=0,
             )
+            print(f"  blueprint repair finished ({repair.duration_s:.0f}s)", flush=True)
         else:
             refine_result = runner.run(
                 _api_refine_prompt(args.name, blueprint_source, critic_output, trial, paper_text),

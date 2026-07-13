@@ -15,6 +15,8 @@ import json
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from .base import ModelRunner, RunnerError, RunResult
@@ -32,6 +34,20 @@ def _which_or_app(name: str, app_path: Path) -> str | None:
     return None
 
 
+def _describe_tool_use(name: str, tool_input: dict) -> str:
+    """One-line summary of an agent tool call for status output."""
+    if name == "Bash":
+        detail = tool_input.get("command", "")
+    elif name in ("Read", "Edit", "Write", "NotebookEdit"):
+        detail = tool_input.get("file_path", "")
+    elif name in ("Grep", "Glob"):
+        detail = tool_input.get("pattern", "")
+    else:
+        detail = ""
+    detail = " ".join(str(detail).split())
+    return f"{name}: {detail[:140]}" if detail else name
+
+
 class ClaudeCodeRunner(ModelRunner):
     backend_name = "claude-code"
     mode = "agent"
@@ -42,46 +58,130 @@ class ClaudeCodeRunner(ModelRunner):
         model: str | None = None,
         *,
         allowed_tools: str = "Read,Grep,Glob,Bash,Edit,Write",
+        disallowed_tools: str = "",
         max_turns: int = 60,
         **kwargs,
     ):
         super().__init__(model, **kwargs)
         self.allowed_tools = allowed_tools
+        # --allowedTools only pre-approves; user/project settings can still
+        # allow more. --disallowedTools is the hard block.
+        self.disallowed_tools = disallowed_tools
+        if self.readonly:
+            self.allowed_tools = "Read,Grep,Glob"
+            self.disallowed_tools = "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch"
         self.max_turns = max_turns
 
     def _run_impl(self, prompt: str, system: str, cwd: Path | None) -> RunResult:
         exe = _which_or_app("claude", CLAUDE_APP_CLI)
         if not exe:
             raise RunnerError("`claude` CLI not found on PATH")
-        cmd = [exe, "-p", "--output-format", "json", "--max-turns", str(self.max_turns)]
+        # stream-json (which requires --verbose in -p mode) emits one JSON event
+        # per line as the agent works, so we can narrate progress live instead
+        # of sitting silent for the whole run.
+        cmd = [
+            exe, "-p", "--output-format", "stream-json", "--verbose",
+            "--max-turns", str(self.max_turns),
+        ]
         if self.allowed_tools:
             cmd += ["--allowedTools", self.allowed_tools]
+        if self.disallowed_tools:
+            cmd += ["--disallowedTools", self.disallowed_tools]
         if self.model:
             cmd += ["--model", self.model]
         if system:
             cmd += ["--append-system-prompt", system]
+
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=str(cwd) if cwd else None,
+        )
+        assert proc.stdin and proc.stdout and proc.stderr
+
+        def _feed_stdin() -> None:
+            try:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+
+        stderr_lines: list[str] = []
+        threading.Thread(target=_feed_stdin, daemon=True).start()
+        threading.Thread(
+            target=lambda: stderr_lines.extend(proc.stderr), daemon=True
+        ).start()
+
+        timed_out = threading.Event()
+
+        def _kill_on_timeout() -> None:
+            timed_out.set()
+            proc.kill()
+
+        watchdog = threading.Timer(self.timeout, _kill_on_timeout)
+        watchdog.daemon = True
+        watchdog.start()
+
+        start = time.time()
+        last_output = [start]
+        heartbeat_stop = threading.Event()
+
+        def _heartbeat() -> None:
+            while not heartbeat_stop.wait(15):
+                if time.time() - last_output[0] >= 60:
+                    elapsed = int(time.time() - start)
+                    print(
+                        f"  [claude] still working... {elapsed // 60}m{elapsed % 60:02d}s elapsed",
+                        flush=True,
+                    )
+                    last_output[0] = time.time()
+
+        threading.Thread(target=_heartbeat, daemon=True).start()
+
+        result_event: dict | None = None
+        final_text = ""
         try:
-            proc = subprocess.run(
-                cmd,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                cwd=str(cwd) if cwd else None,
-                timeout=self.timeout,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RunnerError(f"claude CLI timed out after {self.timeout}s") from exc
-        if proc.returncode != 0:
-            tail = (proc.stderr or proc.stdout or "").strip()[-3000:]
-            raise RunnerError(f"claude CLI exit {proc.returncode}: {tail}")
-        try:
-            payload = json.loads(proc.stdout)
-            text = payload.get("result", "")
-        except json.JSONDecodeError:
-            payload, text = None, proc.stdout
-        if not text:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                last_output[0] = time.time()
+                etype = event.get("type")
+                if etype == "system" and event.get("subtype") == "init":
+                    print(f"  [claude] session started (model {event.get('model', '?')})", flush=True)
+                elif etype == "assistant":
+                    for block in event.get("message", {}).get("content", []):
+                        if block.get("type") == "tool_use":
+                            desc = _describe_tool_use(block.get("name", "?"), block.get("input") or {})
+                            print(f"  [claude] -> {desc}", flush=True)
+                        elif block.get("type") == "text" and block.get("text", "").strip():
+                            snippet = " ".join(block["text"].split())
+                            print(f"  [claude] {snippet[:200]}", flush=True)
+                elif etype == "result":
+                    result_event = event
+                    final_text = event.get("result") or ""
+            returncode = proc.wait()
+        finally:
+            watchdog.cancel()
+            heartbeat_stop.set()
+
+        if timed_out.is_set():
+            raise RunnerError(f"claude CLI timed out after {self.timeout}s")
+        if returncode != 0:
+            tail = "\n".join(stderr_lines).strip()[-3000:]
+            raise RunnerError(f"claude CLI exit {returncode}: {tail}")
+        if not final_text:
             raise RunnerError("claude CLI returned empty output")
-        return RunResult(text=text, raw=payload)
+        elapsed = int(time.time() - start)
+        print(f"  [claude] finished in {elapsed // 60}m{elapsed % 60:02d}s", flush=True)
+        return RunResult(text=final_text, raw=result_event)
 
 
 class CodexRunner(ModelRunner):
@@ -98,7 +198,7 @@ class CodexRunner(ModelRunner):
         **kwargs,
     ):
         super().__init__(model, **kwargs)
-        self.sandbox = sandbox
+        self.sandbox = "read-only" if self.readonly else sandbox
         self.reasoning_effort = reasoning_effort
 
     def _run_impl(self, prompt: str, system: str, cwd: Path | None) -> RunResult:

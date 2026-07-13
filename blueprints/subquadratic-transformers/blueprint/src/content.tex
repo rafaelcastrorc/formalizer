@@ -671,9 +671,9 @@
   instance with sets $A = \{a_1, \ldots, a_n\}$, $B = \{b_1, \ldots, b_n\}$ and
   threshold $\alpha$, construct $A' = \{a_1', \ldots, a_n'\}$, $B' = \{b_1',
   \ldots, b_n'\}$ as follows: for each $a_i$ first attach $\ell - \norm{a_i}_1$
-  zeros at the end and then another $\ell - \norm{a_i}_1$ ones to obtain $a_i'
+  ones at the end and then another $\ell + \norm{a_i}_1$ zeros to obtain $a_i'
   \in \{0,1\}^{3\ell}$, and for each $b_j$ attach $\ell + \norm{b_j}_1$ zeros and
-  another $\ell - \norm{b_j}_1$ ones to obtain $b_j' \in \{0,1\}^{3\ell}$.
+  then another $\ell - \norm{b_j}_1$ ones to obtain $b_j' \in \{0,1\}^{3\ell}$.
   Now every $a_i'$ and $b_j'$ has exactly $\ell$ ones, so $\norm{a_i'} =
   \norm{b_j'} = \sqrt{\ell}$, and $\inner{a_i'}{b_j'} = \inner{a_i}{b_j}$ by the
   construction (the appended coordinates never overlap on a $1$). Hence running an

@@ -42,6 +42,30 @@ uv run python scripts/setup_lean.py --install-elan
 That installs `elan` if needed, then runs `lake update` and downloads the
 Mathlib cache for this repository.
 
+## Web UI
+
+Everything below can also be driven from a local browser dashboard instead of
+the command line:
+
+```bash
+uv run python scripts/webui.py
+```
+
+That serves `http://127.0.0.1:8321` (use `--port` to change it, `--no-open` to
+skip opening the browser) and provides:
+
+- a **Generate** tab: paper path/URL or drag-and-drop PDF upload, blueprint
+  name, runner/model pickers, and the `--force` / `--no-build` flags;
+- a **Refine with Lean** tab wrapping `scripts/refine_blueprint_with_lean.py`,
+  with blueprint picker, max trials, and optional paper context;
+- **Validate** and **Build site** tabs wrapping the corresponding scripts;
+- a live log console streaming the running script's output, with a Stop button;
+- a blueprint list with links to the rendered pages, served from `site/`.
+
+The UI shells out to the same scripts documented below with the same flags, so
+behavior is identical to the command line. It runs one job at a time, binds to
+localhost only, and needs no extra dependencies.
+
 ## Build Existing Blueprints
 
 Build everything:
@@ -281,6 +305,17 @@ Each trial does this:
 4. if Lean fails, feed the Lean error back to the model;
 5. require the model to edit the blueprint, not the Lean file;
 6. regenerate Lean from the improved blueprint on the next trial.
+
+The generation call (step 2) constructs its runner with `readonly=True`, a
+contract every backend honors: `claude-code` hard-blocks the shell and edit
+tools, `codex` sets its sandbox to `read-only`, and the API backends
+(`anthropic`, `openai`, `mock`) are read-only by construction since they only
+return text. The model writes one Lean file as its reply and this script does
+the single compile check, so agent sessions cannot spend long stretches
+re-running `lake env lean`. Attempts are asked to import only the specific
+Mathlib modules they need rather than the blanket `import Mathlib`, which
+keeps each compile check to seconds instead of minutes. The repair step
+(step 5) keeps normal repo access, since it must edit blueprint files.
 
 The script stops when Lean passes or when `--max-trials` is reached. Disposable
 Lean attempts and reports are written under:
