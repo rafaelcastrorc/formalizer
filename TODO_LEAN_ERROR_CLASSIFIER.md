@@ -109,3 +109,47 @@ classify_lean_failure(blueprint_source, lean_code, lean_output)
 ```
 
 Then branch based on the structured classification.
+
+## Related TODO: Difficulty-Aware Scheduling
+
+The refinement loop now has a deterministic scheduler heuristic that classifies
+ready blueprint nodes as `easy`, `medium`, or `hard` before forming a
+dependency-closed chunk. This is intentionally simple and should be improved.
+
+Current scoring signals:
+
+- node kind:
+  - theorem/corollary adds high weight;
+  - lemma/proposition adds medium weight;
+  - definition adds no weight by itself;
+- number of explicit `\uses{...}` dependencies;
+- source-block length;
+- hard-keyword hits such as `reduction`, `hardness`, `runtime`, `transfer`,
+  `approximation`, `tensor`, `SETH`, and `OVC`.
+
+Current behavior:
+
+- `hard` nodes are isolated as singleton chunks;
+- a small number of `medium` nodes may be batched;
+- `easy` nodes may batch up to the internal chunk limit.
+
+Open questions/improvements:
+
+- Use historical run data: if a node repeatedly causes long model calls,
+  statement-audit failures, or blueprint repairs, mark it hard in future runs.
+- Separate "hard because mathematically deep" from "hard because the blueprint
+  is underspecified"; the latter should trigger proof-text/statement repair,
+  not just singleton scheduling.
+- Track actual elapsed times per node/chunk and feed that back into scheduling.
+- Include audit-failure categories such as tautological correctness,
+  erased runtime transfer, abstract problem tags, or missing reconstruction as
+  hard-node signals.
+- Consider exposing the scheduler's classification in the Web UI so users can
+  see why a node was isolated.
+- Eventually replace the heuristic with a classifier that returns structured
+  JSON, but keep deterministic fallbacks so scheduling does not require an
+  extra model call.
+
+The key invariant is that scheduling must not change the blueprint's meaning.
+It only decides how much of the existing blueprint graph to send to the model at
+once.
