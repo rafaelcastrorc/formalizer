@@ -14,9 +14,13 @@ from __future__ import annotations
 
 import argparse
 import base64
+import atexit
+import errno
 import json
 import mimetypes
+import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -26,10 +30,14 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from lean_preflight import check_lean_environment, default_lean_command
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO_ROOT / "scripts"
 BLUEPRINTS_DIR = REPO_ROOT / "blueprints"
 SITE_DIR = REPO_ROOT / "site"
+STATE_DIR = REPO_ROOT / ".auto-blueprint"
+WEBUI_STATE = STATE_DIR / "webui.json"
 UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="auto-blueprint-webui-"))
 
 RUNNER_BACKENDS = ["claude-code", "codex", "anthropic", "openai", "mock"]
@@ -46,51 +54,67 @@ class Job:
     def __init__(self, action: str, cmd: list[str]):
         self.action = action
         self.cmd = cmd
-        self.lines: list[str] = ["$ " + " ".join(cmd)]
         self.started = time.time()
         self.status = "running"
         self.returncode: int | None = None
         self.lock = threading.Lock()
+        log_dir = STATE_DIR / "webui-logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        self.log_path = log_dir / f"{stamp}-{action}.log"
+        self._stdout_file = self.log_path.open("w", encoding="utf-8")
+        self._stdout_file.write("$ " + " ".join(cmd) + "\n")
+        self._stdout_file.flush()
         self.proc = subprocess.Popen(
             cmd,
             cwd=str(REPO_ROOT),
-            stdout=subprocess.PIPE,
+            stdout=self._stdout_file,
             stderr=subprocess.STDOUT,
             text=True,
-            bufsize=1,
+            start_new_session=True,
         )
-        threading.Thread(target=self._pump, daemon=True).start()
+        threading.Thread(target=self._wait, daemon=True).start()
+        _update_webui_job_state(self.proc.pid, self.proc.pid, action, self.log_path)
 
-    def _pump(self) -> None:
-        assert self.proc.stdout is not None
-        for line in self.proc.stdout:
-            with self.lock:
-                self.lines.append(line.rstrip("\n"))
+    def _wait(self) -> None:
         rc = self.proc.wait()
+        self._stdout_file.write(f"==> exit code {rc}\n")
+        self._stdout_file.close()
+        _clear_webui_job_state(self.proc.pid)
         with self.lock:
             self.returncode = rc
             if self.status != "stopped":
                 self.status = "done" if rc == 0 else "failed"
-            self.lines.append(f"==> exit code {rc}")
 
     def stop(self) -> None:
         with self.lock:
             self.status = "stopped"
-        self.proc.terminate()
+        try:
+            os.killpg(self.proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
         try:
             self.proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            self.proc.kill()
+            try:
+                os.killpg(self.proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            self.proc.wait()
+        finally:
+            _clear_webui_job_state(self.proc.pid)
 
     def snapshot(self, offset: int) -> dict:
         with self.lock:
+            lines = _read_log_lines(self.log_path)
             return {
                 "action": self.action,
                 "status": self.status,
                 "returncode": self.returncode,
                 "elapsed": int(time.time() - self.started),
-                "total": len(self.lines),
-                "lines": self.lines[offset:],
+                "total": len(lines),
+                "lines": lines[offset:],
+                "log_path": str(self.log_path.relative_to(REPO_ROOT)),
             }
 
 
@@ -98,11 +122,338 @@ CURRENT_JOB: Job | None = None
 JOB_LOCK = threading.Lock()
 
 
+# ---------------------------------------------------------------------------
+# Single-instance handling.
+# ---------------------------------------------------------------------------
+
+def _read_webui_state() -> dict:
+    try:
+        data = json.loads(WEBUI_STATE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_webui_state(port: int) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    previous = _read_webui_state()
+    state = {
+        "pid": os.getpid(),
+        "port": port,
+        "url": f"http://127.0.0.1:{port}",
+        "started": int(time.time()),
+    }
+    try:
+        previous_job_pid = int(previous.get("job_pid") or 0)
+    except (TypeError, ValueError):
+        previous_job_pid = 0
+    if _pid_is_running(previous_job_pid):
+        for key in ("job_pid", "job_pgid", "job_action", "job_started", "job_log"):
+            if key in previous:
+                state[key] = previous[key]
+    WEBUI_STATE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+
+def _merge_webui_state(updates: dict) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state = _read_webui_state()
+    state.update(updates)
+    WEBUI_STATE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+
+def _update_webui_job_state(job_pid: int, job_pgid: int, action: str, log_path: Path | None = None) -> None:
+    state = _read_webui_state()
+    if state.get("pid") != os.getpid():
+        return
+    updates = {
+        "job_pid": job_pid,
+        "job_pgid": job_pgid,
+        "job_action": action,
+        "job_started": int(time.time()),
+    }
+    if log_path is not None:
+        updates["job_log"] = str(log_path)
+    _merge_webui_state(updates)
+
+
+def _clear_webui_job_state(job_pid: int | None = None) -> None:
+    state = _read_webui_state()
+    if state.get("pid") != os.getpid():
+        return
+    if job_pid is not None and state.get("job_pid") != job_pid:
+        return
+    for key in ("job_pid", "job_pgid", "job_action", "job_started", "job_log"):
+        state.pop(key, None)
+    WEBUI_STATE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+
+def _clear_webui_state() -> None:
+    state = _read_webui_state()
+    if state.get("pid") != os.getpid():
+        return
+    try:
+        job_pid = int(state.get("job_pid") or 0)
+    except (TypeError, ValueError):
+        job_pid = 0
+    if _pid_is_running(job_pid):
+        for key in ("pid", "port", "url", "started"):
+            state.pop(key, None)
+        WEBUI_STATE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        return
+    try:
+        WEBUI_STATE.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _kill_process_group(pgid: int, label: str, *, timeout: float = 10.0) -> bool:
+    print(f"==> stopping {label} process group {pgid}")
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    print(f"==> {label} process group {pgid} did not exit; killing")
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def _pid_is_running(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _latest_run_log() -> Path | None:
+    try:
+        logs = list((STATE_DIR / "formalization").glob("*/run-*.log"))
+    except OSError:
+        return None
+    if not logs:
+        return None
+    return max(logs, key=lambda path: path.stat().st_mtime)
+
+
+def _read_log_lines(path: Path | None) -> list[str]:
+    if path is None:
+        return []
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+
+
+def _adopted_job_snapshot(offset: int) -> dict | None:
+    """Expose a still-running job after a Web UI restart/crash lost CURRENT_JOB."""
+    state = _read_webui_state()
+    try:
+        job_pid = int(state.get("job_pid") or 0)
+    except (TypeError, ValueError):
+        job_pid = 0
+    if not _pid_is_running(job_pid):
+        if state.get("pid") == os.getpid() and job_pid:
+            _clear_webui_job_state(job_pid)
+        return None
+
+    log_path = Path(state["job_log"]) if state.get("job_log") else _latest_run_log()
+    lines = _read_log_lines(log_path)
+    try:
+        started = int(state.get("job_started") or time.time())
+    except (TypeError, ValueError):
+        started = int(time.time())
+    payload = {
+        "action": state.get("job_action", "run"),
+        "status": "running",
+        "returncode": None,
+        "elapsed": max(0, int(time.time() - started)),
+        "total": len(lines),
+        "lines": lines[offset:],
+        "adopted": True,
+    }
+    if log_path is not None:
+        payload["log_path"] = str(log_path.relative_to(REPO_ROOT))
+    return payload
+
+
+def _stop_recorded_job() -> bool:
+    state = _read_webui_state()
+    try:
+        job_pid = int(state.get("job_pid") or 0)
+        job_pgid = int(state.get("job_pgid") or job_pid)
+    except (TypeError, ValueError):
+        return False
+    if not _pid_is_running(job_pid):
+        return False
+    try:
+        os.killpg(job_pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _pid_command(pid: int) -> str:
+    proc = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
+def _looks_like_previous_webui(pid: int) -> bool:
+    command = _pid_command(pid)
+    return "webui.py" in command
+
+
+def _terminate_webui_pid(pid: int, label: str) -> bool:
+    print(f"==> stopping previous Auto-Blueprint UI at {label} (pid {pid})")
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if not _pid_is_running(pid):
+            return True
+        time.sleep(0.1)
+    print(f"==> previous UI pid {pid} did not exit yet")
+    return False
+
+
+def _pids_listening_on_port(port: int) -> list[int]:
+    proc = subprocess.run(
+        ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return []
+    pids: list[int] = []
+    for line in proc.stdout.splitlines():
+        try:
+            pids.append(int(line.strip()))
+        except ValueError:
+            continue
+    return pids
+
+
+def _stop_webui_on_port(port: int) -> bool:
+    stopped = False
+    for pid in _pids_listening_on_port(port):
+        if pid == os.getpid() or not _looks_like_previous_webui(pid):
+            continue
+        stopped = _terminate_webui_pid(pid, f"http://127.0.0.1:{port}") or stopped
+    return stopped
+
+
+def _stale_pipeline_process_groups() -> dict[int, str]:
+    proc = subprocess.run(
+        ["ps", "-axo", "pid,pgid,command"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return {}
+    groups: dict[int, str] = {}
+    state = _read_webui_state()
+    try:
+        recorded_job_pgid = int(state.get("job_pgid") or 0)
+    except (TypeError, ValueError):
+        recorded_job_pgid = 0
+    markers = (
+        "scripts/refine_blueprint_with_lean.py",
+        "scripts/generate_blueprint.py",
+    )
+    for line in proc.stdout.splitlines()[1:]:
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3:
+            continue
+        pid_s, pgid_s, command = parts
+        if not any(marker in command for marker in markers):
+            continue
+        if "Auto-Blueprint" not in command and str(REPO_ROOT) not in command:
+            continue
+        try:
+            pid = int(pid_s)
+            pgid = int(pgid_s)
+        except ValueError:
+            continue
+        if pid == os.getpid() or pgid == os.getpgrp():
+            continue
+        if recorded_job_pgid and pgid == recorded_job_pgid:
+            continue
+        groups[pgid] = command[:120]
+    return groups
+
+
+def _stop_stale_pipeline_jobs() -> None:
+    for pgid, command in _stale_pipeline_process_groups().items():
+        _kill_process_group(pgid, f"stale Auto-Blueprint job ({command})")
+
+
+def _stop_previous_webui() -> None:
+    state = _read_webui_state()
+    try:
+        job_pid = int(state.get("job_pid") or 0)
+    except (TypeError, ValueError):
+        job_pid = 0
+    has_live_job = _pid_is_running(job_pid)
+    try:
+        pid = int(state.get("pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    if pid <= 0 or pid == os.getpid():
+        return
+    if not _pid_is_running(pid):
+        if not has_live_job:
+            try:
+                WEBUI_STATE.unlink()
+            except FileNotFoundError:
+                pass
+        return
+    if not _looks_like_previous_webui(pid):
+        print(f"==> ignoring stale Web UI state for unrelated pid {pid}")
+        return
+
+    old_url = state.get("url") or f"http://127.0.0.1:{state.get('port', '?')}"
+    if _terminate_webui_pid(pid, str(old_url)):
+        if not has_live_job:
+            try:
+                WEBUI_STATE.unlink()
+            except FileNotFoundError:
+                pass
+        return
+    print("==> trying next free port")
+
+
+def _stop_current_job() -> None:
+    with JOB_LOCK:
+        job = CURRENT_JOB
+    if job is not None and job.status == "running":
+        job.stop()
+
+
 def start_job(action: str, cmd: list[str]) -> tuple[bool, str]:
     global CURRENT_JOB
     with JOB_LOCK:
         if CURRENT_JOB is not None and CURRENT_JOB.status == "running":
             return False, f"a `{CURRENT_JOB.action}` job is still running; stop it first"
+        if _adopted_job_snapshot(0) is not None:
+            return False, "a previous Auto-Blueprint job is still running; stop it first"
         CURRENT_JOB = Job(action, cmd)
         return True, ""
 
@@ -138,6 +489,12 @@ def common_runner_args(p: dict) -> list[str]:
 
 def build_command(action: str, p: dict) -> list[str]:
     py = sys.executable
+    if action == "setup_lean":
+        cmd = [py, str(SCRIPTS / "setup_lean.py"), "--install-elan"]
+        if p.get("no_cache"):
+            cmd.append("--no-cache")
+        return cmd
+
     if action == "generate":
         paper = (p.get("paper") or "").strip()
         if not paper:
@@ -186,6 +543,22 @@ def build_command(action: str, p: dict) -> list[str]:
         return cmd
 
     raise ValueError(f"unknown action: {action}")
+
+
+def lean_status_payload() -> dict:
+    """Return a JSON-ready Lean setup status for the browser UI."""
+    try:
+        result = check_lean_environment(REPO_ROOT, lean_command=default_lean_command(REPO_ROOT))
+        return result.to_dict()
+    except Exception as exc:  # noqa: BLE001 - status endpoint should explain all setup failures
+        return {
+            "ok": False,
+            "message": str(exc),
+            "command": ["lake", "env", "lean"],
+            "elapsed_s": 0.0,
+            "stdout": "",
+            "stderr": "",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -264,17 +637,21 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif path == "/api/state":
+            adopted = None if CURRENT_JOB else _adopted_job_snapshot(0)
             self.send_json({
                 "blueprints": list_blueprints(),
                 "backends": RUNNER_BACKENDS,
                 "efforts": [e for e in REASONING_EFFORTS if e],
-                "job": CURRENT_JOB.snapshot(len(CURRENT_JOB.lines)) if CURRENT_JOB else None,
+                "job": CURRENT_JOB.snapshot(0) if CURRENT_JOB else adopted,
             })
+        elif path == "/api/lean/status":
+            self.send_json(lean_status_payload())
         elif path == "/api/log":
             params = dict(kv.split("=", 1) for kv in query.split("&") if "=" in kv)
             offset = int(params.get("offset", 0))
             if CURRENT_JOB is None:
-                self.send_json({"status": "idle", "lines": [], "total": 0})
+                adopted = _adopted_job_snapshot(offset)
+                self.send_json(adopted if adopted else {"status": "idle", "lines": [], "total": 0})
             else:
                 self.send_json(CURRENT_JOB.snapshot(offset))
         elif path.startswith("/site/"):
@@ -302,6 +679,8 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/stop":
                 if CURRENT_JOB and CURRENT_JOB.status == "running":
                     CURRENT_JOB.stop()
+                else:
+                    _stop_recorded_job()
                 self.send_json({"ok": True})
             elif self.path == "/api/upload":
                 p = self.read_json()
@@ -371,6 +750,13 @@ PAGE = r"""<!doctype html>
           padding: 7px 14px; border-radius: 7px; cursor: pointer; display: none; }
   .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
   .error { color: var(--bad); font-size: 13px; margin-top: 10px; min-height: 18px; }
+  .leanbox { border: 1px solid var(--border); border-radius: 7px; padding: 9px;
+             margin-top: 10px; font-size: 12.5px; color: var(--muted); background: var(--bg); }
+  .leanbox.ok { border-color: var(--ok); color: var(--ok); }
+  .leanbox.bad { border-color: var(--bad); color: var(--bad); }
+  .leanbox button { margin-top: 7px; border: 1px solid var(--border); border-radius: 6px;
+                    background: transparent; color: var(--text); padding: 5px 9px; cursor: pointer; }
+  .leanbox code { color: var(--text); }
   .status { font-size: 13px; margin-left: auto; }
   .status.running { color: var(--accent); } .status.done { color: var(--ok); }
   .status.failed, .status.stopped { color: var(--bad); }
@@ -481,8 +867,11 @@ const FORMS = {
   refine: () => `
     <label>Blueprint</label>
     <select id="f_name">${bpSelect()}</select>
-    <label>Max Lean trials</label>
-    <input type="number" id="f_trials" value="5" min="1">
+    <label>Max blueprint-repair trials</label>
+    <input type="number" id="f_trials" value="3" min="1">
+    <div class="leanbox" id="leanStatus">Lean setup not checked.
+      <br><button type="button" onclick="checkLean()">Check Lean setup</button>
+    </div>
     ${paperField(false)}
     ${runnerFields()}
     <label>Lean command override (optional)</label>
@@ -518,6 +907,7 @@ function renderForm(){
     drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over');
                          e.dataTransfer.files[0] && upload(e.dataTransfer.files[0]); };
   }
+    if (active === 'refine') setTimeout(checkLean, 0);
 }
 
 function effortToggle(){
@@ -568,6 +958,41 @@ async function run(){
 
 async function stopJob(){ await fetch('/api/stop', {method:'POST'}); }
 
+async function runLeanSetup(){
+  el('error').textContent = '';
+  const r = await fetch('/api/run', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({action:'setup_lean'})});
+  const j = await r.json();
+  if (j.error){ el('error').textContent = j.error; return; }
+  el('log').textContent = '';
+  offset = 0;
+}
+
+async function checkLean(){
+  const box = el('leanStatus');
+  if (!box) return;
+  box.className = 'leanbox';
+  box.innerHTML = 'Checking Lean/Lake/Mathlib setup…';
+  try {
+    const r = await fetch('/api/lean/status');
+    const j = await r.json();
+    const cmd = (j.command || []).join(' ');
+    const detail = (j.stderr || j.stdout || '').trim().split('\n').slice(-5).join('\n');
+    box.className = 'leanbox ' + (j.ok ? 'ok' : 'bad');
+    box.innerHTML = `${esc(j.message || (j.ok ? 'Lean setup ready' : 'Lean setup failed'))}` +
+      (j.elapsed_s ? ` · ${Number(j.elapsed_s).toFixed(1)}s` : '') +
+      (cmd ? `<br><code>${esc(cmd)}</code>` : '') +
+      (detail ? `<pre style="white-space:pre-wrap;margin:7px 0 0">${esc(detail)}</pre>` : '') +
+      `<br><button type="button" onclick="checkLean()">Check again</button>` +
+      (j.ok ? '' : ` <button type="button" onclick="runLeanSetup()">Run Lean setup</button>`);
+  } catch (e) {
+    box.className = 'leanbox bad';
+    box.innerHTML = `Could not check Lean setup: ${esc(String(e))}` +
+      `<br><button type="button" onclick="checkLean()">Check again</button>` +
+      ` <button type="button" onclick="runLeanSetup()">Run Lean setup</button>`;
+  }
+}
+
 async function poll(){
   try {
     const r = await fetch('/api/log?offset=' + offset);
@@ -616,11 +1041,49 @@ refreshState().then(poll);
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=int, default=8321)
+    parser.add_argument(
+        "--keep-existing",
+        action="store_true",
+        help="Do not stop a previously started Auto-Blueprint Web UI instance.",
+    )
+    parser.add_argument(
+        "--strict-port",
+        action="store_true",
+        help="Fail instead of trying the next port if --port is already in use.",
+    )
     parser.add_argument("--no-open", action="store_true", help="Do not open the browser")
     args = parser.parse_args()
 
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    url = f"http://127.0.0.1:{args.port}"
+    if not args.keep_existing:
+        _stop_previous_webui()
+        _stop_stale_pipeline_jobs()
+
+    server = None
+    port = args.port
+    for candidate in range(args.port, args.port + 20):
+        if not args.keep_existing:
+            _stop_webui_on_port(candidate)
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", candidate), Handler)
+            port = candidate
+            break
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE or args.strict_port:
+                raise
+            print(f"==> port {candidate} is already in use; trying {candidate + 1}")
+    if server is None:
+        raise SystemExit(f"no free port found in {args.port}..{args.port + 19}")
+
+    url = f"http://127.0.0.1:{port}"
+    _write_webui_state(port)
+    atexit.register(_clear_webui_state)
+
+    def handle_exit_signal(_signum, _frame) -> None:
+        raise KeyboardInterrupt
+
+    old_sigterm = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, handle_exit_signal)
+
     print(f"==> Auto-Blueprint UI running at {url}  (Ctrl-C to quit)")
     if not args.no_open:
         webbrowser.open(url)
@@ -628,6 +1091,10 @@ def main() -> int:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n==> shutting down")
+    finally:
+        signal.signal(signal.SIGTERM, old_sigterm)
+        server.server_close()
+        _clear_webui_state()
     return 0
 
 

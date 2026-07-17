@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import html
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -37,7 +39,7 @@ from pathlib import Path
 
 import yaml
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-from validate_blueprint import print_result, validate_blueprint
+from validate_blueprint import Node, print_result, validate_blueprint
 
 # --------------------------------------------------------------------------- #
 # Paths
@@ -268,30 +270,351 @@ def build_web(bp: Blueprint) -> None:
 # idempotent across rebuilds.
 HOME_LINK_MARKER = 'class="bp-home-link"'
 LEAN_LINK_MARKER = 'class="bp-lean-link"'
+HEADER_NAV_STYLE_MARKER = 'id="bp-header-nav-style"'
+LOCAL_LEAN_LINK_MARKER = 'class="bp-local-lean-link"'
+LOCAL_LEAN_STYLE_MARKER = 'id="bp-local-lean-style"'
+PUBLISHED_LEAN_NAME = "formalization.lean"
+LEAN_VIEWER_NAME = "index.html"
+
+LEAN_KEYWORDS = (
+    "abbrev",
+    "axiom",
+    "by",
+    "class",
+    "def",
+    "deriving",
+    "else",
+    "end",
+    "example",
+    "have",
+    "if",
+    "import",
+    "in",
+    "inductive",
+    "instance",
+    "let",
+    "lemma",
+    "match",
+    "namespace",
+    "noncomputable",
+    "open",
+    "opaque",
+    "private",
+    "section",
+    "simp",
+    "structure",
+    "theorem",
+    "then",
+    "where",
+    "with",
+)
+LEAN_KEYWORD_RE = re.compile(r"\b(" + "|".join(re.escape(word) for word in LEAN_KEYWORDS) + r")\b")
+LEAN_DECL_RE = re.compile(
+    r"^\s*(?:noncomputable\s+)?(?:private\s+)?(?:protected\s+)?"
+    r"(?:theorem|lemma|def|abbrev|structure|inductive|class)\s+"
+    r"([A-Za-z_][A-Za-z0-9_'.]*)\b"
+)
 
 
 def _href_from(html: Path, target: Path) -> str:
     return os.path.relpath(target, start=html.parent).replace(os.sep, "/")
 
 
+def _lean_name(label: str) -> str:
+    name = re.sub(r"[^A-Za-z0-9_]+", "_", label).strip("_")
+    if not name or name[0].isdigit():
+        name = f"node_{name}"
+    return name
+
+
+def _lean_declaration_lines(lean_file: Path) -> dict[str, int]:
+    if not lean_file.is_file():
+        return {}
+    decls: dict[str, int] = {}
+    for line_no, line in enumerate(lean_file.read_text(encoding="utf-8").splitlines(), start=1):
+        match = LEAN_DECL_RE.match(line)
+        if match:
+            decls.setdefault(match.group(1), line_no)
+    return decls
+
+
+def _highlight_lean_line(line: str) -> str:
+    """Small dependency-free Lean highlighter for the published static viewer."""
+    escaped = html.escape(line, quote=False)
+    code, sep, comment = escaped.partition("--")
+    code = LEAN_KEYWORD_RE.sub(r'<span class="kw">\1</span>', code)
+    if sep:
+        return f'{code}<span class="comment">--{comment}</span>'
+    return code or " "
+
+
+def render_lean_viewer(dest: Path, bp: Blueprint) -> None:
+    """Render ``lean/index.html`` beside the raw saved Lean file."""
+    lean_file = dest / "lean" / PUBLISHED_LEAN_NAME
+    if not lean_file.is_file():
+        return
+
+    viewer = lean_file.parent / LEAN_VIEWER_NAME
+    lines = lean_file.read_text(encoding="utf-8").splitlines()
+    rows = []
+    for number, line in enumerate(lines, start=1):
+        rows.append(
+            f'<tr id="L{number}">'
+            f'<td class="ln"><a href="#L{number}">{number}</a></td>'
+            f'<td class="code"><code>{_highlight_lean_line(line)}</code></td>'
+            f'</tr>'
+        )
+
+    title = html.escape(bp.title, quote=False)
+    blueprint_href = _href_from(viewer, dest / "index.html")
+    landing_href = _href_from(viewer, SITE_DIR / "index.html")
+    raw_href = _href_from(viewer, lean_file)
+    body = "\n".join(rows) or '<tr><td class="ln"></td><td class="code"><code> </code></td></tr>'
+    viewer.write_text(
+        f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lean formalization - {title}</title>
+  <style>
+    :root {{
+      --bg: #f7f8fa;
+      --panel: #ffffff;
+      --ink: #18202a;
+      --muted: #667085;
+      --accent: #2563eb;
+      --border: #d9e0e8;
+      --code-bg: #fbfcfe;
+      --line: #8a96a6;
+      --comment: #6a7f43;
+      --keyword: #7c3aed;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }}
+    .wrap {{ max-width: 76rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; }}
+    header {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: .75rem 1rem;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+    }}
+    h1 {{ font-size: 1.35rem; line-height: 1.25; margin: 0; }}
+    .subtitle {{ color: var(--muted); margin: .25rem 0 0; }}
+    .links {{ display: flex; flex-wrap: wrap; gap: .5rem; }}
+    a {{ color: var(--accent); }}
+    .btn {{
+      display: inline-block;
+      text-decoration: none;
+      font-size: .9rem;
+      padding: .35rem .65rem;
+      border: 1px solid var(--border);
+      border-radius: .45rem;
+      background: var(--panel);
+    }}
+    .codebox {{
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: .5rem;
+      background: var(--code-bg);
+    }}
+    table {{ width: 100%; border-collapse: collapse; font-size: .9rem; }}
+    td {{ vertical-align: top; }}
+    .ln {{
+      width: 1%;
+      min-width: 3.2rem;
+      padding: 0 .75rem;
+      text-align: right;
+      color: var(--line);
+      border-right: 1px solid var(--border);
+      user-select: none;
+    }}
+    .ln a {{ color: inherit; text-decoration: none; }}
+    .code {{ padding: 0 .9rem; }}
+    code {{
+      white-space: pre;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      line-height: 1.55;
+      tab-size: 2;
+    }}
+    tr:target {{ background: #eaf2ff; }}
+    .kw {{ color: var(--keyword); font-weight: 600; }}
+    .comment {{ color: var(--comment); font-style: italic; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>Lean formalization</h1>
+        <p class="subtitle">{title}</p>
+      </div>
+      <nav class="links" aria-label="Lean formalization links">
+        <a class="btn" href="{blueprint_href}">Blueprint</a>
+        <a class="btn" href="{raw_href}">Raw .lean</a>
+        <a class="btn" href="{landing_href}">All blueprints</a>
+      </nav>
+    </header>
+    <main class="codebox">
+      <table aria-label="Lean source">
+        <tbody>
+{body}
+        </tbody>
+      </table>
+    </main>
+  </div>
+</body>
+</html>
+""",
+        encoding="utf-8",
+    )
+
+
+def _inject_local_lean_style(text: str) -> str:
+    if LOCAL_LEAN_STYLE_MARKER in text:
+        return text
+    style = """
+<style id="bp-local-lean-style">
+  .bp-local-lean-link {
+    display: inline-block;
+    margin-left: .35rem;
+    padding: .05rem .35rem;
+    border: 1px solid #b9d5ff;
+    border-radius: .35rem;
+    color: #1554b7;
+    background: #eef6ff;
+    font: 600 .72rem/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    text-decoration: none;
+    vertical-align: middle;
+  }
+  .bp-local-lean-link:hover { background: #dcecff; }
+</style>"""
+    if "</head>" in text:
+        return text.replace("</head>", style + "\n</head>", 1)
+    return style + "\n" + text
+
+
+def _inject_header_nav_style(text: str) -> str:
+    if HEADER_NAV_STYLE_MARKER in text:
+        return text
+    style = """
+<style id="bp-header-nav-style">
+  body > header {
+    gap: .5rem;
+    min-height: 2.5rem;
+  }
+  .bp-site-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .45rem;
+    align-items: center;
+    margin-right: auto;
+  }
+  .bp-site-nav a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 1.65rem;
+    padding: .18rem .55rem;
+    border: 1px solid #d0d7de;
+    border-radius: .45rem;
+    background: #ffffff;
+    color: #24292e;
+    text-decoration: none;
+    text-shadow: none;
+    font: 600 .85rem/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    white-space: nowrap;
+  }
+  .bp-site-nav a:hover {
+    background: #f6f8fa;
+    border-color: #afb8c1;
+  }
+  .bp-site-nav .bp-lean-link {
+    color: #1554b7;
+    border-color: #b9d5ff;
+    background: #eef6ff;
+  }
+  .bp-site-nav .bp-lean-link:hover {
+    background: #dcecff;
+  }
+</style>"""
+    if "</head>" in text:
+        return text.replace("</head>", style + "\n</head>", 1)
+    return style + "\n" + text
+
+
+def inject_local_lean_links(dest: Path, nodes: dict[str, Node]) -> None:
+    """Add per-node links from rendered statements to generated Lean lines."""
+    lean_viewer = dest / "lean" / LEAN_VIEWER_NAME
+    lean_file = dest / "lean" / PUBLISHED_LEAN_NAME
+    decl_lines = _lean_declaration_lines(lean_file)
+    if not lean_viewer.is_file() or not decl_lines:
+        return
+
+    node_links: dict[str, tuple[str, int]] = {}
+    for label, node in nodes.items():
+        if node.mathlibok:
+            continue
+        decl = _lean_name(label)
+        line = decl_lines.get(decl)
+        if line is not None:
+            node_links[label] = (decl, line)
+    if not node_links:
+        return
+
+    for html_path in dest.rglob("*.html"):
+        if html_path == lean_viewer:
+            continue
+        text = html_path.read_text(encoding="utf-8")
+        changed = False
+        href = _href_from(html_path, lean_viewer)
+        for label, (decl, line) in node_links.items():
+            pattern = re.compile(
+                r'(<div class="[^"]*_thmwrapper[^"]*" id="'
+                + re.escape(label)
+                + r'">[\s\S]*?<div class="thm_header_extras">\s*)'
+            )
+            decl_title = html.escape(decl, quote=True)
+            badge = (
+                f'\n    <a class="bp-local-lean-link" '
+                f'href="{href}#L{line}" '
+                f'title="Generated Lean declaration {decl_title}">Lean</a>\n'
+            )
+            text, count = pattern.subn(r"\1" + badge, text, count=1)
+            changed = changed or bool(count)
+        if changed:
+            text = _inject_local_lean_style(text)
+            html_path.write_text(text, encoding="utf-8")
+
+
 def inject_header_links(dest: Path) -> None:
     """Add landing-page and saved-Lean links to each generated HTML header."""
-    lean_file = dest / "lean" / "formalization.lean"
+    lean_viewer = dest / "lean" / LEAN_VIEWER_NAME
     for html in dest.rglob("*.html"):
+        if html == lean_viewer:
+            continue
         text = html.read_text(encoding="utf-8")
         if "<header>" not in text:
             continue
         links: list[str] = []
         if HOME_LINK_MARKER not in text:
             links.append(f'\n<a class="bp-home-link" href="{_href_from(html, SITE_DIR / "index.html")}">← All blueprints</a>')
-        if lean_file.is_file() and LEAN_LINK_MARKER not in text:
-            links.append(f'\n<a class="bp-lean-link" href="{_href_from(html, lean_file)}">Lean formalization</a>')
+        if lean_viewer.is_file() and LEAN_LINK_MARKER not in text:
+            links.append(f'\n<a class="bp-lean-link" href="{_href_from(html, lean_viewer)}">Lean formalization</a>')
         if links:
-            text = text.replace("<header>", "<header>" + "".join(links), 1)
+            nav = '\n<nav class="bp-site-nav" aria-label="Blueprint site links">' + "".join(links) + "\n</nav>"
+            text = _inject_header_nav_style(text)
+            text = text.replace("<header>", "<header>" + nav, 1)
             html.write_text(text, encoding="utf-8")
 
 
-def copy_to_site(bp: Blueprint) -> None:
+def copy_to_site(bp: Blueprint, nodes: dict[str, Node]) -> None:
     """Copy the rendered blueprint plus saved artifacts into ``site/<name>/``."""
     dest = SITE_DIR / bp.name
     if dest.exists():
@@ -309,6 +632,8 @@ def copy_to_site(bp: Blueprint) -> None:
             lean_dest.mkdir(parents=True, exist_ok=True)
             for lean_file in lean_files:
                 shutil.copy(lean_file, lean_dest / lean_file.name)
+            render_lean_viewer(dest, bp)
+            inject_local_lean_links(dest, nodes)
 
     inject_header_links(dest)
 
@@ -322,7 +647,7 @@ def build_blueprint(bp: Blueprint) -> None:
     if bp.build_pdf:
         build_pdf(bp)
     build_web(bp)
-    copy_to_site(bp)
+    copy_to_site(bp, validation.nodes)
     extra = " (+ blueprint.pdf)" if (SITE_DIR / bp.name / "blueprint.pdf").is_file() else ""
     print(f"  ok -> site/{bp.name}/{extra}")
 
@@ -341,7 +666,7 @@ def render_landing(blueprints: list[Blueprint]) -> None:
     cards = []
     for bp in blueprints:
         has_pdf = (SITE_DIR / bp.name / "blueprint.pdf").is_file()
-        has_lean = (SITE_DIR / bp.name / "lean" / "formalization.lean").is_file()
+        has_lean = (SITE_DIR / bp.name / "lean" / LEAN_VIEWER_NAME).is_file()
         cards.append(
             {
                 "name": bp.name,
@@ -349,7 +674,7 @@ def render_landing(blueprints: list[Blueprint]) -> None:
                 "description": bp.description,
                 "url": f"./{bp.name}/",
                 "pdf_url": f"./{bp.name}/blueprint.pdf" if has_pdf else None,
-                "lean_url": f"./{bp.name}/lean/formalization.lean" if has_lean else None,
+                "lean_url": f"./{bp.name}/lean/" if has_lean else None,
                 "home": bp.home,
                 "github": bp.github,
             }

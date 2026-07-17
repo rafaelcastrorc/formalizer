@@ -21,6 +21,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from lean_preflight import check_lean_environment
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -86,7 +88,12 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_cache:
         run(["lake", "exe", "cache", "get"], env=env)
 
-    print("Lean toolchain and Mathlib dependencies are ready.")
+    result = check_lean_environment(REPO_ROOT)
+    if not result.ok:
+        print(result.stderr or result.stdout, file=sys.stderr)
+        raise SystemExit(f"Lean setup finished, but preflight failed: {result.message}")
+
+    print(f"Lean toolchain and Mathlib dependencies are ready ({result.elapsed_s:.1f}s preflight).")
     return 0
 
 

@@ -291,20 +291,156 @@ uv run python scripts/refine_blueprint_with_lean.py my-paper \
   --paper /Users/rafaelcastro/Downloads/pseudo-rand-gen.pdf \
   --runner codex \
   --reasoning-effort high \
-  --max-trials 5
+  --max-trials 3
 ```
 
 This loop is intentionally different from “ask the model to hack Lean until it
 passes.”
 
-Each trial does this:
+```mermaid
+flowchart TD
+    A["Existing blueprint"] --> B["Validate blueprint structure"]
+    B --> P["Automatically choose next dependency-closed chunk from uses graph"]
+    P -->|No chunks left| Z["Assemble final formalization.lean"]
+    Z --> ZC["Run final Lean check"]
+    ZC --> L["Publish formalization.lean"]
+    B --> S["Search local Lean libraries for this blueprint version"]
+    P --> C["Read-only model generates Lean for this chunk only"]
+    S --> C
+    C --> D["Run lake env lean on accepted module imports plus chunk"]
+    D -->|Lean compile fails from bad Lean encoding| E["Retry Lean generation for same chunk"]
+    E --> C
+    D -->|Lean compiles| F["Correctness audit: no sorry, axioms, True-proofs, etc."]
+    F -->|Audit rejects bad Lean encoding| E
+    F -->|Audit passes| G["Statement-alignment audit for target chunk"]
+    G --> H["Deterministic coverage checks"]
+    H --> I["Read-only critic compares target blueprint nodes vs Lean declarations"]
+    I -->|Blueprint is concrete, Lean mistranslated it| E
+    I -->|Missing semantics, abstract tags, or erased behavior| J["Author model repairs blueprint source"]
+    J --> K["Invalidate changed/downstream chunks, revalidate, replan"]
+    K --> B
+    I -->|Accepted| A1["Save accepted chunk as Lean module"]
+    A1 --> P
+    L --> M["Rebuild that blueprint page"]
+    M --> N["Website links each node to its Lean declaration"]
+```
+
+Each chunk loop does this:
 
 1. validate the current blueprint structure;
-2. generate a disposable Lean file from the blueprint only;
-3. run `lake env lean` through this repo's pinned Lean project;
-4. if Lean fails, feed the Lean error back to the model;
-5. require the model to edit the blueprint, not the Lean file;
-6. regenerate Lean from the improved blueprint on the next trial.
+2. automatically choose the next dependency-closed chunk from the `\uses{...}`
+   graph;
+3. search local Lean libraries for this blueprint version;
+4. make a read-only model call that sees the whole dependency graph, the target
+   node source, relevant unresolved dependency source, accepted Lean signatures,
+   and local library candidates, then ask it to generate Lean only for the
+   target chunk;
+5. save accepted chunks as temporary Lean modules and run `lake env lean` on
+   imports of those modules plus the new chunk;
+6. if Lean compiles, run correctness and statement-alignment audits for the
+   target chunk;
+7. if Lean/audit fails because the blueprint is concrete but the Lean
+   translation is bad, retry Lean generation for the same chunk;
+8. if Lean/audit fails because the blueprint is missing
+   mathematical content, is too abstract, or lets Lean erase the intended
+   behavior, make a second model call with the blueprint plus the critic output;
+9. require that second call to edit the blueprint, not the Lean file;
+10. after a blueprint repair, revalidate the whole blueprint and invalidate
+    only changed nodes plus downstream nodes that depend on them;
+11. if the chunk passes, save it as a generated Lean module and move to the
+    next chunk;
+12. when all chunks pass, assemble a standalone `formalization.lean`, run a
+    final Lean check, and publish it.
+
+So a blueprint-content failure has two model phases:
+
+```text
+blueprint + current chunk -> model generates Lean -> script runs Lean + audit -> Lean/audit errors
+Lean/audit errors + blueprint -> model repairs blueprint
+```
+
+The next pass then starts over from the repaired blueprint:
+
+```text
+repaired blueprint -> replan chunks -> model generates fresh Lean for the next chunk
+```
+
+Lean and audit errors are therefore still used to repair the blueprint. Chunking
+only changes the size of the Lean obligation; the blueprint remains the source
+of truth. You do not normally choose a chunk size: the script traverses the
+dependency graph from the currently-ready frontier and uses an internal batch
+limit. There is an advanced `--chunk-size` override for experiments, but the
+Web UI intentionally hides it. After a blueprint repair, accepted chunks whose
+node text did not change are kept; changed nodes and their downstream
+dependents are regenerated.
+
+Accepted chunks are cached as generated Lean modules under
+`AutoBlueprint/Generated/<BlueprintName>/ChunkNN.lean` during the run. Later
+chunks import those modules, and the model sees compact accepted declaration
+signatures instead of thousands of lines of prior Lean source. These module
+files are scratch cache and ignored by Git. When all chunks pass, the script
+assembles a standalone `blueprints/<name>/blueprint/lean/formalization.lean`
+for the website and for Git.
+
+The Lean-generation prompt is deliberately scoped. It does not resend the full
+TeX source of every blueprint node on every chunk. It sends the global node
+graph for orientation, then only the target chunk source plus unresolved
+dependency source. Blueprint repair calls still receive the broader blueprint
+context because those calls are allowed to edit the blueprint itself.
+
+The local library search is done once per blueprint version/chunk pass, not once
+per Lean retry. It searches installed local Lean libraries, currently Mathlib
+and any CS Lib checkout found under `.lake/packages/`, for likely
+declarations/modules. If deterministic search finds too little, the read-only
+model proposes extra search terms, then deterministic search runs again. The
+resulting candidate list is reused for every Lean-generation retry in that
+chunk.
+
+Lean-generation failures are handled differently. If the generated Lean fails
+because of syntax, bad imports, implicit-argument problems, missing explicit
+types, unknown identifiers, or the correctness audit below, the script retries
+Lean generation from the same blueprint instead of changing the blueprint.
+This retry count is internal; the user-facing bound is `--max-trials`, which
+counts blueprint-repair trials.
+
+By default, generated Lean must pass a correctness audit:
+
+- no `sorry`;
+- no `admit`;
+- no `by ?`;
+- no vacuous `theorem`/`lemma`/`example` declarations whose statement is just
+  `True`;
+- no `axiom`;
+- no `constant`;
+- no `opaque`;
+- `set_option autoImplicit false` is required.
+
+This prevents a false success where Lean compiles only because the paper's
+actual results were declared as assumptions. There is no user-facing override
+for this in the refinement loop.
+
+After Lean compiles, the file must also pass a statement-alignment audit before
+it is published. This audit has two layers:
+
+- deterministic coverage checks: every non-`\mathlibok` blueprint node must
+  have the expected generated Lean declaration name, such as
+  `lem:inner-scaled` -> `lem_inner_scaled`;
+- a separate read-only critic model compares each blueprint node with its Lean
+  declaration and rejects publication if the Lean statement weakens the claim,
+  drops parameters or hypotheses, replaces concrete claims by placeholders, or
+  is too abstract to represent the blueprint.
+
+Those audit failures are routed differently depending on what went wrong. If
+the blueprint already states the mathematics concretely and the generated Lean
+just encoded it badly, the script retries Lean generation. If the audit says
+the Lean could only pass by using abstract tags, missing semantics, erased
+behavior, dropped hypotheses, or similarly weak statements, the script treats
+that as a blueprint-repair failure and asks the author model to strengthen the
+blueprint before trying Lean again.
+
+So "Lean compiles" means the proof is valid for the Lean statement, but
+Auto-Blueprint now requires "Lean compiles and the statement audit accepts" to
+publish the file.
 
 The generation call (step 2) constructs its runner with `readonly=True`, a
 contract every backend honors: `claude-code` hard-blocks the shell and edit
@@ -317,14 +453,29 @@ Mathlib modules they need rather than the blanket `import Mathlib`, which
 keeps each compile check to seconds instead of minutes. The repair step
 (step 5) keeps normal repo access, since it must edit blueprint files.
 
-The script stops when Lean passes or when `--max-trials` is reached. Disposable
-Lean attempts and reports are written under:
+The script stops when Lean compiles and the statement-alignment audit accepts,
+or when `--max-trials` is reached. Disposable Lean attempts and reports are
+written under:
 
 ```text
 .auto-blueprint/formalization/
 ```
 
 That directory is ignored by Git.
+
+Each refinement run also writes a timestamped raw transcript:
+
+```text
+.auto-blueprint/formalization/<name>/run-YYYYMMDD-HHMMSS.log
+```
+
+The shorter `report.md` links to that log. Use the log when you need the full
+terminal output for model calls, Lean failures, audit failures, and rebuild
+output.
+
+If the read-only model call times out or fails before producing Lean, the run
+stops without changing the blueprint and writes a fresh `report.md` for that
+same run. That prevents an old report from looking like the current failure.
 
 If Lean passes, the passing attempt is promoted out of scratch space and saved
 as:
@@ -333,14 +484,22 @@ as:
 blueprints/<name>/blueprint/lean/formalization.lean
 ```
 
-On the next site build, `scripts/build.py` copies that file to:
+The refinement script then rebuilds that blueprint automatically. The rebuilt
+site contains:
 
 ```text
+site/<name>/lean/index.html
 site/<name>/lean/formalization.lean
 ```
 
-The blueprint page and the landing page both link to it. Failed Lean attempts
-are not published.
+The blueprint page and the landing page link to `lean/index.html`, a readable
+static Lean viewer with line numbers and a link to the raw
+`formalization.lean` source. When a generated declaration name matches a
+blueprint node label, for example `def:gamma-minip` -> `def_gamma_minip`, the
+rendered node heading also gets a local `Lean` link to that exact line in the
+viewer. The older checkmarks on `\mathlibok` nodes still mean "already in
+Mathlib"; generated formalizations use local `Lean` links instead. Failed Lean
+attempts are not published and do not trigger a site rebuild.
 
 ## Deployment
 
