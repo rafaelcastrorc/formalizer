@@ -951,33 +951,43 @@
   The paper repeatedly uses the same logarithmic dimension and approximation
   regimes. This node must introduce concrete definitions for the six named
   logarithmic-regime functions and predicate. The declaration audited at
-  label \ref{def:log-parameter-regimes} is not allowed to be just a value that
-  repackages previously existing root constants, and it is not allowed to be a
-  structure whose fields are arbitrary functions of the right types.
+  label \ref{def:log-parameter-regimes} is the package that owns these six
+  objects. It is not allowed to be just a value that repackages previously
+  existing root constants, and it is not allowed to be a structure containing
+  only formula proofs about identifiers defined elsewhere.
 
-  A compliant Lean implementation has one of the following two shapes:
+  A compliant Lean implementation has one of the following two shapes, and in
+  both shapes the declaration audited at this label has data fields for the six
+  functions/predicate:
   \begin{itemize}
     \item six transparent top-level declarations named exactly
       `logn', `logDim', `polylogDim', `msdHardDim', `mildMsdGamma', and
-      `msdHardGammaAllowed', each with the defining equation displayed below,
-      and the label declaration \emph{also} exposes those equations by
-      transparent simp theorems or projection fields at this same node; or
+      `msdHardGammaAllowed', each with the defining equation displayed below.
+      The label declaration must then be a reducible package, such as
+      `def_log_parameter_regimes : LogParameterRegimePackage', whose data fields
+      are exactly those six declarations and whose proof fields expose the six
+      equations for those data fields. The package may set, for example,
+      `logn := logn', but the field `logn' must still be present in the audited
+      package; or
     \item a single structure/Sigma value named for this label whose data fields
       are the six functions/predicate and whose proof fields state the six
       displayed equations for those very fields.
   \end{itemize}
-  In the second shape, the equation fields are mandatory. For example, if
+  In both shapes, the data fields and the equation fields are mandatory. For
+  example, if
   $R:\operatorname{LogParameterRegimes}$ is the bundled object, the object must
   contain fields such as
   \[
+    R.\operatorname{logn}:\N\to\R,
+    \qquad
     R.\operatorname{logn\_eq} :
       \forall n,\ R.\operatorname{logn}(n)=\log n
   \]
-  and analogous fields for the other five definitions. Merely setting
-  $R.\operatorname{logn}:={\_root\_.\logn}$, or storing proofs that separately
-  declared constants somewhere else have the desired equations, does not satisfy
-  this node; downstream blueprint nodes must be able to unfold or project the
-  formulas from the declaration audited here.
+  and analogous data/equation pairs for the other five definitions. Merely
+  storing proofs that separately declared constants somewhere else have the
+  desired equations does not satisfy this node; downstream blueprint nodes must
+  be able to project the six objects and their formulas from the declaration
+  audited here.
 
   The six required definitions, with domains and defining equations, are:
   \[
@@ -995,7 +1005,7 @@
   \[
     \msdHardDim : \R\to\N\to\N,\qquad
     \msdHardDim(c,n) =
-      \left\lceil(\log n)^{\frac{c\log n}{(\log\log n)^2}}\right\rceil,
+      \left\lceil n^{\frac{c}{\log\log n}}\right\rceil,
   \]
   \[
     \mildMsdGamma : \N\to\R,\qquad
@@ -1003,20 +1013,29 @@
   \]
   Finally,
   \[
-    \msdHardGammaAllowed : \N\to\R\to\mathrm{Prop}
+    \msdHardGammaAllowed : \R\to\N\to\R\to\mathrm{Prop}
   \]
-  is the predicate
+  is the fixed-polylogarithmic approximation-regime predicate
   \[
-    \msdHardGammaAllowed(n,\gamma)
+    \msdHardGammaAllowed(C_\gamma,n,\gamma)
     \Longleftrightarrow
-    1 \le \gamma \ \wedge\ \gamma \le
-    \left(1+\frac{1}{\log\log n}\right)^{\frac{\log n}{(\log\log n)^2}}.
+    C_\gamma>0\ \wedge\ 1 \le \gamma \ \wedge\
+    \gamma \le(\log n)^{C_\gamma}.
   \]
   Here $\logn$ is real-valued, the dimension functions are natural-valued using
   the fixed ceiling convention, and $\msdHardGammaAllowed$ is a proposition over
-  $(n,\gamma)$. Changing ceilings to floors plus a positive lower bound for
-  large $n$ would be an equivalent asymptotic convention, but the formal node
-  must still provide replacement definitions with the same inputs and outputs.
+  a fixed exponent $C_\gamma$ and the pair $(n,\gamma)$. The exponent
+  $C_\gamma$ is part of the regime data and is fixed independently of $n$; the
+  predicate is not the vacuous pointwise assertion that some exponent can be
+  chosen separately for each input size. This is the main-text
+  $\gamma\le\operatorname{polylog}(n)$ allowance. The hard dimension
+  $n^{c/\log\log n}$ is asymptotically the same as
+  $(\log n)^{c\log n/(\log\log n)^2}$ after renaming constants, but the
+  declaration audited here must expose the $n^{c/\log\log n}$ formula. It must
+  not substitute unrelated expressions such as $c(\log n)^2$.
+  Changing ceilings to floors plus a positive lower bound for large $n$ would
+  be an equivalent asymptotic convention, but the formal node must still provide
+  replacement definitions with the same inputs and outputs.
   The audited declaration must therefore expose all of the following
   field/projection equations, either definitionally or as transparent theorems
   attached to the same declaration:
@@ -1031,23 +1050,24 @@
     \operatorname{msdHardDim\_eq}:&
       \forall c,n,\
       \msdHardDim(c,n)=
-      \left\lceil(\log n)^{\frac{c\log n}{(\log\log n)^2}}\right\rceil,\\
+      \left\lceil n^{\frac{c}{\log\log n}}\right\rceil,\\
     \operatorname{mildMsdGamma\_eq}:&
       \forall n,\ \mildMsdGamma(n)=1+\frac{1}{\log\log n},\\
     \operatorname{msdHardGammaAllowed\_iff}:&
-      \forall n,\gamma,\ 
-      \msdHardGammaAllowed(n,\gamma)\Longleftrightarrow
-      1\le\gamma\wedge
-      \gamma\le
-      \left(1+\frac{1}{\log\log n}\right)^{
-        \frac{\log n}{(\log\log n)^2}}.
+      \forall C_\gamma,n,\gamma,\ 
+      \msdHardGammaAllowed(C_\gamma,n,\gamma)\Longleftrightarrow
+      C_\gamma>0\wedge 1\le\gamma\wedge
+      \gamma\le(\log n)^{C_\gamma}.
   \end{array}
   \]
   A declaration at this label is rejected if it has type `Unit', if it ends in
   `True', if it only states a property of $\msdHardGammaAllowed$, if it only
   packages externally existing constants into a value such as
-  `def_log_parameter_regimes : LogParameterRegimes', or if its bundled type has
-  the six function fields but lacks the six displayed equation fields. The
+  `def_log_parameter_regimes : LogParameterRegimes' whose type lacks six data
+  projections, if it is a proof-only structure with fields such as
+  `logn_eq : logn n = log n' about root identifiers but no corresponding
+  `logn' data field, or if its bundled type has the six function fields but
+  lacks the six displayed equation fields. The six functions/predicate and their
   formulas must be recoverable from the label declaration itself.
 \end{definition}
 
@@ -1088,9 +1108,11 @@
   \label{def:attention}
   \uses{def:softmax}
   This node defines the full attention map, not just a container for its
-  weights. For positive natural numbers $n,d_{\mathrm{in}},d_{\mathrm{out}},m$,
-  an implementation at this label must introduce, or expose as fields with
-  projection equations, all of the following objects:
+  weights. The declaration audited at this label must be a structured package
+  such as `AttentionData' (or an equivalent dependent Sigma package), not only a
+  record of positive dimensions and matrices. For positive natural numbers
+  $n,d_{\mathrm{in}},d_{\mathrm{out}},m$, an element of the package contains
+  all of the following fields:
   \[
   \begin{array}{ll}
     Q,K &: \R^{d_{\mathrm{in}}\times m},\\
@@ -1101,11 +1123,41 @@
       \R^{n\times d_{\mathrm{out}}}.
   \end{array}
   \]
-  The query-key bilinear matrix is definitionally
+  In addition to these object fields, the same audited declaration contains
+  named equation fields, for example
+  \[
+  \begin{array}{ll}
+    \operatorname{qkMatrix\_entry}:&
+      \forall a,b,\
+      (M_{Q,K})_{a,b}=\sum_{r=1}^m Q_{a,r}K_{b,r},\\
+    \operatorname{score\_entry}:&
+      \forall X,i,j,\
+      S_{Q,K}(X)_{i,j}=
+      \sum_{a=1}^{d_{\mathrm{in}}}\sum_{b=1}^{d_{\mathrm{in}}}
+        X_{i,a}(M_{Q,K})_{a,b}X_{j,b},\\
+    \operatorname{apply\_eq}:&
+      \forall X,\ A_{Q,K,V}(X)=\softmax(S_{Q,K}(X))XV,\\
+    \operatorname{apply\_entry}:&
+      \forall X,i,o,\
+      A_{Q,K,V}(X)_{i,o}=
+      \sum_{j=1}^{n}
+        \frac{\exp(S_{Q,K}(X)_{i,j})}
+             {\sum_{k=1}^{n}\exp(S_{Q,K}(X)_{i,k})}
+        \left(\sum_{a=1}^{d_{\mathrm{in}}}X_{j,a}V_{a,o}\right).
+  \end{array}
+  \]
+  These are fields or transparent projection theorems of the declaration at
+  label \ref{def:attention}; they are not optional lemmas to be supplied later.
+  Equivalently, the object fields may be transparent definitions rather than
+  stored data, but after unfolding the audited declaration the projections
+  `qkMatrix', `score' and `apply' must reduce to the formulas above and the four
+  named equations must be available at this same node.
+
+  The query-key bilinear matrix is therefore
   \[
     (M_{Q,K})_{a,b}=\sum_{r=1}^m Q_{a,r}K_{b,r}.
   \]
-  The score matrix is definitionally the function
+  The score matrix is the function
   $S_{Q,K}(X) \in \R^{n\times n}$ with entry equation
   \[
     S_{Q,K}(X)_{i,j}
@@ -1128,11 +1180,13 @@
   \]
   This is exactly the usual matrix formula for pairwise query-key scores, but
   the score and output equations are part of the definition. A Lean declaration
-  at this label that merely stores $Q,K,V$, or stores $Q,K,V$ plus an arbitrary
-  uninterpreted run function, omits the mathematical content of Definition~2.1.
-  If the formalization uses a structure such as `Attention', that structure
-  must have transparent projections or simp theorems for `score' and `apply'
-  reducing to the two displayed formulas above.
+  at this label that merely stores $Q,K,V$, even with positivity proofs, is not
+  this node. A declaration that stores $Q,K,V$ plus an arbitrary uninterpreted
+  run function also omits the mathematical content of Definition~2.1. If the
+  formalization uses a structure such as `Attention', that structure must have
+  transparent projections or simp theorems for `qkMatrix', `score' and `apply'
+  reducing to the displayed formulas above. The audit should reject a structure
+  whose only non-proof fields are the matrices $Q,K,V$.
   We write $\mathcal A_{d_{\mathrm{in}}, m, d_{\mathrm{out}}}$ for the set of all
   such attentions.
 \end{definition}
@@ -1164,15 +1218,46 @@
 
 \begin{definition}[Flattening matrices for a global output MLP]
   \label{def:matrix-flatten}
-  For positive natural numbers $n,d$, fix the standard row-major linear
-  equivalence
+  For positive natural numbers $n,d$, this node fixes the standard row-major
+  linear equivalence together with its coordinate and continuity data. The
+  declaration audited at this label must be a package such as
+  `MatrixFlattenData n d' (or an equivalent dependent Sigma package) with named
+  fields
+  \[
+  \begin{array}{ll}
+    \operatorname{flatten}_{n,d} &: \R^{n\times d}\simeq \R^{nd},\\
+    \operatorname{unflatten}_{n,d} &: \R^{nd}\to\R^{n\times d},\\
+    \operatorname{flatten\_coord} &: 
+      \operatorname{flatten}_{n,d}(Y)_{(i-1)d+r}=Y_{i,r},\\
+    \operatorname{unflatten\_coord} &: 
+      \operatorname{unflatten}_{n,d}(z)_{i,r}=z_{(i-1)d+r},\\
+    \operatorname{continuous\_flatten} &: 
+      \operatorname{Continuous}(\operatorname{flatten}_{n,d}),\\
+    \operatorname{continuous\_unflatten} &: 
+      \operatorname{Continuous}(\operatorname{unflatten}_{n,d}).
+  \end{array}
+  \]
+  The equivalence is
   \[
     \operatorname{flatten}_{n,d}:\R^{n\times d}\simeq \R^{nd},
     \qquad
     \operatorname{flatten}_{n,d}(Y)_{(i-1)d+r}=Y_{i,r},
   \]
-  with inverse $\operatorname{unflatten}_{n,d}$. The equivalence preserves all
-  coordinates by the displayed equations and is continuous in both directions.
+  with inverse $\operatorname{unflatten}_{n,d}$. The package must also prove the
+  inverse coordinate equation
+  \[
+    \operatorname{unflatten}_{n,d}(z)_{i,r}=z_{(i-1)d+r}
+  \]
+  and the two continuity fields
+  \[
+    \operatorname{Continuous}(\operatorname{flatten}_{n,d}),
+    \qquad
+    \operatorname{Continuous}(\operatorname{unflatten}_{n,d}).
+  \]
+  These continuity proofs are part of the statement at
+  label \ref{def:matrix-flatten}. A declaration giving only an equivalence and
+  coordinate equations, while proving continuity nowhere or only in later
+  helper lemmas not projected from this node, is incomplete.
   This node exists only to make precise how the final MLP of
   Definition~\ref{def:transformer}, whose input is the whole attention-output
   matrix, may be represented as an ordinary vector-input MLP. Any formalization
@@ -1258,16 +1343,53 @@
   \label{def:attention-solves-predicate}
   \uses{def:attention, def:transformer, def:tf-solves, def:problem-family}
   For a concrete decision problem family $\mathcal P$ and a fixed parameter
-  value $p$, the assertion $\AttentionSolves{\mathcal P(p)}$ means that there
-  exist only the architectural witnesses
+  value $p$, together with fixed matrix dimensions
   \[
-    d_{\mathrm{in}},m,d_{\mathrm{out}},\ Q,K,V,\ \varphi_1,\ \varphi_2
+    n(p),\ d(p),\ d_{\mathrm{in}},\ m,\ d_{\mathrm{out}}
   \]
-  with dimensions matching the surrounding theorem, such that the structured
-  transformer of Definition~\ref{def:transformer}, built from the full attention
-  map of Definition~\ref{def:attention}, solves the concrete yes/no predicate of
+  specified by the surrounding theorem, the assertion
+  $\AttentionSolves{\mathcal P(p)}$ means that there exist only the remaining
+  architectural witnesses
+  \[
+    Q,K,V,\ \varphi_1,\ \varphi_2
+  \]
+  with those fixed dimensions, such that the structured transformer of
+  Definition~\ref{def:transformer}, built from the full attention map of
+  Definition~\ref{def:attention}, solves the concrete yes/no predicate of
   $\mathcal P$ at the already-fixed parameter $p$ in the sense of
-  Definition~\ref{def:tf-solves}.
+  Definition~\ref{def:tf-solves}. Thus the dimensions are inputs to the
+  predicate, not existential witnesses.
+
+  More explicitly, the audited declaration at this label must have the shape of
+  a predicate or witness package with fixed-dimension parameters, for example
+  \[
+  \begin{array}{l}
+    \operatorname{def\_attention\_solves}
+      (\mathcal P:\operatorname{ConcreteProblemFamily})
+      (p:\operatorname{Param}_{\mathcal P})
+      (n,d,d_{\mathrm{in}},m,d_{\mathrm{out}}:\N)\\
+    \qquad
+      (h_n:0<n)(h_d:0<d)(h_{\mathrm{in}}:0<d_{\mathrm{in}})
+      (h_m:0<m)(h_{\mathrm{out}}:0<d_{\mathrm{out}})
+      (\operatorname{embed}:
+        \operatorname{Inst}_{\mathcal P}(p)\to\R^{n\times d})
+      : \mathrm{Prop},
+  \end{array}
+  \]
+  and then quantify only
+  \[
+    Q,K\in\R^{d_{\mathrm{in}}\times m},\quad
+    V\in\R^{d_{\mathrm{in}}\times d_{\mathrm{out}}},
+    \quad
+    \varphi_1:\R^d\to\R^{d_{\mathrm{in}}},
+    \quad
+    \varphi_2:\R^{n d_{\mathrm{out}}}\to\R .
+  \]
+  If the implementation uses a witness structure instead of a `Prop', that
+  structure must store exactly these fixed-dimension matrices and MLPs, plus
+  continuity proofs for the MLPs and the solving proof below. It must not store
+  an arbitrary prebuilt `def_transformer' or `Transformer' value whose own
+  fields include independent dimensions $n,d,d_{\mathrm{in}},m,d_{\mathrm{out}}$.
 
   The parameter $p$, the instance type $\operatorname{Inst}_{\mathcal P}(p)$,
   the yes-predicate $\operatorname{Yes}_{\mathcal P}(p,I)$, and the canonical
@@ -1283,7 +1405,8 @@
   A witness therefore consists of matrices and continuous MLPs plus a proof
   \[
     \forall I:\operatorname{Inst}_{\mathcal P}(p),\quad
-      \TF(\operatorname{embed}_{\mathcal P,p}(I))=1
+      \TF_{Q,K,V,\varphi_1,\varphi_2}^{n,d,d_{\mathrm{in}},m,d_{\mathrm{out}}}
+        (\operatorname{embed}_{\mathcal P,p}(I))=1
       \Longleftrightarrow
       \operatorname{Yes}_{\mathcal P}(p,I),
   \]
@@ -1291,7 +1414,18 @@
   formal output is real-valued rather than Boolean. An arbitrary function, a
   constant function, a proof using only an uninterpreted problem tag, or a proof
   made vacuous by choosing an empty auxiliary valid-instance predicate does not
-  witness $\AttentionSolves{\mathcal P(p)}$.
+  witness $\AttentionSolves{\mathcal P(p)}$. A declaration that existentially
+  quantifies
+  \[
+    T:\operatorname{def\_transformer}
+  \]
+  and relies on `def_tf_solves' to relate $T$'s dimensions to $p$ is also
+  rejected: the dimension match must be syntactic in this node, by constructing
+  $T$ from the fixed-dimension data displayed above. A convenience theorem may
+  package those data into a transformer, but its projection equations must show
+  that the transformer's dimensions are exactly the fixed inputs and that its
+  evaluation reduces to Definition~\ref{def:transformer}'s displayed
+  composition.
 \end{definition}
 
 \chapter{Document similarity embeddings and problems}
@@ -1340,6 +1474,37 @@
 \begin{definition}[Cosine similarity]
   \label{def:cosine}
   \uses{def:inner-prod, def:l2norm}
+  This node defines cosine similarity as a function on the subtype of pairs of
+  nonzero vectors, not as an unrestricted quotient on all finite real vectors.
+  The declaration audited at this label must expose a package
+  $\operatorname{CosineData}$, or an equivalent dependent Sigma package, with
+  the following named fields:
+  \[
+  \begin{array}{ll}
+    \operatorname{cosine} &: 
+      \{(v,w): v,w\in\R^d,\ v\ne0,\ w\ne0\}\to\R,\\
+    \operatorname{cosine\_eq} &: 
+      \forall v,w,\ v\ne0\to w\ne0,\quad
+      \operatorname{cosine}(v,w)=
+      \dfrac{\inner{v}{w}}{\norm{v}\norm{w}},\\
+    \operatorname{binary\_range} &: 
+      \forall v,w\in\{0,1\}^d,\ v\ne0\to w\ne0,\quad
+      0\le \operatorname{cosine}(v,w)\le1,\\
+    \operatorname{zero\_iff\_inner\_zero} &: 
+      \forall v,w\in\{0,1\}^d,\ v\ne0\to w\ne0,\quad
+      \operatorname{cosine}(v,w)=0\Longleftrightarrow
+      \inner{v}{w}=0.
+  \end{array}
+  \]
+  The nonzero hypotheses are part of the domain and must be visible from this
+  declaration. A formalization may implement the function using a subtype
+  domain, or by a function taking explicit proofs $v\ne0$ and $w\ne0$, but the
+  audited declaration must include the quotient equation and the binary-vector
+  range theorem above. A bare definition
+  `fun v w => inner v w / (norm v * norm w)' on all real finite vectors is not
+  this node, because it erases the nonzero domain and omits the $[0,1]$ range
+  property used by the document-similarity problems.
+
   For nonzero document embeddings $v, w \in \R^{d}$, their \emph{cosine
   similarity} is
   \[
@@ -1376,7 +1541,7 @@
 
 \begin{definition}[Most Similar Document, $\MSD_{n,\ell}$, Definition 2.10]
   \label{def:msd}
-  \uses{def:cosine, def:parameter-sensitive-placeholder}
+  \uses{def:cosine, def:problem-family}
   For parameters $n,\ell \in \N$, an instance of $\MSD_{n,\ell}$ is an
   $n$-tuple $(v_1,\ldots,v_n)$ of nonzero vectors in $\{0,1\}^{\ell}$. A valid
   output is a pair $(i,j)$ with $1 \le i,j \le n$, $i \ne j$, such that
@@ -1391,11 +1556,69 @@
   because of the normalization by $\norm{v_i}\norm{v_j}$. A declaration that is
   only a parameter tag named $\MSD$ omits the search relation and is not aligned
   with this definition.
+
+  The declaration audited at this label is a self-contained data package
+  `def_msd' (for example a structure value `MSDProblemData'), not
+  `def_parameter_sensitive_placeholder', not a call to that placeholder, and not
+  a bare `ConcreteProblemFamily' value whose concrete score and optimum are only
+  hidden in external helpers. The package may contain a field
+  `family : ConcreteProblemFamily' for use by later algorithmic nodes, but the
+  audited declaration itself must also expose the concrete fields and projection
+  equations below, under these names or transparent equivalents:
+  \[
+  \begin{array}{ll}
+    \operatorname{MSDParam} &= \{(n,\ell): n,\ell\in\N,\ n\ge2,\ \ell\ge1\},\\
+    \operatorname{MSDInst}(n,\ell) &=
+      \{V:\operatorname{Fin} n\to\R^\ell :
+        \forall i,r,\ V_i[r]\in\{0,1\}\ \wedge\ V_i\ne0\},\\
+    \operatorname{MSDOut}(n,\ell,V) &=
+      \{(i,j): i,j:\operatorname{Fin} n,\ i\ne j\},\\
+    \operatorname{MSDScore}(V,i,j) &=
+      \cossim{V_i}{V_j},\\
+    \operatorname{MSDOpt}(V) &=
+      \max_{i\ne j}\operatorname{MSDScore}(V,i,j),\\
+    \operatorname{MSDValidOut}(n,\ell,V,(i,j))
+      &\Longleftrightarrow
+      i\ne j\ \wedge\
+      \operatorname{MSDScore}(V,i,j)=\operatorname{MSDOpt}(V).
+  \end{array}
+  \]
+  In field form, the package must contain at least
+  \[
+  \begin{array}{ll}
+    \operatorname{param} &: \mathrm{Type},\\
+    \operatorname{inst} &: \operatorname{param}\to\mathrm{Type},\\
+    \operatorname{out} &: \prod_p \operatorname{inst}(p)\to\mathrm{Type},\\
+    \operatorname{score} &: \prod_{p,V}
+      \operatorname{out}(p,V)\to\R,\\
+    \operatorname{opt} &: \prod_{p,V}\R,\\
+    \operatorname{validOut} &: \prod_{p,V}
+      \operatorname{out}(p,V)\to\mathrm{Prop},\\
+    \operatorname{family} &: \operatorname{ConcreteProblemFamily},
+  \end{array}
+  \]
+  together with equations identifying these fields with `MSDParam',
+  `MSDInst', `MSDOut', `MSDScore', `MSDOpt', and `MSDValidOut' as displayed
+  above, and equations saying that `family.Param', `family.Inst',
+  `family.Out', and `family.ValidOut' are exactly the package's own
+  `param', `inst', `out', and `validOut'. The maximum in `MSDOpt' is over
+  distinct pairs only; the diagonal is not part of the search space.
+
+  If the implementation packages these names into a `ConcreteProblemFamily',
+  that family must be a projection of the data package audited at this label and
+  the listed equations must unfold from the package. Merely providing abstract
+  declarations named `MSDParam', `MSDInst', `MSDOut' and `MSDValidOut', then
+  storing them in a family record without the score/opt equations above, is
+  rejected. The distinct-pair output type and the maximum-cosine validity
+  relation are the content of the node. A Lean declaration whose body or main
+  proof term is `def_parameter_sensitive_placeholder', a wrapper around it, an
+  opaque family tag, `Unit', or a proposition ending in `True' does not satisfy
+  this definition.
 \end{definition}
 
 \begin{definition}[$\gamma$-MSD, Definition 2.11]
   \label{def:gamma-msd}
-  \uses{def:cosine, def:parameter-sensitive-placeholder}
+  \uses{def:cosine, def:problem-family, def:msd}
   For parameters $n,\ell\in\N$ and approximation factor $\gamma\ge 1$, an
   instance of $\gamma\text{-}\MSD_{n,\ell}$ is an $n$-tuple of nonzero vectors
   $v_1,\ldots,v_n\in\{0,1\}^{\ell}$. A valid output is a pair
@@ -1411,11 +1634,54 @@
   formal output relation. A formalization must encode the approximation factor,
   the maximum over distinct pairs, and the returned pair; it cannot replace the
   problem by an uninterpreted family tag.
+
+  The audited declaration is a self-contained data package `def_gamma_msd', not
+  `def_parameter_sensitive_placeholder' and not a wrapper around the exact MSD
+  family. It must expose a concrete family with parameter $(n,\ell,\gamma)$ and
+  the following equations:
+  \[
+  \begin{array}{ll}
+    \operatorname{GammaMSDParam}
+      &= \{(n,\ell,\gamma): n,\ell\in\N,\ \gamma\in\R,\
+          n\ge2,\ \ell\ge1\},\\
+    \operatorname{GammaMSDInst}(n,\ell,\gamma)
+      &= \operatorname{MSDInst}(n,\ell),\\
+    \operatorname{GammaMSDOut}(n,\ell,\gamma,V)
+      &= \{(i,j): i,j:\operatorname{Fin} n,\ i\ne j\},\\
+    \operatorname{GammaMSDScore}(V,i,j)
+      &= \cossim{v_i}{v_j},\\
+    \operatorname{GammaMSDOpt}(V)
+      &= M_V=\max_{i\ne j}\cossim{v_i}{v_j},\\
+    \operatorname{GammaMSDValidOut}(n,\ell,\gamma,V,(i,j))
+      &\Longleftrightarrow
+      \gamma\ge1\ \wedge\ i\ne j\ \wedge\
+      \gamma^{-1}M_V\le\cossim{v_i}{v_j}\ \wedge\
+      \cossim{v_i}{v_j}\le M_V .
+  \end{array}
+  \]
+  In field form, `def_gamma_msd' contains at least
+  `param', `inst', `out', `score', `opt', `validOut', and
+  `family : ConcreteProblemFamily', plus transparent equations identifying all
+  of these projections with the displayed `GammaMSD...' objects and with the
+  search fields of `family'. The `validOut' field must mention the parameter
+  $\gamma$ directly and must include both inequalities
+  $\gamma^{-1}M_V\le\cossim{v_i}{v_j}$ and
+  $\cossim{v_i}{v_j}\le M_V$. The theorem/projection
+  `GammaMSDValidOut_iff' must be available from the audited declaration itself;
+  it may not be supplied only by an unrelated external identifier.
+
+  The factor $\gamma$ is a parameter of the family, not metadata outside the
+  problem. A declaration that uses abstract components or proves only exact
+  maximality does not satisfy this node; the two approximation inequalities
+  above must be the visible `ValidOut' relation. A declaration whose audited
+  body is `def_parameter_sensitive_placeholder', a delegated placeholder-style
+  family wrapper, an exact-MSD relation with $\gamma$ ignored, `Unit', or a
+  proof ending in `True' is rejected.
 \end{definition}
 
 \begin{definition}[MSD decision version, $\MSD_{n,\ell,t}$, Definition 2.12]
   \label{def:msd-dec}
-  \uses{def:cosine, def:parameter-sensitive-placeholder}
+  \uses{def:cosine, def:problem-family, def:msd}
   For parameters $n,\ell\in\N$ and threshold $t\in[0,1]$, an instance of
   $\MSD_{n,\ell,t}$ is an $n$-tuple of nonzero vectors
   $v_1,\ldots,v_n\in\{0,1\}^{\ell}$. It is a yes instance iff there exist
@@ -1426,6 +1692,55 @@
   \]
   The threshold $t$ and the nonzero-binary input promise are part of the
   definition. This node is a concrete Boolean relation, not a placeholder tag.
+
+  The declaration audited here is a self-contained data package `def_msd_dec',
+  not `def_parameter_sensitive_placeholder', not an opaque `MSDThreshold' tag,
+  and not a family wrapper whose threshold predicates live only in external
+  identifiers. It must expose the concrete decision family
+  $\operatorname{MSDThreshold}$ with parameter $(n,\ell,t)$:
+  \[
+  \begin{array}{ll}
+    \operatorname{MSDDecParam}
+      &= \{(n,\ell,t): n,\ell\in\N,\ t\in\R,\ n\ge2,\ \ell\ge1\},\\
+    \operatorname{MSDDecInst}(n,\ell,t)
+      &= \operatorname{MSDInst}(n,\ell),\\
+    \operatorname{MSDDecYes}(n,\ell,t,V)
+      &\Longleftrightarrow
+      0\le t\le1\ \wedge\
+      \exists i,j:\operatorname{Fin} n,\ i\ne j\ \wedge\
+        \cossim{v_i}{v_j}\ge t,\\
+    \operatorname{MSDDecNo}(n,\ell,t,V)
+      &\Longleftrightarrow
+      0\le t\le1\ \wedge\
+      \forall i,j:\operatorname{Fin} n,\ i\ne j\Rightarrow
+        \cossim{v_i}{v_j}<t.
+  \end{array}
+  \]
+  In field form, `def_msd_dec' contains at least
+  \[
+  \begin{array}{ll}
+    \operatorname{param} &: \mathrm{Type},\\
+    \operatorname{inst} &: \operatorname{param}\to\mathrm{Type},\\
+    \operatorname{yes} &: \prod_p \operatorname{inst}(p)\to\mathrm{Prop},\\
+    \operatorname{no} &: \prod_p \operatorname{inst}(p)\to\mathrm{Prop},\\
+    \operatorname{family} &: \operatorname{ConcreteProblemFamily},
+  \end{array}
+  \]
+  plus transparent projection equations identifying `param', `inst', `yes' and
+  `no' with the displayed `MSDDecParam', `MSDDecInst', `MSDDecYes' and
+  `MSDDecNo', and identifying `family.Param', `family.Inst', `family.Yes' and
+  `family.No' with those same fields. The yes and no predicates themselves must
+  contain the threshold range condition $0\le t\le1$. In particular,
+  `MSDDecYes_iff' and `MSDDecNo_iff' must be recoverable by projecting from the
+  declaration audited at this label.
+
+  `MSDDecYes' and `MSDDecNo' may be helper names only if their definitions are
+  transparent at this label and reduce to the displayed predicates. A family
+  record containing opaque predicates with those names, or a trivial output
+  relation, does not formalize Definition~2.12. A Lean declaration whose body is
+  `def_parameter_sensitive_placeholder', a placeholder-style family wrapper,
+  `Unit', or a proposition ending in `True' is rejected even if external helper
+  declarations elsewhere state the right cosine-threshold predicates.
 \end{definition}
 
 \begin{definition}[Least Similar Document, $\LSD_{n,\ell}$, Definition A.14]
@@ -1441,6 +1756,27 @@
   \]
   Formally this is a search relation over nonzero binary vectors and distinct
   output indices, not a tag.
+
+  The audited declaration must expose the least-similarity analogue of the MSD
+  fields:
+  \[
+  \begin{array}{ll}
+    \operatorname{LSDParam} &= \operatorname{MSDParam},\\
+    \operatorname{LSDInst}(n,\ell) &= \operatorname{MSDInst}(n,\ell),\\
+    \operatorname{LSDOut}(n,\ell,V) &=
+      \{(i,j): i,j:\operatorname{Fin} n,\ i\ne j\},\\
+    \operatorname{LSDScore}(V,i,j) &= \cossim{v_i}{v_j},\\
+    \operatorname{LSDOpt}(V) &=
+      \min_{i\ne j}\operatorname{LSDScore}(V,i,j),\\
+    \operatorname{LSDValidOut}(n,\ell,V,(i,j))
+      &\Longleftrightarrow
+      i\ne j\ \wedge\
+      \operatorname{LSDScore}(V,i,j)=\operatorname{LSDOpt}(V).
+  \end{array}
+  \]
+  Abstract components named `LSDParam', `LSDInst', `LSDOut' and `LSDValidOut'
+  are acceptable only when these equations unfold from the declaration audited
+  at this label. Otherwise the concrete minimizing relation has been erased.
 \end{definition}
 
 \begin{definition}[$\gamma$-LSD, Definition A.15]
@@ -1459,6 +1795,26 @@
   The formal output relation must include the premise $\gamma\ge1$, the minimum
   over distinct pairs, and the two approximation inequalities. It cannot be
   represented by a bare family tag.
+
+  The audited declaration must expose a concrete family with parameter
+  $(n,\ell,\gamma)$ and the following equations:
+  \[
+  \begin{array}{ll}
+    \operatorname{GammaLSDInst}(n,\ell,\gamma)
+      &= \operatorname{LSDInst}(n,\ell),\\
+    \operatorname{GammaLSDOut}(n,\ell,\gamma,V)
+      &= \{(i,j): i,j:\operatorname{Fin} n,\ i\ne j\},\\
+    m_V &= \min_{i\ne j}\cossim{v_i}{v_j},\\
+    \operatorname{GammaLSDValidOut}(n,\ell,\gamma,V,(i,j))
+      &\Longleftrightarrow
+      \gamma\ge1\ \wedge\ i\ne j\ \wedge\
+      m_V\le\cossim{v_i}{v_j}\ \wedge\
+      \cossim{v_i}{v_j}\le\gamma m_V .
+  \end{array}
+  \]
+  The minimum $m_V$ and both inequalities are part of the validity relation.
+  A declaration that imports opaque components or stores only the tag
+  `GammaLSD' is not this node.
 \end{definition}
 
 \begin{definition}[LSD decision version, $\LSD_{n,\ell,t}$, Definition A.16]
@@ -1474,6 +1830,29 @@
   \]
   with the nonzero-binary input promise and threshold $t$ included in the
   relation.
+
+  The declaration audited here must expose the concrete decision family
+  $\operatorname{LSDThreshold}$ with parameter $(n,\ell,t)$:
+  \[
+  \begin{array}{ll}
+    \operatorname{LSDDecInst}(n,\ell,t)
+      &= \operatorname{LSDInst}(n,\ell),\\
+    \operatorname{LSDDecYes}(n,\ell,t,V)
+      &\Longleftrightarrow
+      0\le t\le1\ \wedge\
+      \exists i,j:\operatorname{Fin} n,\ i\ne j\ \wedge\
+        \cossim{v_i}{v_j}\le t,\\
+    \operatorname{LSDDecNo}(n,\ell,t,V)
+      &\Longleftrightarrow
+      0\le t\le1\ \wedge\
+      \forall i,j:\operatorname{Fin} n,\ i\ne j\Rightarrow
+        t<\cossim{v_i}{v_j}.
+  \end{array}
+  \]
+  These are the decision predicates used by the algorithm and transformer
+  nodes. Opaque helpers named `LSDDecYes' and `LSDDecNo' are insufficient unless
+  this exact existential/nonexistential cosine-threshold content unfolds from
+  the declaration at this label.
 \end{definition}
 
 \begin{definition}[Bichromatic $\gamma$-LSD]
@@ -1548,6 +1927,16 @@
   \]
   The input type, binary promise, distinctness condition and orthogonality
   equation must all be encoded.
+  The formal parameter record for this family contains not only the numeric
+  fields $n$ and $\ell$, but also the positivity proofs
+  \[
+    \operatorname{hn}:2\le n,\qquad
+    \operatorname{hell}:1\le\ell .
+  \]
+  Every construction producing an $\OV$ parameter must fill these fields. In
+  particular, a generated record literal of the form
+  `{ n := ..., ell := ... }' is incomplete; it must also provide
+  `hn := ...' and `hell := ...' proving the displayed bounds.
 \end{definition}
 
 \begin{definition}[Bichromatic Orthogonal Vectors]
@@ -1560,6 +1949,23 @@
   monochromatic version, $i$ and $j$ range over different color classes and need
   not be distinct. This concrete two-input yes-predicate is the content of the
   node.
+  The formal parameter record for this family contains the fields
+  \[
+    n:\N,\qquad \ell:\N,\qquad
+    \operatorname{hn}:1\le n,\qquad
+    \operatorname{hell}:1\le\ell .
+  \]
+  Therefore any parameter map into the bichromatic family must explicitly
+  construct the two proof fields. For example, the monochromatic-to-bichromatic
+  map from an $\OV$ parameter $p$ is
+  \[
+    \operatorname{OVToBichromaticParam}(p)=
+    \{\,n:=p.n,\ \ell:=p.\ell,\ 
+       \operatorname{hn}:=(1\le2\le p.n)\text{ using }p.\operatorname{hn},\
+       \operatorname{hell}:=p.\operatorname{hell}\,\}.
+  \]
+  A record literal that copies only `n' and `ell' omits part of the concrete
+  problem parameter and is rejected.
 \end{definition}
 
 \begin{conjecture}[Orthogonal Vectors Conjecture (OVC), Conjecture 2.6 / A.3]
@@ -1868,11 +2274,110 @@
     \Longleftrightarrow
     \operatorname{Yes}_{\OV}(W).
   \]
-  The formal witness at this label must include the actual maps
-  $a_i\mapsto a_i'$ and $b_j\mapsto b_j'$, the three displayed inner-product
-  equalities/inequalities, and the final yes-predicate equivalence. Merely
-  asserting that some transformed instance exists, or that the construction is
-  a reduction, omits the behavior needed by Lemma~\ref{lem:ov-bichromatic-equiv}.
+  The formal witness at this label must include the actual transformed
+  monochromatic instance as data, together with proof-valued theorem fields for
+  every displayed equation and equivalence. Here ``proof-valued'' is meant
+  literally: a field named, for example, `appendLeftRow' has type
+  \[
+    \forall i,\ \operatorname{appendOVInst}(A,B)_{\operatorname{inl}(i)}
+      =(a_i,1,0),
+  \]
+  and the field value is a proof of that statement. It is not a data field
+  `appendLeftRow : Prop' whose value is the proposition above, nor a field
+  returning a proposition to be proved elsewhere. A generated package whose
+  row equations, inner-product equations, binary promise, auxiliary-predicate
+  bridge, or yes-equivalence are stored only as `Prop'-valued fields has not
+  asserted the construction correctness of this node.
+
+  In Lean terms, the package must contain a field such as
+  \[
+    \operatorname{appendOVInst}(A,B):
+      \operatorname{OVInst}(2n,\ell+2),
+  \]
+  where the transformed $\OV$ parameter is the full parameter record
+  \[
+    \operatorname{BOVAppendOVParam}(p)=
+    \{\,n:=p.n+p.n,\ \ell:=p.\ell+2,\
+       \operatorname{hn}:=2\le p.n+p.n,\
+       \operatorname{hell}:=1\le p.\ell+2\,\}.
+  \]
+  The proof field $\operatorname{hn}$ is obtained from the bichromatic source
+  proof $p.\operatorname{hn}:1\le p.n$ twice, giving
+  $1+1\le p.n+p.n$. The proof field $\operatorname{hell}$ is obtained from
+  $p.\operatorname{hell}:1\le p.\ell$ and monotonicity of addition on the
+  right, giving $1\le p.\ell\le p.\ell+2$. Thus a Lean definition
+  \[
+    \operatorname{BOVAppendOVParam}(p):\operatorname{OVParam}
+  \]
+  must use a record literal with all four fields `n', `ell', `hn', and
+  `hell'. The literal `{ n := p.n + p.n, ell := p.ell + 2 }' is missing the
+  proof fields and is not this construction. This is the corresponding
+  instance type exposed by Definition~\ref{def:ov}. Its
+  row equations must be proof fields of this same package:
+  \[
+    W_{\operatorname{inl}(i)}=(a_i,1,0),\qquad
+    W_{\operatorname{inr}(j)}=(b_j,0,1),
+  \]
+  equivalently the first $n$ rows are the $a_i'$ and the last $n$ rows are the
+  $b_j'$. The package must also include proof fields that $W$ satisfies the
+  concrete $\OV$ input promise at parameter $(2n,\ell+2)$, namely that every
+  row is a binary vector of length $\ell+2$. The inner-product identities and
+  the final correctness field are likewise theorem fields, with types exactly
+  the displayed propositions:
+  \[
+    \operatorname{BichromaticOVYes}_{n,\ell}(A,B)
+    \Longleftrightarrow
+    \operatorname{OVYes}_{2n,\ell+2}
+      (\operatorname{appendOVInst}(A,B)).
+  \]
+  More explicitly, the audited package has fields, or transparent equivalents,
+  with the following \emph{types}:
+  \[
+  \begin{array}{ll}
+    \operatorname{appendLeftRow}:&
+      \forall i,\ W_{\operatorname{inl}(i)}=(a_i,1,0),\\
+    \operatorname{appendRightRow}:&
+      \forall j,\ W_{\operatorname{inr}(j)}=(b_j,0,1),\\
+    \operatorname{appendBinaryPromise}:&
+      \forall r,h,\ W_r[h]\in\{0,1\},\\
+    \operatorname{appendLeftInner}:&
+      \forall i,i',\
+      \inner{a_i'}{a_{i'}'}=\inner{a_i}{a_{i'}}+1,\\
+    \operatorname{appendRightInner}:&
+      \forall j,j',\
+      \inner{b_j'}{b_{j'}'}=\inner{b_j}{b_{j'}}+1,\\
+    \operatorname{appendCrossInner}:&
+      \forall i,j,\
+      \inner{a_i'}{b_j'}=\inner{a_i}{b_j},\\
+    \operatorname{appendPredicate\_iff\_OVYes}:&
+      \operatorname{OVAppendMonochromaticYes}(A,B)
+      \Longleftrightarrow
+      \operatorname{OVYes}_{2n,\ell+2}(W),\\
+    \operatorname{appendYesIff}:&
+      \operatorname{BichromaticOVYes}_{n,\ell}(A,B)
+      \Longleftrightarrow
+      \operatorname{OVYes}_{2n,\ell+2}(W).
+  \end{array}
+  \]
+  Each line is a proof field: after projection it is directly usable as a
+  theorem of the indicated equality, promise, or iff. The field type may not be
+  `Prop', `True', `Unit', a Sigma containing only the proposition as data, or an
+  uninterpreted predicate whose definition is not the displayed formula.
+  A custom predicate such as
+  $\operatorname{OVAppendMonochromaticYes}(A,B)$ may be used only as a local
+  abbreviation if the same audited package also proves the definitional
+  equality or iff
+  \[
+    \operatorname{OVAppendMonochromaticYes}(A,B)
+    \Longleftrightarrow
+    \operatorname{OVYes}_{2n,\ell+2}
+      (\operatorname{appendOVInst}(A,B)).
+  \]
+  Without this bridge to the concrete $\OV$ family, the node is rejected.
+  Merely asserting that some transformed instance exists, proving only a
+  Sum-indexed auxiliary yes predicate, or stating that the construction is a
+  reduction omits the behavior needed by
+  Lemma~\ref{lem:ov-bichromatic-equiv}.
 \end{lemma}
 \begin{proof}
   \uses{def:bichromatic-ov, def:ov, def:inner-prod}
@@ -1907,15 +2412,50 @@
   The declaration audited at this label must be the concrete witness package
   $\operatorname{OVBichromaticEquivWitness}$ itself, or an equivalent dependent
   Sigma package with the projections below. It must not be merely
-  $\operatorname{Nonempty}(\operatorname{OVBichromaticEquivWitness})$, and the
-  two main fields must not have only the abstract type
-  $\operatorname{FGReduction}$. The package contains two concrete subpackages
+  $\operatorname{Nonempty}(\operatorname{OVBichromaticEquivWitness})$. The
+  directional reduction subpackages must expose their construction data; they
+  may not be only opaque fields of type $\operatorname{FGReduction}$ whose
+  source regime, call list, reconstruction, correctness and runtime projections
+  cannot be inspected at this label. The package contains two concrete
+  subpackages
   \[
     R_{\mathrm{mono}\leftarrow\mathrm{bi}}
       \quad\text{and}\quad
     R_{\mathrm{bi}\leftarrow\mathrm{mono}},
   \]
   with the following mandatory fields.
+  In addition to the concrete subpackages below, the audited witness must
+  export actual fine-grained reduction values:
+  \[
+  \begin{array}{ll}
+    \operatorname{monoToBiFGReduction}:&
+      \operatorname{FGReduction}(\OV,\mathrm{BOV}),\\
+    \operatorname{biToMonoFGReduction}:&
+      \operatorname{FGReduction}(\mathrm{BOV},\OV),\\
+    \operatorname{subquadEquivProof}:&
+      \SubquadEquiv{\OV}{\mathrm{BOV}}.
+  \end{array}
+  \]
+  These fields are values/proofs, not types or propositions describing that such
+  values could exist. Concretely, `monoToBiFGReduction' and
+  `biToMonoFGReduction' must be constructed by the constructor for
+  Definition~\ref{def:fg-reduction-predicates} (or by a transparent reducible
+  definition whose projections reduce to that constructor) using the source
+  regimes, parameter maps, call lists, reconstruction procedures, correctness
+  proofs and runtime accounting specified below. A field
+  `monoToBiFGReduction : Prop', a field whose value is the type
+  `FGReduction OV BOV', or a field containing only
+  `Nonempty (FGReduction OV BOV)' without a witness is rejected. The proof
+  `subquadEquivProof' must be obtained from these two concrete reduction
+  values, for example by pairing `Nonempty.intro monoToBiFGReduction' and
+  `Nonempty.intro biToMonoFGReduction'; it may not be an independent axiom or a
+  proposition-valued field.
+
+  The concrete subpackages are the data from which these two reduction values
+  are built. Each displayed correctness or runtime item below is again a
+  proof-valued field: its type is the displayed equality, iff, implication or
+  inequality, and its value is a proof. It is not a field of type `Prop' whose
+  value is the displayed proposition.
 
   The source regimes are explicit large-parameter regimes, not arbitrary
   nonempty predicates:
@@ -1929,6 +2469,34 @@
   and each regime contains all sufficiently large parameter pairs in the
   displayed slice. In particular, neither source regime may be empty, `False',
   or a proposition with no inhabitants.
+  The mono-to-bi source-regime projection must contain the dimension lower
+  bound as a named field, for example
+  \[
+    \operatorname{monoToBiSrcRegime\_iff}(n,\ell)
+    \Longleftrightarrow n\ge2\wedge \ell\ge1\wedge
+      \operatorname{SourceSlice}_{\mathrm{mono}}(n,\ell).
+  \]
+  The audited witness must also expose the two projections
+  \[
+    \operatorname{monoToBiSrcRegime\_n}(h): n\ge2,
+    \qquad
+    \operatorname{monoToBiSrcRegime\_ell}(h): \ell\ge1
+  \]
+  for every
+  $h:R_{\mathrm{mono}\leftarrow\mathrm{bi}}.\operatorname{SrcRegime}(n,\ell)$,
+  and a converse constructor from
+  $n\ge2$, $\ell\ge1$ and
+  $\operatorname{SourceSlice}_{\mathrm{mono}}(n,\ell)$. These projections must
+  be recoverable from the declaration audited at this label, not merely from a
+  comment or an external helper theorem.
+  A source regime saying only $n\ge2$, or only eventual nonemptiness, is not the
+  regime used in this lemma: the reduction calls the bichromatic problem in the
+  same dimension $\ell$, so the target instance is only one of the concrete
+  vector problems of Definition~\ref{def:bichromatic-ov} when $\ell\ge1$.
+  In particular, the Lean term
+  `fun p => 2 <= p.n' is explicitly rejected as the mono-to-bi source regime:
+  it drops the dimension condition and does not provide the required
+  `monoToBiSrcRegime_iff' equivalence.
 
   The mono-to-bi subpackage has concrete fields:
   \[
@@ -1938,6 +2506,23 @@
     \operatorname{toBi}(V)=(V,V)
   \]
   for every monochromatic instance $V=(v_1,\ldots,v_n)$. Its transformed
+  parameter map is the full bichromatic parameter record
+  \[
+    \operatorname{OVToBichromaticParam}(p)=
+    \{\,n:=p.n,\ \ell:=p.\ell,\
+       \operatorname{hn}:=1\le p.n,\
+       \operatorname{hell}:=p.\operatorname{hell}\,\},
+  \]
+  where the proof $\operatorname{hn}:1\le p.n$ is derived from the
+  monochromatic proof $p.\operatorname{hn}:2\le p.n$ by transitivity
+  $1\le2\le p.n$. The map $\operatorname{toBi}(V)=(V,V)$ is an instance of this
+  exact parameter. A generated definition
+  \[
+    \operatorname{OVToBichromaticParam}(p):\operatorname{BichromaticOVParam}
+  \]
+  must therefore fill `hn' and `hell' explicitly; the record
+  `{ n := p.n, ell := p.ell }' is rejected.
+  Its transformed
   algorithm, given a bichromatic OV algorithm $\mathcal A$, is definitionally:
   first return true if $\operatorname{hasZero}(V)$, and otherwise run
   $\mathcal A$ on $\operatorname{toBi}(V)=(V,V)$. The correctness field is the
@@ -1958,9 +2543,17 @@
     a_i\mapsto a_i'=(a_i,1,0),\qquad
     b_j\mapsto b_j'=(b_j,0,1),
   \]
+  where the parameter map is the same full $\operatorname{BOVAppendOVParam}$
+  record from Lemma~\ref{lem:ov-bichromatic-append-construction}, including
+  the proof fields
+  \[
+    \operatorname{hn}:2\le n+n,\qquad
+    \operatorname{hell}:1\le\ell+2 .
+  \]
   and maps $(A,B)$ to the monochromatic list
   $A'\cup B'=(a_1',\ldots,a_n',b_1',\ldots,b_n')$. Its correctness field is the
-  pair of displayed equalities and the resulting yes-predicate equivalence:
+  pair of displayed equalities and the resulting yes-predicate equivalence for
+  the concrete transformed $\OV$ instance:
   \[
     \inner{a_i'}{a_{i'}'}\ge1,\qquad
     \inner{b_j'}{b_{j'}'}\ge1,\qquad
@@ -1970,12 +2563,30 @@
   \[
     \operatorname{Yes}_{\mathrm{BOV}}(A,B)
     \Longleftrightarrow
-    \operatorname{Yes}_{\OV}(A'\cup B').
+    \operatorname{Yes}_{\OV}
+      \bigl(\operatorname{appendOVInst}(A,B)\bigr),
   \]
+  where $\operatorname{appendOVInst}(A,B)$ is the
+  $\operatorname{OVInst}(2n,\ell+2)$ from
+  Lemma~\ref{lem:ov-bichromatic-append-construction}. The witness may not state
+  correctness only for an auxiliary predicate
+  $\operatorname{OVAppendMonochromaticYes}$. If such a predicate is introduced,
+  the witness must contain a field
+  \[
+    \operatorname{appendPredicate\_iff\_OVYes}:
+    \operatorname{OVAppendMonochromaticYes}(A,B)
+    \Longleftrightarrow
+    \operatorname{OVYes}_{2n,\ell+2}
+      (\operatorname{appendOVInst}(A,B)),
+  \]
+  and the exported `biToMonoCorrect' field below must target the right-hand
+  concrete $\operatorname{OVYes}$ statement, not the auxiliary predicate.
   The Boolean reconstruction field for this direction is exactly the Boolean
-  answer returned by the monochromatic OV algorithm on $A'\cup B'$.
+  answer returned by the monochromatic OV algorithm on
+  $\operatorname{appendOVInst}(A,B)$.
 
-  Both subpackages include runtime-transform fields, not just correctness:
+  Both subpackages include proof-valued runtime-transform fields, not just
+  correctness:
   \[
     T_{\mathrm{mono}\leftarrow\mathrm{bi}}(n,\ell)
       \le C\bigl(n\ell+T_{\mathrm{bi}}(n,\ell)\bigr),
@@ -1984,10 +2595,53 @@
       \le C\,T_{\mathrm{mono}}(2n,\ell+2)+C'n\ell,
   \]
   which preserve a truly subquadratic exponent up to polynomial factors in
-  $\ell$. These fields must be propositions with the displayed inequalities as
-  their conclusions. They may not have type `True', `Unit',
+  $\ell$. These fields must have the displayed inequalities as their field
+  types, so projecting the field gives a proof of the inequality. They may not
+  be fields of type `Prop' whose values are the displayed propositions, and
+  they may not have type `True', `Unit',
   `Nonempty True', or any other vacuous placeholder, and they may not omit the
-  target runtime functions $T_{\mathrm{bi}}$ and $T_{\mathrm{mono}}$.
+  target runtime functions $T_{\mathrm{bi}}$ and $T_{\mathrm{mono}}$. The
+  transformed runtimes are defined runtimes of the constructed algorithms, not
+  arbitrary fields. Concretely, for constants
+  $c_{\mathrm{scan}},c_{\mathrm{build}},c_{\mathrm{test}}>0$,
+  \[
+    T_{\mathrm{mono}\leftarrow\mathrm{bi}}(n,\ell)
+      =
+      c_{\mathrm{scan}}\,n\ell+
+      T_{\mathrm{bi}}(n,\ell)+
+      c_{\mathrm{test}}\ell
+  \]
+  for the zero-vector scan, one bichromatic oracle call and the final Boolean
+  reconstruction, while
+  \[
+    T_{\mathrm{bi}\leftarrow\mathrm{mono}}(n,\ell)
+      =
+      c_{\mathrm{build}}\,n(\ell+2)+
+      T_{\mathrm{mono}}(2n,\ell+2)
+  \]
+  for building the appended instance and making one monochromatic oracle call.
+  The runtime inequalities above are then derived from these definitions. A
+  field assigning either transformed runtime to $0$, or to a value independent
+  of the target runtime function, is rejected even if the displayed inequality
+  is syntactically provable.
+  The bi-to-mono runtime field is split into two required fields:
+  \[
+  \begin{array}{ll}
+    \operatorname{biToMonoRuntimeDef}:&
+      T_{\mathrm{bi}\leftarrow\mathrm{mono}}(n,\ell,T_{\mathrm{mono}})
+      =
+      c_{\mathrm{build}}\,n(\ell+2)+T_{\mathrm{mono}}(2n,\ell+2),\\
+    \operatorname{biToMonoRuntimeBound}:&
+      T_{\mathrm{bi}\leftarrow\mathrm{mono}}(n,\ell,T_{\mathrm{mono}})
+      \le C\,T_{\mathrm{mono}}(2n,\ell+2)+C'n\ell .
+  \end{array}
+  \]
+  The left side of the bound must be the named runtime function from
+  `biToMonoRuntimeDef'. The bound is rejected if, after unfolding only the field
+  declaration being audited, its conclusion has syntactically identical left and
+  right sides, or if the target runtime occurs only on the right side but not in
+  the definition of
+  $T_{\mathrm{bi}\leftarrow\mathrm{mono}}(n,\ell,T_{\mathrm{mono}})$.
 
   More explicitly, the audited witness package must contain named fields whose
   contents are at least:
@@ -2009,9 +2663,19 @@
     \operatorname{biToMonoCorrect}:&
       \operatorname{Yes}_{\mathrm{BOV}}(A,B)
       \Longleftrightarrow
-      \operatorname{Yes}_{\OV}(A'\cup B'),\\
+      \operatorname{OVYes}_{2n,\ell+2}
+        (\operatorname{appendOVInst}(A,B)),\\
+    \operatorname{appendPredicate\_iff\_OVYes}:&
+      \operatorname{OVAppendMonochromaticYes}(A,B)
+      \Longleftrightarrow
+      \operatorname{OVYes}_{2n,\ell+2}
+        (\operatorname{appendOVInst}(A,B))
+      \quad\text{if an auxiliary predicate is introduced},\\
     \operatorname{biToMonoRuntime}:&
       \forall T_{\mathrm{mono}},\
+      T_{\mathrm{bi}\leftarrow\mathrm{mono}}(n,\ell)
+      =c_{\mathrm{build}}n(\ell+2)+T_{\mathrm{mono}}(2n,\ell+2)
+      \ \wedge\
       T_{\mathrm{bi}\leftarrow\mathrm{mono}}(n,\ell)
       \le C\,T_{\mathrm{mono}}(2n,\ell+2)+C'n\ell .
   \end{array}
@@ -2021,6 +2685,9 @@
   present in, or projected from, the reduction witness audited at this label. A
   proof object containing only empty-regime reductions, only abstract
   $\operatorname{FGReduction}$ fields, only runtime fields equal to `True', or
+  runtime fields set to $0$ or otherwise disconnected from the oracle runtime,
+  only correctness for $\operatorname{OVAppendMonochromaticYes}$ rather than
+  $\operatorname{OVYes}_{2n,\ell+2}(\operatorname{appendOVInst}(A,B))$, or
   only the implication
   $\TSQAlg{\text{bichromatic }\OV}\leftrightarrow\TSQAlg{\OV}$, is too weak and
   does not satisfy this lemma.
@@ -2155,6 +2822,96 @@
   object containing only
   $\operatorname{Nonempty}(\operatorname{FGReduction})$, an opaque algorithm
   transfer implication, or an OVC lower-bound proposition is too weak.
+
+  To make this runtime accounting auditable, the witness must separate the
+  definition of the constructed runtime from the upper-bound theorem. The exact
+  subwitness contains named projections
+  \[
+  \begin{array}{ll}
+    \operatorname{exactConstructedRuntime}(T_{\MinIP},n,\ell)
+      &: \R_{\ge0},\\
+    \operatorname{exactRuntimeDef}:&
+      \operatorname{exactConstructedRuntime}(T_{\MinIP},n,\ell)
+      =
+      c_{\mathrm{call}}\,
+        T_{\MinIP}(n,\ell)
+      +c_{\mathrm{test}}\ell
+      +c_{\mathrm{copy}}n\ell
+      +c_{\mathrm{bool}},\\
+    \operatorname{exactRuntimeBound}:&
+      \operatorname{exactConstructedRuntime}(T_{\MinIP},n,\ell)
+      \le
+      C\bigl(T_{\MinIP}(n,\ell)+n\ell\bigr).
+  \end{array}
+  \]
+  Here $c_{\mathrm{call}},c_{\mathrm{test}},c_{\mathrm{copy}},c_{\mathrm{bool}}$
+  are fixed positive constants belonging to the witness. The first summand is
+  the runtime of the target Min-IP oracle on the concrete identity instance
+  $\operatorname{toMinIP}(V)$, the second is the cost of computing the one
+  returned inner product, the third covers copying or coercing the input into
+  the target family, and the last covers the Boolean reconstruction. The
+  analogous approximate projections are
+  \[
+  \begin{array}{ll}
+    \operatorname{gammaConstructedRuntime}(T_{\gamma\MinIP},n,\ell,\gamma)
+      &: \R_{\ge0},\\
+    \operatorname{gammaRuntimeDef}:&
+      \operatorname{gammaConstructedRuntime}(T_{\gamma\MinIP},n,\ell,\gamma)
+      =
+      c'_{\mathrm{call}}\,
+        T_{\gamma\MinIP}(n,\ell,\gamma)
+      +c'_{\mathrm{test}}\ell
+      +c'_{\mathrm{copy}}n\ell
+      +c'_{\mathrm{bool}},\\
+    \operatorname{gammaRuntimeBound}:&
+      \operatorname{gammaConstructedRuntime}(T_{\gamma\MinIP},n,\ell,\gamma)
+      \le
+      C'\bigl(T_{\gamma\MinIP}(n,\ell,\gamma)+n\ell\bigr).
+  \end{array}
+  \]
+  The bound fields are rejected if their left-hand side is syntactically the
+  same expression as their right-hand side, if the left-hand side is
+  $T_{\MinIP}(n,\ell)+n\ell$ or
+  $T_{\gamma\MinIP}(n,\ell,\gamma)+n\ell$ rather than the named constructed
+  runtime, or if the named constructed runtime does not mention the target
+  oracle runtime. The generated Lean should expose the two defining equations
+  and then prove the two inequalities from positivity of the fixed constants;
+  it should not satisfy the node by choosing the constructed runtime to be
+  exactly the final big-$O$ upper-bound expression.
+
+  These runtime projections are mandatory fields of the subwitnesses
+  themselves. In particular, unfolding
+  $\operatorname{exactReduction}$ must expose fields literally named, or
+  transparently equivalent to,
+  `exactConstructedRuntime', `exactRuntimeDef', and `exactRuntimeBound'; and
+  unfolding $\operatorname{gammaReduction}$ must expose
+  `gammaConstructedRuntime', `gammaRuntimeDef', and `gammaRuntimeBound'. A
+  witness that exposes only fields called `runtimeBound' or
+  `gammaRuntimeBound', with no separate constructed-runtime function and no
+  defining equation for that function, is not a witness for this lemma even if
+  the displayed asymptotic inequality appears elsewhere in the file. The audit
+  should reject any implementation in which the constructed runtime can be
+  changed independently of the oracle call and returned-pair inner-product test,
+  or in which the runtime definition is hidden behind an opaque
+  $\operatorname{FGReduction}$ object.
+
+  The projections must be separate fields, not a single bundled conjunction.
+  In particular, an implementation where the exact side exposes only
+  \[
+    \operatorname{exactRuntimeBound}(T_{\MinIP})
+      \ \wedge\ 
+      \forall n,\ell,\ \operatorname{exactRuntimeDef}(T_{\MinIP},n,\ell)
+  \]
+  is not aligned with this node: the audited structure must have
+  `exactConstructedRuntime' as a function field, `exactRuntimeDef' as a theorem
+  whose left-hand side is that function, and `exactRuntimeBound' as a theorem
+  whose left-hand side is again that same function. The same rule applies to
+  the approximate side: `gammaRuntimeBound' alone is insufficient unless
+  `gammaConstructedRuntime' and `gammaRuntimeDef' are also projections of
+  $\operatorname{gammaReduction}$. The exact and approximate constructed
+  runtimes must both contain the oracle-call cost, returned-pair inner-product
+  test cost, input-copy/coercion cost, and Boolean reconstruction cost as
+  displayed above.
 \end{lemma}
 \begin{proof}
   \uses{def:minip, def:gamma-minip, def:ov, conjecture:ovc}
@@ -2210,6 +2967,151 @@
   \]
   is equivalent to the disjunction of the corresponding cross, left-recursive,
   and right-recursive predicates.
+  The cross problem at a non-leaf node is a real target instance, not an index
+  or placeholder:
+  \[
+    \operatorname{crossInst}(U)
+      :=(U_L,U_R):\operatorname{BMinIPInst}(|U_L|,|U_R|,\ell),
+  \]
+  with score
+  \[
+    s_{\mathrm{cross},U}(p,q)=\inner{(U_L)_p}{(U_R)_q}.
+  \]
+  The required oracle-call equation is
+  \[
+    \operatorname{callsAtNode}(U)
+      =
+      \{\,(|U_L|,|U_R|,\ell,\operatorname{crossInst}(U))\,\}
+  \]
+  for every non-leaf node. A call field that stores only the node $U$, only the
+  pair of cardinalities, or an arbitrary index into the recursion tree is not a
+  bichromatic Min-IP oracle call.
+  This equation is a named projection of the audited package, for example
+  \[
+    \operatorname{callsAtNode\_eq\_singleton}(U):
+    \operatorname{callsAtNode}(U)
+      =
+      \{\,(|U_L|,|U_R|,\ell,
+          \operatorname{crossInst}(U))\,\}.
+  \]
+  The right-hand side must contain the actual split lists $U_L,U_R$ through
+  $\operatorname{crossInst}(U)$ and the child cardinalities $|U_L|,|U_R|$. A
+  statement such as
+  $\operatorname{callsAtNode\_eq\_singleton}(U):\mathrm{True}$,
+  $\mathrm{True}\wedge\operatorname{Nonempty}(\operatorname{callsAtNode}(U))$,
+  or an equality to a singleton whose element is only a node identifier is not
+  this projection.
+  The parameters of this call are the child cardinalities $|U_L|$ and $|U_R|$,
+  or a single balanced-size parameter together with explicit padding/truncation
+  equations if the formal bichromatic family is restricted to equal-size color
+  classes. They are not the original top-level parameters $(n,\ell)$ unless
+  $U$ is the root and the two halves have the required size. Thus a definition
+  such as
+  \[
+    \operatorname{callsAtNode}(U)
+      =\{(n,\ell,\operatorname{someGenericBMinIPInst}(n,\ell))\}
+  \]
+  is rejected: it is not the split subinstance at node $U$.
+
+  Write
+  \[
+  \begin{array}{ll}
+    m_{\mathrm{cross}}(U)&=
+      \min_{p\in U_L,\ q\in U_R}\inner{p}{q},\\
+    m_L(U)&=\min_{p\ne q\in U_L}\inner{p}{q},\\
+    m_R(U)&=\min_{p\ne q\in U_R}\inner{p}{q},\\
+    m_U&=\min_{p\ne q\in U}\inner{p}{q}.
+  \end{array}
+  \]
+  The exact-node correctness field is the equation
+  \[
+    m_U=\min(m_{\mathrm{cross}}(U),\min(m_L(U),m_R(U))).
+  \]
+  This equation must mention the three separately defined optima above. It is
+  rejected if it reduces to
+  $m_U=\min(m_U,\min(m_U,m_U))$, or to the same expression with
+  `MinIPOpt U' repeated on both sides. The reconstruction fields must define
+  named left and right subinstances
+  $\operatorname{leftInst}(U)=U_L$ and
+  $\operatorname{rightInst}(U)=U_R$, with optima
+  $m_L(U)$ and $m_R(U)$ computed on those subinstances, and the cross optimum
+  $m_{\mathrm{cross}}(U)$ computed on $\operatorname{crossInst}(U)$. A formal
+  proof that obtains the displayed equation by rewriting all three optima to
+  the same expression is not an instance of this node.
+  The field has the named type
+  \[
+  \begin{array}{l}
+    \operatorname{exactNodeCorrectness}(U):\\
+    \qquad
+    m_U=\min(m_{\mathrm{cross}}(U),\min(m_L(U),m_R(U))),
+  \end{array}
+  \]
+  where $m_{\mathrm{cross}}(U)$, $m_L(U)$ and $m_R(U)$ are separate projections
+  with the displayed definitions. The field is rejected if its type is
+  $\mathrm{True}$, $\mathrm{Unit}$, an existential statement with no equality,
+  an implication from a validity relation to itself, or any proposition in
+  which $m_{\mathrm{cross}}(U)$, $m_L(U)$ and $m_R(U)$ do not all occur.
+  The reconstruction fields must define
+  \[
+    \operatorname{candidateSet}(U)
+      =\{o_{\mathrm{cross}}(U),o_L(U),o_R(U)\}
+  \]
+  with the cross candidate obtained from the valid oracle output for
+  $\operatorname{crossInst}(U)$ and the left/right candidates obtained from
+  recursive reconstruction, and
+  \[
+    \operatorname{reconstructExact}(U,\operatorname{answers})
+      \in \arg\min_{o\in\operatorname{candidateSet}(U)} s_U(o).
+  \]
+  The global-correctness field must then prove
+  $s_V(\operatorname{reconstructExact}(V,\operatorname{answers}))=m_V$.
+  It is not enough to prove an implication whose premise and conclusion are the
+  same `ValidOut' proposition.
+
+  For the decision version, define the three predicates separately:
+  \[
+  \begin{array}{ll}
+    \operatorname{CrossYes}_t(U)&\Longleftrightarrow
+      \exists p\in U_L,\exists q\in U_R,\ \inner{p}{q}\le t,\\
+    \operatorname{LeftYes}_t(U)&\Longleftrightarrow
+      \exists p\ne q\in U_L,\ \inner{p}{q}\le t,\\
+    \operatorname{RightYes}_t(U)&\Longleftrightarrow
+      \exists p\ne q\in U_R,\ \inner{p}{q}\le t.
+  \end{array}
+  \]
+  The field `thresholdNodeCorrectness' must state
+  \[
+    \operatorname{Yes}_{\MinIP_t}(U)
+    \Longleftrightarrow
+    \operatorname{CrossYes}_t(U)\vee
+    \operatorname{LeftYes}_t(U)\vee
+    \operatorname{RightYes}_t(U).
+  \]
+  It is rejected if the same predicate is repeated in all three disjuncts.
+  The approximate and threshold fields are likewise concrete:
+  \[
+  \begin{array}{l}
+    \operatorname{gammaNodeCorrectness}(U,\operatorname{answers}):\\
+    \qquad
+    m_U\le
+    s_U(\operatorname{reconstructGamma}(U,\operatorname{answers}))
+    \le \gamma m_U,\\[1mm]
+    \operatorname{thresholdNodeCorrectness}(U):\\
+    \qquad
+    \operatorname{Yes}_{\MinIP_t}(U)
+    \Longleftrightarrow
+    \operatorname{CrossYes}_t(U)\vee
+    \operatorname{LeftYes}_t(U)\vee
+    \operatorname{RightYes}_t(U).
+  \end{array}
+  \]
+  $\operatorname{gammaNodeCorrectness}$ must mention the reconstructed
+  candidate, the score $s_U$ and both approximation inequalities. It is not an
+  identity implication such as
+  $\operatorname{ValidOut}_{\gamma\MinIP}\to
+  \operatorname{ValidOut}_{\gamma\MinIP}$. The threshold field is not a tautology
+  $P\leftrightarrow P$, and its three right-hand disjuncts must be the distinct
+  cross, left and right predicates displayed above.
 
   More explicitly, the package has named projections
   \[
@@ -2257,6 +3159,108 @@
   $\operatorname{Nonempty}(\operatorname{TSQAlgorithm})$ propositions, or which
   does not contain the split tree, optimum-in-some-call correctness, and the
   displayed runtime sum, is not this lemma.
+  To prevent vacuous implementations, the audited package must also contain
+  named runtime projections
+  \[
+  \begin{array}{ll}
+    \operatorname{splitTreeRuntime}(T_{\mathrm{bi}},V) &: \R_{\ge0},\\
+    \operatorname{splitTreeRuntimeDef}:&
+      \operatorname{splitTreeRuntime}(T_{\mathrm{bi}},V)
+      =
+      c_{\mathrm{split}}\,n\ell+
+      c_{\mathrm{calls}}
+      \sum_{U\in\operatorname{internalNodes}(\operatorname{callTree}(V))}
+        T_{\mathrm{bi}}(|U_L|,|U_R|,\ell)
+      +c_{\mathrm{recon}}\,|\operatorname{callTree}(V)|\,\ell,\\
+    \operatorname{runtimeRecurrence}:&
+      \operatorname{splitTreeRuntime}(T_{\mathrm{bi}},V)
+      \le
+      C n\ell+
+      C\sum_{r=0}^{\lceil\log_2 n\rceil-1}
+        2^r\,T_{\mathrm{bi}}\!\left(
+          \left\lceil n/2^{r+1}\right\rceil,
+          \left\lfloor n/2^{r+1}\right\rfloor,
+          \ell\right).
+  \end{array}
+  \]
+  Here the target runtime is evaluated on the actual child color-class sizes of
+  each cross instance. If the formal bichromatic family is equal-size only, the
+  runtime definition must instead include the explicit padding/truncation cost
+  and the padded target sizes; it may not silently call a root-size oracle. A
+  field named `runtimeRecurrence' whose conclusion is a self-bound such as
+  $T_{\mathrm{bi}}(n,\ell)+n\ell\le C(T_{\mathrm{bi}}(n,\ell)+n\ell)$, or whose
+  left-hand side is not the named $\operatorname{splitTreeRuntime}$ above, is
+  rejected. Likewise, `exactNodeCorrectness',
+  `exactGlobalCorrectness', `gammaNodeCorrectness', and
+  `thresholdNodeCorrectness' are rejected if they reduce respectively to
+  $m_U=m_U$, $\operatorname{ValidOut}=\operatorname{ValidOut}$,
+  $\operatorname{ValidOut}_\gamma\to\operatorname{ValidOut}_\gamma$, or
+  $\operatorname{Yes}_t(U)\leftrightarrow\operatorname{Yes}_t(U)$ after
+  unfolding the declarations audited at this label. Their types must contain
+  the separate cross, left and right objects named above.
+
+  To make the rejection criterion syntactic, the following exact placeholder
+  shapes are explicitly forbidden at this label:
+  \[
+  \begin{array}{l}
+    \operatorname{exactNodeCorrectness}(X):
+      \operatorname{MinIPOpt}(X)=\operatorname{MinIPOpt}(X),\\
+    \operatorname{exactGlobalCorrectness}(X):
+      \operatorname{MinIPValidOut}(X)=\operatorname{MinIPValidOut}(X),\\
+    \operatorname{thresholdNodeCorrectness}(X):
+      \operatorname{MinIPDecYes}(p,X)\Longleftrightarrow
+      \operatorname{MinIPDecYes}(p,X),\\
+    \operatorname{runtimeRecurrence}(T_{\mathrm{bi}},n,\ell):
+      T_{\mathrm{bi}}(n,\ell)+n\ell
+      \le C\bigl(T_{\mathrm{bi}}(n,\ell)+n\ell\bigr).
+  \end{array}
+  \]
+  The corresponding accepted statements must mention
+  $\operatorname{crossInst}(U)$, $\operatorname{leftInst}(U)$,
+  $\operatorname{rightInst}(U)$, $m_{\mathrm{cross}}(U)$, $m_L(U)$,
+  $m_R(U)$, the reconstructed candidate, and the named
+  $\operatorname{splitTreeRuntime}$. The target runtime may occur only through
+  the call-tree sum over the child-sized bichromatic calls, not as a single
+  root-sized oracle call.
+
+  Trial-8 alignment requirement: the audited Lean declaration must make the
+  split-node quantities projections of the witness, not local names that can be
+  unfolded away. In particular it must contain equations
+  \[
+  \begin{array}{ll}
+    \operatorname{crossOpt\_eq}(U):&
+      m_{\mathrm{cross}}(U)=
+      \min_{p\in U_L,q\in U_R}\inner{p}{q},\\
+    \operatorname{leftOpt\_eq}(U):&
+      m_L(U)=\min_{p\ne q\in U_L}\inner{p}{q},\\
+    \operatorname{rightOpt\_eq}(U):&
+      m_R(U)=\min_{p\ne q\in U_R}\inner{p}{q},\\
+    \operatorname{nodeOpt\_eq}(U):&
+      m_U=\min_{p\ne q\in U}\inner{p}{q}.
+  \end{array}
+  \]
+  The exact global field has the dependent type
+  \[
+    \operatorname{exactGlobalCorrectness}:
+    \left(\forall U,\ \operatorname{oracleAnswersValid}(U)\right)
+    \to
+    \operatorname{MinIPValidOut}
+      (V,\operatorname{reconstructExact}(V,\operatorname{answers})),
+  \]
+  where the conclusion is the concrete search validity relation for the
+  reconstructed pair. It is not an equality between two propositions named
+  `MinIPValidOut'. The gamma field must first define
+  $s^*_U=s_U(\operatorname{reconstructGamma}(U,\operatorname{answers}))$ and
+  then prove the two inequalities
+  $m_U\le s^*_U$ and $s^*_U\le\gamma m_U$ from the three candidate bounds. The
+  threshold field must define `CrossYes_t', `LeftYes_t' and `RightYes_t' as
+  separate predicates and its right-hand side must syntactically contain those
+  three names. Any field whose normalized type is
+  `MinIPOpt X = MinIPOpt X',
+  `MinIPValidOut X = MinIPValidOut X',
+  `GammaMinIPValidOut X -> GammaMinIPValidOut X', or
+  `MinIPDecYes p X ↔ MinIPDecYes p X' fails this node, even if other abstract
+  transfer fields are present.
 \end{lemma}
 \begin{proof}
   \uses{def:minip, def:bichromatic-minip}
@@ -2312,6 +3316,122 @@
   Lemma~\ref{lem:minip-bichromatic-reduction}, with
   $T_{\mathrm{biMax}}$ in place of $T_{\mathrm{biMin}}$, and it must prove
   preservation of a positive truly-subquadratic exponent.
+  At each non-leaf node the witness must explicitly construct the target
+  bichromatic Max-IP instance
+  \[
+    \operatorname{crossMaxInst}(U)
+      :=(U_L,U_R):\operatorname{BMaxIPInst}(|U_L|,|U_R|,\ell)
+  \]
+  and its score
+  $s_{\mathrm{cross},U}(p,q)=\inner{(U_L)_p}{(U_R)_q}$. Its call field is the
+  singleton containing this concrete instance:
+  \[
+    \operatorname{callsAtNode}(U)
+      =
+      \{\,(|U_L|,|U_R|,\ell,\operatorname{crossMaxInst}(U))\,\}.
+  \]
+  This `callsAtNode' field is mandatory for Max-IP even if the implementation
+  reuses a generic split-tree library. A witness with no concrete
+  `crossMaxInst' projection and no singleton call containing that instance is
+  rejected. A call list containing only a node identifier, only the original
+  parameter $(n,\ell)$, or only an abstract `BMaxIP' family value is not this
+  oracle call.
+  The package must contain the named projection
+  \[
+    \operatorname{maxCallsAtNode\_eq\_singleton}(U):
+    \operatorname{callsAtNode}(U)
+      =
+      \{\,(|U_L|,|U_R|,\ell,
+          \operatorname{crossMaxInst}(U))\,\}.
+  \]
+  Its conclusion must be this equality. It may not have type
+  $\mathrm{True}$, $\mathrm{True}\wedge\operatorname{Nonempty}$, or a statement
+  that merely says some call exists. The element of the singleton must be the
+  concrete target instance
+  $\operatorname{crossMaxInst}(U)=(U_L,U_R)$ with child sizes $|U_L|$ and
+  $|U_R|$; an equality to a singleton containing the root instance $(V,V)$, the
+  original parameter $(n,\ell)$, or an index into the call tree is rejected.
+  The node also defines
+  \[
+  \begin{array}{ll}
+    M_{\mathrm{cross}}(U)&=
+      \max_{p\in U_L,\ q\in U_R}\inner{p}{q},\\
+    M_L(U)&=\max_{p\ne q\in U_L}\inner{p}{q},\\
+    M_R(U)&=\max_{p\ne q\in U_R}\inner{p}{q},\\
+    M_U&=\max_{p\ne q\in U}\inner{p}{q}.
+  \end{array}
+  \]
+  The exact maximum-decomposition field is exactly
+  \[
+    M_U=\max(M_{\mathrm{cross}}(U),\max(M_L(U),M_R(U))).
+  \]
+  It is rejected if it reduces to
+  $M_U=\max(M_U,\max(M_U,M_U))$, or to the same expression with
+  `MaxIPOpt U' repeated. Here $M_{\mathrm{cross}}(U)$ must be the optimum of the concrete
+  $\operatorname{crossMaxInst}(U)$, while $M_L(U)$ and $M_R(U)$ are the optima
+  of the left and right recursive subinstances. The three names may not be
+  implemented as aliases for a single expression `MaxIPOpt U'. The audited
+  package must expose the equations
+  \[
+    M_{\mathrm{cross}}(U)=
+      \max_{p\in U_L,q\in U_R}\inner{p}{q},\quad
+    M_L(U)=\max_{p\ne q\in U_L}\inner{p}{q},\quad
+    M_R(U)=\max_{p\ne q\in U_R}\inner{p}{q}.
+  \]
+  The named correctness projection has the type
+  \[
+  \begin{array}{l}
+    \operatorname{exactMaxNodeCorrectness}(U):\\
+    \qquad
+    M_U=\max(M_{\mathrm{cross}}(U),\max(M_L(U),M_R(U))).
+  \end{array}
+  \]
+  This type must contain all four quantities $M_U$,
+  $M_{\mathrm{cross}}(U)$, $M_L(U)$ and $M_R(U)$. It is not an existential
+  proposition, not a proof that an optimum exists, not $\mathrm{True}$, and not
+  an implication whose conclusion repeats its premise. In particular, a field
+  named `exactMaxNodeCorrectness' with type
+  $\exists o,\operatorname{ValidOut}_{\MaxIP}(U,o)$ does not prove the
+  recurrence needed for the reduction.
+  The exact reconstruction field forms the candidate set
+  from the valid cross oracle answer and the two recursive answers,
+  \[
+    \operatorname{candidateSetMax}(U)
+      =\{o_{\mathrm{cross}}(U),o_L(U),o_R(U)\},
+  \]
+  and selects an element attaining the largest score in that set:
+  \[
+    \operatorname{reconstructExactMax}(U,\operatorname{answers})
+      \in \arg\max_{o\in\operatorname{candidateSetMax}(U)}s_U(o).
+  \]
+  The global correctness field must prove
+  $s_V(\operatorname{reconstructExactMax}(V,\operatorname{answers}))=M_V$.
+  A field of the form
+  `ValidOut -> ValidOut', an identity implication, or a correctness theorem
+  using only one repeated optimum is not accepted.
+
+  For approximate Max-IP the witness must define the selected score
+  $s^*_U=s_U(\operatorname{reconstructGammaMax}(U,\operatorname{answers}))$ and
+  prove
+  \[
+    \gamma^{-1}M_U\le s^*_U\le M_U
+  \]
+  from the three separate bounds for the cross, left and right candidates. It
+  may not reuse the exact reconstruction theorem as a placeholder for this
+  interval proof.
+  The approximate correctness projection therefore has the type
+  \[
+  \begin{array}{l}
+    \operatorname{gammaMaxNodeCorrectness}(U,\operatorname{answers}):\\
+    \qquad
+    \gamma^{-1}M_U\le
+      s_U(\operatorname{reconstructGammaMax}(U,\operatorname{answers}))
+      \le M_U.
+  \end{array}
+  \]
+  A field of type $\mathrm{True}$, an identity implication, or a theorem that
+  exact maximizers are valid approximate outputs without mentioning
+  $\operatorname{reconstructGammaMax}$ and the selected score is not this field.
 
   The witness must have named projections
   \[
@@ -2343,6 +3463,100 @@
   be `True -> True' placeholders, and a proof object that only reuses a Min-IP
   recurrence without exposing the maximum reconstruction is not this lemma.
   Transfer implications alone do not satisfy this node.
+  The package must also expose Max-IP-specific runtime projections, not merely
+  reuse a generic implication:
+  \[
+  \begin{array}{ll}
+    \operatorname{maxSplitTreeRuntime}(T_{\mathrm{biMax}},V) &: \R_{\ge0},\\
+    \operatorname{maxSplitTreeRuntimeDef}:&
+      \operatorname{maxSplitTreeRuntime}(T_{\mathrm{biMax}},V)
+      =
+      c_{\mathrm{split}}\,n\ell+
+      c_{\mathrm{calls}}
+      \sum_{U\in\operatorname{internalNodes}(\operatorname{callTree}(V))}
+        T_{\mathrm{biMax}}(|U_L|,|U_R|,\ell)
+      +c_{\mathrm{recon}}\,|\operatorname{callTree}(V)|\,\ell,\\
+    \operatorname{maxRuntimeRecurrence}:&
+      \operatorname{maxSplitTreeRuntime}(T_{\mathrm{biMax}},V)
+      \le C n\ell+
+      C\sum_{r=0}^{\lceil\log_2 n\rceil-1}
+        2^r\,T_{\mathrm{biMax}}\!\left(
+          \left\lceil n/2^{r+1}\right\rceil,
+          \left\lfloor n/2^{r+1}\right\rfloor,
+          \ell\right).
+  \end{array}
+  \]
+  A field called `runtime' or `maxRuntimeSum' with the tautological conclusion
+  $T_{\mathrm{biMax}}(n,\ell)+n\ell\le
+  C(T_{\mathrm{biMax}}(n,\ell)+n\ell)$ is not this runtime recurrence. The
+  correctness fields are similarly rejected if, after unfolding, they become
+  $M_U=M_U$, $\operatorname{MaxIPOpt}(U)=\operatorname{MaxIPOpt}(U)$,
+  $\operatorname{GammaMaxIPOpt}(U)=\operatorname{GammaMaxIPOpt}(U)$, or an
+  implication whose premise and conclusion are the same validity predicate.
+  The cross optimum of $\operatorname{crossMaxInst}(U)$ and the two recursive
+  optima must all occur in the statement being audited.
+
+  The following placeholder shapes are also explicitly rejected:
+  \[
+  \begin{array}{l}
+    \operatorname{exactMaxNodeCorrectness}(X):
+      \operatorname{MaxIPOpt}(X)=\operatorname{MaxIPOpt}(X),\\
+    \operatorname{exactMaxGlobalCorrectness}(X):
+      \operatorname{MaxIPValidOut}(X)=\operatorname{MaxIPValidOut}(X),\\
+    \operatorname{gammaMaxNodeCorrectness}(X):
+      \operatorname{GammaMaxIPOpt}(X)=\operatorname{GammaMaxIPOpt}(X),\\
+    \operatorname{maxRuntimeRecurrence}(T_{\mathrm{biMax}},n,\ell):
+      T_{\mathrm{biMax}}(n,\ell)+n\ell
+      \le C\bigl(T_{\mathrm{biMax}}(n,\ell)+n\ell\bigr).
+  \end{array}
+  \]
+  The accepted maximum-node correctness statements must contain the four
+  separately projected quantities $M_U$, $M_{\mathrm{cross}}(U)$, $M_L(U)$ and
+  $M_R(U)$, and the accepted approximate statement must contain the selected
+  score
+  $s_U(\operatorname{reconstructGammaMax}(U,\operatorname{answers}))$ with the
+  two inequalities $\gamma^{-1}M_U\le s^*_U\le M_U$. Runtime preservation must
+  be a theorem about $\operatorname{maxSplitTreeRuntime}$ and the split-tree
+  oracle-call sum, followed by an explicit exponent-preservation field producing
+  some $\eps'>0$ from a target exponent $\eps>0$.
+
+  Trial-8 alignment requirement: the Max-IP witness must expose the maximum
+  decomposition as data with named projection equations, parallel to the Min-IP
+  witness but with maxima:
+  \[
+  \begin{array}{ll}
+    \operatorname{crossMaxOpt\_eq}(U):&
+      M_{\mathrm{cross}}(U)=
+      \max_{p\in U_L,q\in U_R}\inner{p}{q},\\
+    \operatorname{leftMaxOpt\_eq}(U):&
+      M_L(U)=\max_{p\ne q\in U_L}\inner{p}{q},\\
+    \operatorname{rightMaxOpt\_eq}(U):&
+      M_R(U)=\max_{p\ne q\in U_R}\inner{p}{q},\\
+    \operatorname{nodeMaxOpt\_eq}(U):&
+      M_U=\max_{p\ne q\in U}\inner{p}{q}.
+  \end{array}
+  \]
+  The field `exactMaxGlobalCorrectness' has target
+  \[
+    \operatorname{MaxIPValidOut}
+      (V,\operatorname{reconstructExactMax}(V,\operatorname{answers})),
+  \]
+  derived from the fact that the selected candidate's score equals $M_V$; it is
+  not a proposition equality involving `MaxIPValidOut'. The field
+  `gammaMaxNodeCorrectness' must mention the selected score
+  \[
+    s^*_U=s_U(\operatorname{reconstructGammaMax}(U,\operatorname{answers}))
+  \]
+  and have the exact conclusion
+  $\gamma^{-1}M_U\le s^*_U\wedge s^*_U\le M_U$. It is rejected if the field
+  type normalizes to `GammaMaxIPOpt X = GammaMaxIPOpt X', if it proves only
+  that an exact maximizer would be a valid approximate output, or if the
+  reconstructed approximate candidate does not occur in the type. The runtime
+  theorem must use the named
+  $\operatorname{maxSplitTreeRuntime}$ from `maxSplitTreeRuntimeDef' on the
+  left-hand side; a self-bound on
+  $T_{\mathrm{biMax}}(n,\ell)+n\ell$ is not runtime accounting for the
+  constructed monochromatic algorithm.
 \end{lemma}
 \begin{proof}
   \uses{lem:minip-bichromatic-reduction, def:maxip, def:bichromatic-maxip}
@@ -2372,6 +3586,104 @@
     \qquad
     \overline{u}[h]=1-u[h].
   \]
+  This call is a concrete $\operatorname{BMaxIPInst}(|S_r|,|S_s|,\ell)$
+  instance whose left list is exactly the vectors of $V$ with Hamming weight
+  $r$ and whose right list is exactly the coordinatewise complements of vectors
+  of $V$ with Hamming weight $s$. The field
+  $\operatorname{callFamily}(V)$ is the finite family
+  \[
+    (r,s)\longmapsto
+      (|S_r|,|S_s|,\ell,\operatorname{call}_{r,s}(V)),
+      \qquad 0\le r,s\le\ell,
+  \]
+  not the grid of indices $\{0,\ldots,\ell\}^2$ by itself. For each $(r,s)$,
+  the package must include a projection
+  \[
+    \operatorname{callFamily\_call}(V,r,s)
+      =
+      (|S_r|,|S_s|,\ell,\operatorname{call}_{r,s}(V)),
+  \]
+  whose right-hand side is a concrete target instance. A field with type only
+  `Finset (\N\times\N)' or whose elements are only pairs $(r,s)$ fails this
+  node even if a later helper can reconstruct a call from the pair.
+  More precisely, $\operatorname{callFamily}(V)$ is a finite family of
+  dependent target calls, not a list of weights:
+  \[
+    \operatorname{callFamily}(V):
+      \prod_{r,s\in\{0,\ldots,\ell\}}
+      \sum_{n_L,n_R:\N}
+      \sum_{\ell':\N}
+        \operatorname{BMaxIPInst}(n_L,n_R,\ell').
+  \]
+  The projection $\operatorname{callFamily\_call}(V,r,s)$ must reduce to
+  \[
+    (|S_r|,\ |S_s|,\ \ell,\ \operatorname{call}_{r,s}(V)),
+  \]
+  and the witness also contains
+  \[
+  \begin{array}{l}
+    \operatorname{callLeftRows}(V,r,s):
+      \text{the left rows of }\operatorname{call}_{r,s}(V)
+      \text{ are exactly }S_r,\\
+    \operatorname{callRightRows}(V,r,s):
+      \text{the right rows are exactly }
+      \{\overline u:u\in S_s\}.
+  \end{array}
+  \]
+  A generated field named $\operatorname{callFamily\_call}$ that returns only
+  $(r,s)$, only $(n,\ell)$, or an abstract call object without the equations to
+  $S_r$ and $\overline{S_s}$ omits the construction.
+  For each $(r,s)$,
+  an oracle answer is a cross pair
+  \[
+    o_{r,s}=(p_{r,s},q_{r,s})
+      \in \operatorname{BMaxIPOut}(\operatorname{call}_{r,s}(V))
+  \]
+  satisfying the concrete validity relation
+  \[
+    \operatorname{BMaxIPValidOut}(
+      \operatorname{call}_{r,s}(V),o_{r,s})
+    \Longleftrightarrow
+    \inner{(S_r)_{p_{r,s}}}
+      {\overline{(S_s)_{q_{r,s}}}}
+    =
+    \max_{v\in S_r,\ u\in S_s}
+      \inner{v}{\overline u}.
+  \]
+  Consequently the required returned-score field is
+  \[
+    \operatorname{callScore}(V,r,s,o_{r,s})
+      =
+      \inner{(S_r)_{p_{r,s}}}
+        {\overline{(S_s)_{q_{r,s}}}},
+  \]
+  and it is definitionally tied to the oracle output pair. A field such as
+  $\operatorname{callScore}(r,s,o)=r$, or any score independent of the returned
+  pair and the concrete vectors, is rejected.
+  More explicitly, unfolding `callScore' must contain the two projections
+  $p_{r,s}$ and $q_{r,s}$ of the oracle output, the selected vector
+  $(S_r)_{p_{r,s}}$, the selected vector $(S_s)_{q_{r,s}}$, the complement map,
+  and the inner product. If the variable $o_{r,s}$ does not occur in the
+  unfolded right-hand side, the declaration is not aligned with this lemma.
+  The audited package must expose this dependence by named equations
+  \[
+  \begin{array}{ll}
+    \operatorname{oracleLeftIndex}(o_{r,s}) &= p_{r,s},\\
+    \operatorname{oracleRightIndex}(o_{r,s}) &= q_{r,s},\\
+    \operatorname{callScore\_eq}(V,r,s,o_{r,s}) &:\
+      \operatorname{callScore}(V,r,s,o_{r,s})
+      =
+      \inner{(S_r)_{\operatorname{oracleLeftIndex}(o_{r,s})}}
+        {\overline{(S_s)_{\operatorname{oracleRightIndex}(o_{r,s})}}}.
+  \end{array}
+  \]
+  If the formal target output type stores a pair as a subtype, these projections
+  may be the first and second coordinates of that subtype. In all cases the
+  equation must mention the oracle answer variable $o_{r,s}$ on the right-hand
+  side. A wrapper score such as
+  $o_{r,s}.\operatorname{callScore}$ is acceptable only if another projection
+  equation at this label unfolds that wrapper to the displayed inner product of
+  the returned pair.
   The witness contains the inner-product identity
   \[
     v\in S_r,\ u\in S_s
@@ -2397,6 +3709,46 @@
       \le C'(\ell+1)^2 T_{\mathrm{BMaxIP}}(n,\ell)+C''n\ell,
   \]
   which preserves truly subquadratic time up to polynomial factors in $\ell$.
+  The first inequality is the primary runtime accounting theorem, because each
+  oracle call has its own color-class sizes. The witness must define
+  \[
+    \operatorname{weightCallRuntime}(T_{\mathrm{BMaxIP}},V)
+      =
+      c_{\mathrm{partition}}n\ell
+      +
+      c_{\mathrm{calls}}
+      \sum_{r=0}^{\ell}\sum_{s=0}^{\ell}
+        T_{\mathrm{BMaxIP}}(|S_r|,|S_s|,\ell)
+      +
+      c_{\mathrm{inspect}}(\ell+1)^2\ell
+  \]
+  and then prove the displayed bounds from this definition. A runtime formula
+  using only $T_{\mathrm{BMaxIP}}(n,n,\ell)$, or using
+  $(\ell+1)^2T_{\mathrm{BMaxIP}}(n,n,\ell)$ as the sole runtime without the
+  double sum over $|S_r|,|S_s|$, is too coarse for this witness and is rejected.
+  The coarser bound by $(\ell+1)^2T_{\mathrm{BMaxIP}}(n,\ell)$ may appear only
+  as a second theorem derived from monotonicity after the double-sum runtime
+  has been stated.
+  The weight-class correctness theorem must be the chain
+  \[
+  \begin{aligned}
+    \operatorname{Yes}_{\OV}(V)
+    &\Longleftrightarrow
+      \exists r,s,\exists v\in S_r,\exists u\in S_s,\ \inner{v}{u}=0\\
+    &\Longleftrightarrow
+      \exists r,s,\ 
+      \max_{v\in S_r,\ u\in S_s}\inner{v}{\overline u}=r\\
+    &\Longleftrightarrow
+      \exists r,s,\ 
+      \operatorname{callScore}(V,r,s,o_{r,s})=r
+      \quad\text{for every valid oracle answer }o_{r,s}.
+  \end{aligned}
+  \]
+  The middle equivalence uses the fact that for $v\in S_r$,
+  $\inner{v}{\overline u}\le r$ for every $u$, with equality iff
+  $\inner{v}{u}=0$. A theorem that only restates
+  ``there exists an orthogonal pair in some weight classes'' without the
+  maximum-over-complements equality does not satisfy this node.
 
   In field form, the audited witness contains at least
   \[
@@ -2430,6 +3782,100 @@
   $\operatorname{Nonempty}(\operatorname{FGReduction})$ or only an opaque
   implication from bichromatic Max-IP algorithms to OV algorithms omits the
   construction required here.
+  In particular, the projection named `thresholdEquivalence' must have the
+  concrete type
+  \[
+  \begin{array}{l}
+    \operatorname{thresholdEquivalence}(V):\\
+    \qquad
+    \operatorname{Yes}_{\OV}(V)
+    \Longleftrightarrow
+    \exists r,s,\ 
+      \max_{v\in S_r,\ u\in S_s}\inner{v}{\overline u}=r,
+  \end{array}
+  \]
+  or the equivalent three-line chain displayed above with the valid oracle
+  scores. A field whose type is
+  $\operatorname{Yes}_{\OV}(V)\leftrightarrow\operatorname{Yes}_{\OV}(V)$ is
+  explicitly rejected even if it is named `thresholdEquivalence'. Similarly,
+  `runtimeWeightCalls' must unfold to a statement about the named
+  $\operatorname{weightCallRuntime}$ double sum over
+  $T_{\mathrm{BMaxIP}}(|S_r|,|S_s|,\ell)$. It is rejected if every oracle call
+  in the runtime is charged as $T_{\mathrm{BMaxIP}}(n,n,\ell)$ without first
+  defining the concrete calls at sizes $|S_r|$ and $|S_s|$ and proving a
+  separate monotonicity-based coarse bound.
+
+  The audit should also reject the following weaker field shapes, even if the
+  surrounding witness has the right name. A field
+  \[
+    \operatorname{thresholdEquivalence}(V):
+      \operatorname{OVYes}(V)\Longleftrightarrow\operatorname{OVYes}(V)
+  \]
+  is not the threshold equivalence. A field
+  `weightClassCorrect' which only says that every vector belongs to some
+  weight class, or that an orthogonal pair can be assigned weights, is not the
+  Max-IP reduction correctness theorem; it must contain the equality
+  $\max_{v\in S_r,u\in S_s}\inner{v}{\overline u}=r$ and the iff to OV yes.
+  Finally, the runtime projection must have the double-sum form
+  \[
+    \operatorname{weightCallRuntime}(T_{\mathrm{BMaxIP}},V)
+    =
+    c_{\mathrm{partition}}n\ell+
+    c_{\mathrm{calls}}\sum_{r=0}^{\ell}\sum_{s=0}^{\ell}
+      T_{\mathrm{BMaxIP}}(|S_r|,|S_s|,\ell)
+    +c_{\mathrm{inspect}}(\ell+1)^2\ell.
+  \]
+  Charging every call as $T_{\mathrm{BMaxIP}}(n,n,\ell)$ is permitted only in a
+  separately named derived coarse bound after the concrete child-sized calls and
+  the displayed runtime definition have already been exposed.
+
+  Trial-8 alignment requirement: the correctness proof must not stop at
+  assigning every vector to some weight class. The witness has a field
+  \[
+  \begin{array}{l}
+    \operatorname{weightClassOrthogonalIff}(V):\\
+    \qquad
+    \operatorname{OVYes}(V)
+    \Longleftrightarrow
+    \exists r,s,\exists v\in S_r,\exists u\in S_s,\
+      \inner{v}{u}=0,
+  \end{array}
+  \]
+  and a separate field
+  \[
+  \begin{array}{l}
+    \operatorname{complementMaxIffZero}(V,r,s):\\
+    \qquad
+    \left(\exists v\in S_r,\exists u\in S_s,\inner{v}{u}=0\right)
+    \Longleftrightarrow
+    \max_{v\in S_r,u\in S_s}\inner{v}{\overline u}=r .
+  \end{array}
+  \]
+  The exported `thresholdEquivalence' must be the composition of these two
+  fields:
+  \[
+    \operatorname{OVYes}(V)\Longleftrightarrow
+    \exists r,s,\max_{v\in S_r,u\in S_s}\inner{v}{\overline u}=r .
+  \]
+  The reconstruction theorem then uses valid oracle answers
+  $o_{r,s}$ for every concrete call and states
+  \[
+    \operatorname{reconstruct}(V,\operatorname{answers})=\mathrm{true}
+    \Longleftrightarrow
+    \operatorname{OVYes}(V),
+  \]
+  where `reconstruct' unfolds to
+  $\exists r,s,\operatorname{callScore}(V,r,s,o_{r,s})=r$. A field named
+  `weightClassCorrect' that only proves each row has some weight, or a field
+  named `thresholdEquivalence' whose type is
+  `OVYes V ↔ OVYes V', is explicitly not the reduction correctness theorem.
+  Likewise, the runtime package has separate projections
+  `weightCallRuntimeDef',
+  `weightCallRuntimeBoundByDoubleSum', and
+  `weightCallRuntimeCoarseBound'. The first two must mention the double sum
+  $\sum_r\sum_s T_{\mathrm{BMaxIP}}(|S_r|,|S_s|,\ell)$; only the third may use
+  a monotonicity-derived coarse charge by
+  $(\ell+1)^2T_{\mathrm{BMaxIP}}(n,n,\ell)$.
 \end{lemma}
 \begin{proof}
   \uses{def:maxip, def:bichromatic-maxip, def:ov, def:inner-prod}
@@ -2509,6 +3955,115 @@
   Thus a zero-vector OV instance is answered before the LSD oracle is called,
   and a nonzero instance is sent unchanged to the concrete nonzero-binary input
   relation of Definition~\ref{def:gamma-lsd}.
+  In the nonzero branch the witness must also expose the concrete oracle answer
+  and its validity proof:
+  \[
+  \begin{array}{ll}
+    \operatorname{lsdOracleAnswer}(V,\mathcal A)
+      &: \operatorname{GammaLSDOut}(n,\ell,\gamma,V),\\
+    \operatorname{lsdOracleCorrect}(V,\mathcal A)
+      &: \operatorname{GammaLSDValidOut}
+         (n,\ell,\gamma,V,
+          \operatorname{lsdOracleAnswer}(V,\mathcal A)),\\
+    \operatorname{returnedPair}(V,\mathcal A)
+      &:=(i^*,j^*)=
+        \operatorname{lsdOracleAnswer}(V,\mathcal A).
+  \end{array}
+  \]
+  The nonzero reconstruction equation is then
+  \[
+    \operatorname{reconstruct}(V,\operatorname{answers}_{\mathcal A})
+    =
+    \bigl(\inner{v_{i^*}}{v_{j^*}}=0\bigr),
+  \]
+  where $(i^*,j^*)$ is exactly the output of the gamma-LSD oracle on $V$. A
+  correctness proof that reasons about an arbitrary pair, or about an erased
+  answer with no $\operatorname{GammaLSDValidOut}$ proof, does not transfer OV
+  correctness.
+  The package has explicit parameter-regime fields:
+  \[
+  \begin{array}{ll}
+    \operatorname{sourceSlice}:&
+      \ell=\logDim(c,n)\wedge n\ge n_0,\\
+    \operatorname{sourceRegime\_iff}:&
+      \operatorname{SrcRegime}(n,\ell)
+      \Longleftrightarrow n\ge n_0\wedge \ell=\logDim(c,n),\\
+    \operatorname{targetParam}:&
+      (n,\ell,\gamma)\text{ for the concrete }
+      \gamma\text{-}\LSD\text{ family},\\
+    \operatorname{targetParam\_eq}:&
+      \operatorname{targetParam}(n,\ell,\gamma)=(n,\logDim(c,n),\gamma)
+      \text{ on }\operatorname{sourceSlice}.
+  \end{array}
+  \]
+  The variable $\gamma$ in these fields is universally quantified and is the
+  same $\gamma$ appearing in the target family, the oracle call, the validity
+  relation, the reconstructed algorithm, and the runtime. The witness is
+  rejected if any of these fields are specialized to $\gamma=1$, if
+  `targetParam' drops $\gamma$, or if the oracle-correctness theorem has the
+  type for $\operatorname{GammaLSDValidOut}(n,\ell,1,V,o)$ instead of
+  $\operatorname{GammaLSDValidOut}(n,\ell,\gamma,V,o)$ under the explicit
+  hypothesis $\gamma\ge1$.
+  The exported lower-bound theorem must be parameterized by this same source
+  slice and target parameter. It is rejected if its conclusion is merely
+  $\NoTSQAlg{\operatorname{def\_gamma\_lsd.family}}$ with no bound
+  $(n,\ell,\gamma)$ parameter or no equation $\ell=\logDim(c,n)$.
+  The package therefore contains a named lower-bound projection
+  \[
+  \begin{array}{l}
+    \operatorname{lowerBoundOnLogSlice}:\\
+    \qquad
+    \forall \eps>0,\ \exists c>0,\ \forall n,\ell,\gamma,\ 
+    n\ge n_0\to \ell=\logDim(c,n)\to \gamma\ge1\to\\
+    \qquad\qquad
+    \NoTSQAlg{\gamma\text{-}\LSD_{n,\ell}} .
+  \end{array}
+  \]
+  The conclusion must mention the instantiated parameter triple
+  $(n,\ell,\gamma)$ of the concrete $\gamma$-LSD family. It is not enough to
+  prove a lower bound for an uninstantiated family value or a proposition whose
+  hypotheses do not include $\ell=\logDim(c,n)$.
+  Zero-vector correctness is a concrete field, not an excluded case:
+  \[
+    \operatorname{zeroCaseCorrect}:
+      \operatorname{hasZero}(V)\Longrightarrow
+      \operatorname{reconstruct}(V,\varnothing)=\mathrm{true}
+      \ \wedge\
+      \operatorname{Yes}_{\OV}(V).
+  \]
+  This field must be paired with the defining equation for the zero branch,
+  \[
+    \operatorname{reconstruct\_zero}(h):
+      \operatorname{reconstruct}(V,\varnothing)=\mathrm{true}
+      \quad\text{for }h:\operatorname{hasZero}(V),
+  \]
+  and with a proof
+  \[
+    \operatorname{hasZero\_to\_OVYes}(h):
+      \operatorname{Yes}_{\OV}(V).
+  \]
+  The proof of `hasZero_to_OVYes' must exhibit an index $i$ with
+  $v_i=0^\ell$ and then a distinct partner index $j$ guaranteed by the source
+  regime $n\ge2$, showing $\inner{v_i}{v_j}=0$. It is not enough to invoke
+  classical excluded middle for $\operatorname{Yes}_{\OV}(V)$.
+  For the nonzero branch the witness must contain
+  \[
+    \operatorname{nonzeroBranchCorrect}:
+      \neg\operatorname{hasZero}(V)\Longrightarrow
+      \left(
+        \operatorname{reconstruct}(V,\operatorname{answers})=\mathrm{true}
+        \Longleftrightarrow
+        \operatorname{Yes}_{\OV}(V)
+      \right).
+  \]
+  A field with conclusion
+  $\operatorname{hasZero}(V)\to
+  (\operatorname{Yes}_{\OV}(V)\vee\neg\operatorname{Yes}_{\OV}(V))$ is just
+  excluded middle and is rejected; it does not prove that the constructed
+  reduction answers true on the zero-vector branch.
+  Likewise, a theorem named `zeroCaseCorrect' whose conclusion does not mention
+  both `reconstruct' and `OVYes' is rejected, even if a separate lower-bound
+  proposition is present.
   The package contains the zero-cosine equivalence
   \[
     v_i\ne0,\ v_j\ne0
@@ -2546,6 +4101,28 @@
   \]
   This is the multiplicative-zero argument; it cannot be replaced by a generic
   approximation theorem or by an abstract reduction correctness field.
+  The nonzero branch correctness field is explicitly derived from these data:
+  \[
+  \begin{array}{l}
+    \operatorname{oracleOutputZeroCorrect}(V,\mathcal A):\\
+    \qquad
+    \operatorname{GammaLSDValidOut}
+      (n,\ell,\gamma,V,(i^*,j^*))
+    \to \gamma\ge1\to \neg\operatorname{hasZero}(V)\to\\
+    \qquad
+    \left(
+      \inner{v_{i^*}}{v_{j^*}}=0
+      \Longleftrightarrow
+      \operatorname{Yes}_{\OV}(V)
+    \right).
+  \end{array}
+  \]
+  Its proof must use, in order, the gamma-LSD validity inequalities for the
+  returned oracle pair, nonnegativity of binary cosine values, the
+  minimum-zero equivalence, and the zero-cosine/zero-inner-product equivalence.
+  A field named $\operatorname{nonzeroBranchCorrect}$ that does not take the
+  oracle validity proof as an input, or that does not mention
+  $\operatorname{GammaLSDValidOut}$, is not this correctness theorem.
   Its runtime field is
   \[
     T_{\OV\leftarrow\gamma\LSD}(n,\ell)
@@ -2559,6 +4136,110 @@
   stand-alone asymptotic lower-bound proposition. A declaration that states only
   the high-level lower-bound proposition, without these maps, equivalences,
   reconstructed answer and runtime accounting, is not this theorem.
+  As with Lemma~\ref{lem:minip-harder-ov}, this runtime appears through a named
+  definition and a separate bound:
+  \[
+  \begin{array}{ll}
+    \operatorname{gammaLSDReductionRuntime}(T_{\gamma\LSD},n,\ell,\gamma)
+      &: \R_{\ge0},\\
+    \operatorname{gammaLSDRuntimeDef}:&
+      \operatorname{gammaLSDReductionRuntime}(T_{\gamma\LSD},n,\ell,\gamma)
+      =
+      c_{\mathrm{zeroScan}}n\ell+
+      c_{\mathrm{call}}T_{\gamma\LSD}(n,\ell,\gamma)+
+      c_{\mathrm{test}}\ell+
+      c_{\mathrm{branch}},\\
+    \operatorname{gammaLSDRuntimeBound}:&
+      \operatorname{gammaLSDReductionRuntime}(T_{\gamma\LSD},n,\ell,\gamma)
+      \le C\bigl(n\ell+T_{\gamma\LSD}(n,\ell,\gamma)\bigr).
+  \end{array}
+  \]
+  The bound is rejected if the left-hand side is the expression
+  $n\ell+T_{\gamma\LSD}(n,\ell,\gamma)$ rather than the named constructed
+  runtime, or if the runtime definition omits either the zero-vector scan or the
+  target gamma-LSD oracle call.
+  The projection named `runtimeTransfer' must be a package or theorem about
+  this named runtime, not the final inequality alone. Its statement must expose
+  both
+  $\operatorname{gammaLSDReductionRuntime}$ and
+  $\operatorname{gammaLSDRuntimeDef}$, and its bound conclusion must have
+  $\operatorname{gammaLSDReductionRuntime}
+  (T_{\gamma\LSD},n,\ell,\gamma)$ as the left-hand side. A proof term whose
+  only runtime content is
+  $T_{\gamma\LSD}(n,\ell,\gamma)+n\ell
+  \le C(T_{\gamma\LSD}(n,\ell,\gamma)+n\ell)$ is a tautology about the oracle
+  runtime, not a constructed OV runtime, and is rejected. The projection named
+  `lowerBoundStatement' is also accepted only as a derived theorem whose proof
+  invokes the concrete `runtimeTransfer', `oracleOutputZeroCorrect',
+  `zeroCaseCorrect', and the source-regime fields above. A standalone
+  lower-bound proposition attached to the witness, with no definitional path to
+  the constructed OV algorithm and its runtime, does not satisfy this theorem.
+
+  Concretely, the runtime transfer package contains all of the following
+  projections:
+  \[
+  \begin{array}{ll}
+    \operatorname{constructedOVRun}:&
+      \text{scan for a zero vector; otherwise call the }
+      \gamma\text{-LSD oracle and test the returned inner product},\\
+    \operatorname{constructedOVCorrect}:&
+      \operatorname{constructedOVRun}(V)=\mathrm{true}
+      \Longleftrightarrow \operatorname{OVYes}(V),\\
+    \operatorname{constructedOVRuntime}:&
+      \operatorname{constructedOVRuntime}(T_{\gamma\LSD},n,\ell,\gamma)
+      =
+      \operatorname{gammaLSDReductionRuntime}
+        (T_{\gamma\LSD},n,\ell,\gamma),\\
+    \operatorname{runtimeTransfer}:&
+      \operatorname{gammaLSDReductionRuntime}
+        (T_{\gamma\LSD},n,\ell,\gamma)
+      \le C(n\ell+T_{\gamma\LSD}(n,\ell,\gamma)).
+  \end{array}
+  \]
+  Each projection must retain the arbitrary $\gamma\ge1$. A proof of the
+  theorem for the single case $\gamma=1$ proves only exact LSD hardness and is
+  not this node.
+
+  Trial-8 alignment requirement: `runtimeTransfer' is a record whose first
+  field is the constructed algorithm, not a bound on a free expression. It must
+  expose
+  \[
+  \begin{array}{ll}
+    \operatorname{ovFromGammaLSDRun}(V):&
+      \text{if }\operatorname{hasZero}(V)\text{ then true, otherwise }
+      \inner{v_{i^*}}{v_{j^*}}=0
+      \text{ for the oracle pair }(i^*,j^*),\\
+    \operatorname{ovFromGammaLSDRun\_zero}:&
+      \operatorname{hasZero}(V)\to
+      \operatorname{ovFromGammaLSDRun}(V)=\mathrm{true},\\
+    \operatorname{ovFromGammaLSDRun\_nonzero}:&
+      \neg\operatorname{hasZero}(V)\to
+      \operatorname{ovFromGammaLSDRun}(V)=
+      \left(\inner{v_{i^*}}{v_{j^*}}=0\right),\\
+    \operatorname{ovFromGammaLSDCorrect}:&
+      \operatorname{ovFromGammaLSDRun}(V)=\mathrm{true}
+      \Longleftrightarrow \operatorname{OVYes}(V),\\
+    \operatorname{ovFromGammaLSDRuntimeDef}:&
+      T_{\mathrm{constructed}}(n,\ell,\gamma)
+      =
+      c_{\mathrm{zeroScan}}n\ell+
+      c_{\mathrm{call}}T_{\gamma\LSD}(n,\ell,\gamma)+
+      c_{\mathrm{test}}\ell+c_{\mathrm{branch}},\\
+    \operatorname{ovFromGammaLSDRuntimeBound}:&
+      T_{\mathrm{constructed}}(n,\ell,\gamma)
+      \le C(n\ell+T_{\gamma\LSD}(n,\ell,\gamma)).
+  \end{array}
+  \]
+  The field `lowerBoundStatement' is a theorem derived from this record plus
+  OVC/SETH; it is not an independent field that may be postulated without a run,
+  correctness proof and constructed runtime. The term
+  $T_{\gamma\LSD}(n,\ell,\gamma)+n\ell\le
+  C(T_{\gamma\LSD}(n,\ell,\gamma)+n\ell)$ may appear only as an intermediate
+  inequality after rewriting `ovFromGammaLSDRuntimeDef'; it is not the type of
+  `runtimeTransfer'. The nonzero correctness theorem must use the actual oracle
+  output and the proof
+  $\operatorname{GammaLSDValidOut}(n,\ell,\gamma,V,(i^*,j^*))$; pairwise
+  zero-cosine facts without this validity proof do not prove the reduction.
 \end{theorem}
 \begin{proof}
   \uses{def:gamma-lsd, def:ov, def:cosine, def:inner-prod, conjecture:ovc, thm:seth-implies-ovc, def:log-parameter-regimes}
@@ -2634,6 +4315,12 @@
       unspecified or all-purpose `def_lsd_dec' family without binding the
       witness threshold $t$.
   \end{itemize}
+  The witness package itself must contain the concrete algorithms and maps
+  listed below. A record with fields only of the form
+  `TSQAlg A -> TSQAlg B' or
+  `NoTSQAlg A -> NoTSQAlg B' is not this corollary; such implications may be
+  exported as derived theorems only after the maps, output reconstruction and
+  runtime fields below have been supplied.
   The four fields have the following required concrete shapes:
   \[
   \begin{array}{ll}
@@ -2670,6 +4357,179 @@
       \NoTSQAlg{\LSD_{n,\ell,t}}.
   \end{array}
   \]
+  More explicitly, `exactToGammaOne' is a witness constructor, not a bare
+  implication. Given an exact LSD oracle output $o=(i,j)$, it returns the same
+  pair and proves
+  \[
+    \operatorname{LSDScore}(V,o)=\operatorname{LSDOpt}(V)
+    \Longrightarrow
+    \operatorname{GammaLSDValidOut}(n,\ell,1,V,o)
+  \]
+  by unfolding the $\gamma$-LSD inequalities with $\gamma=1$. Its runtime field
+  is
+  \[
+    T_{1\text{-}\LSD}(n,\ell)
+      =
+      T_{\LSD}(n,\ell)+c_{\mathrm{return}}
+      \le C(T_{\LSD}(n,\ell)+1),
+  \]
+  so the constructed algorithm's runtime is tied to the exact oracle runtime.
+  Therefore an `exact-search transfer' field whose type is only
+  `TSQAlg LSD -> TSQAlg GammaLSD' is rejected unless the same field, after
+  unfolding, exposes this returned pair, validity proof and runtime equation.
+  In particular, the witness contains
+  \[
+  \begin{array}{ll}
+    \operatorname{exactToGammaOneRun}(V) &:=
+      \operatorname{run}_{\LSD}(V),\\
+    \operatorname{exactToGammaOneCorrect}(V) &:\
+      \operatorname{LSDValidOut}(V,
+        \operatorname{exactToGammaOneRun}(V))
+      \to
+      \operatorname{GammaLSDValidOut}(n,\ell,1,V,
+        \operatorname{exactToGammaOneRun}(V)),\\
+    \operatorname{exactToGammaOneRuntimeDef}:&
+      T_{1\text{-}\LSD}(n,\ell)
+      =
+      T_{\LSD}(n,\ell)+c_{\mathrm{return}}.
+  \end{array}
+  \]
+  These are data of the transfer, not consequences hidden behind a
+  $\operatorname{Nonempty}$ implication.
+
+  The padding transfer must define, for every $\ell'\ge\ell$,
+  \[
+    \operatorname{pad}_{\ell,\ell'}(v)
+      =(v,0^{\ell'-\ell})
+  \]
+  together with the three equations
+  \[
+    \inner{\operatorname{pad}(v)}{\operatorname{pad}(w)}
+      =\inner{v}{w},\qquad
+    \norm{\operatorname{pad}(v)}=\norm{v},\qquad
+    \cossim{\operatorname{pad}(v)}{\operatorname{pad}(w)}
+      =\cossim{v}{w}.
+  \]
+  It then maps an oracle output pair for the padded instance back to the same
+  pair of original indices. A padding field that mentions only monotonicity of
+  dimension, or only stores an abstract map without these three equations, does
+  not prove the larger-dimension claim.
+  The larger-dimension lower-bound conclusion must retain the concrete target
+  parameter $\ell'$ and the hypothesis $\ell'\ge\logDim(c,n)$. It is rejected
+  if it states a lower bound for an unparameterized family `def_lsd.family' or
+  if the padding map is not projected from the witness.
+  The field named $\operatorname{largerDimensionTransfer}$ must not have type
+  $\mathrm{True}$. It is a package with projections
+  \[
+  \begin{array}{ll}
+    \operatorname{padInst}_{\ell,\ell'}(V)
+      &: \LSDInst(n,\ell'),\\
+    \operatorname{padInst\_row}:&
+      \operatorname{padInst}_{\ell,\ell'}(V)_i
+      =(v_i,0^{\ell'-\ell}),\\
+    \operatorname{padCosine}:&
+      \cossim{\operatorname{pad}(v_i)}{\operatorname{pad}(v_j)}
+      =\cossim{v_i}{v_j},\\
+    \operatorname{unpadOutput}:&
+      \operatorname{LSDOut}(n,\ell',
+        \operatorname{padInst}_{\ell,\ell'}(V))
+      \to \operatorname{LSDOut}(n,\ell,V),\\
+    \operatorname{largerDimensionCorrect}:&
+      \operatorname{LSDValidOut}(n,\ell',
+        \operatorname{padInst}_{\ell,\ell'}(V),o')
+      \to
+      \operatorname{LSDValidOut}(n,\ell,V,
+        \operatorname{unpadOutput}(o')),\\
+    \operatorname{largerDimensionRuntimeDef}:&
+      T_{\mathrm{pad}}(n,\ell,\ell')
+      =
+      c_{\mathrm{pad}}n\ell'
+      +T_{\LSD,\ell'}(n)
+      +c_{\mathrm{unpad}}.
+  \end{array}
+  \]
+  The lower-bound transfer is derived from these projections. A generated field
+  whose conclusion is only $\mathrm{True}$, or only says that larger dimension
+  is harder without defining $\operatorname{padInst}_{\ell,\ell'}$, is rejected.
+
+  The bichromatic transfer field is a cosine version of the recursive split
+  witness. At every node $U=U_L\cup U_R$ it constructs the concrete
+  bichromatic $\gamma$-LSD instance $(U_L,U_R)$, receives a valid cross-color
+  output, recursively receives valid candidates from $U_L$ and $U_R$, and
+  returns the candidate with smallest cosine score among the three. Its
+  correctness theorem must use the decomposition
+  \[
+    m_U=\min(m_{\mathrm{cross}}(U),\min(m_L(U),m_R(U)))
+  \]
+  where
+  $m_{\mathrm{cross}}(U)=\min_{p\in U_L,q\in U_R}\cossim{p}{q}$,
+  $m_L(U)=\min_{p\ne q\in U_L}\cossim{p}{q}$, and
+  $m_R(U)=\min_{p\ne q\in U_R}\cossim{p}{q}$. It is rejected if it only states
+  an implication
+  $\TSQAlg{\text{bichromatic }\gamma\text{-}\LSD}\to
+    \TSQAlg{\gamma\text{-}\LSD}$, or if its node correctness repeats
+  $\operatorname{LSDOpt}(U)$ on all three branches.
+  Its call field must be the singleton concrete bichromatic instance
+  \[
+    \operatorname{cosineCallsAtNode}(U)
+      =
+      \{\,(|U_L|,|U_R|,\ell,\gamma,(U_L,U_R))\,\},
+  \]
+  and its reconstruction must choose the smallest cosine-score candidate among
+  the cross, left and right answers. These are not optional helper definitions.
+  The field named $\operatorname{bichromaticTransfer}$ is not merely
+  $\TSQAlg{\text{bichromatic }\gamma\text{-}\LSD}\to
+  \TSQAlg{\gamma\text{-}\LSD}$. It must expose the split-tree projections
+  \[
+  \begin{array}{ll}
+    \operatorname{cosineCrossInst}(U)&=(U_L,U_R),\\
+    \operatorname{cosineCallsAtNode\_eq}:&
+      \operatorname{cosineCallsAtNode}(U)
+      =
+      \{\,(|U_L|,|U_R|,\ell,\gamma,
+          \operatorname{cosineCrossInst}(U))\,\},\\
+    \operatorname{cosineCandidateSet}(U)&=
+      \{o_{\mathrm{cross}}(U),o_L(U),o_R(U)\},\\
+    \operatorname{cosineReconstructGamma}(U,\operatorname{answers})
+      &\in
+      \arg\min_{o\in\operatorname{cosineCandidateSet}(U)}
+        \cossim{\operatorname{left}(o)}{\operatorname{right}(o)}.
+  \end{array}
+  \]
+  Its correctness field is the displayed minimum decomposition for
+  $m_U,m_{\mathrm{cross}}(U),m_L(U),m_R(U)$ followed by the
+  $\gamma$-approximation inequalities for the reconstructed candidate. A
+  $\operatorname{Nonempty}$ implication, or a split field whose node
+  correctness is $\mathrm{True}$, does not satisfy this transfer.
+
+  The threshold transfer must bind a specific threshold family. It defines the
+  finite set $\mathcal T_\ell$ above, proves that for every nonzero binary
+  pair $(v,w)$ the value $\cossim{v}{w}$ belongs to $\mathcal T_\ell$, and
+  defines
+  \[
+    t_{\min}(V)=\min\{t\in\mathcal T_\ell:
+      \operatorname{Yes}_{\LSD_{n,\ell,t}}(V)\}.
+  \]
+  From threshold oracle answers on these finitely many $t$ values it recovers a
+  pair attaining $t_{\min}(V)=\operatorname{LSDOpt}(V)$. The hard-threshold
+  conclusion is therefore the dependent statement
+  \[
+    \operatorname{existsHardThreshold}:
+    \exists t:\R,\ 0\le t\le1\ \wedge\
+      \NoTSQAlg{(\operatorname{LSDThresholdFamily})(n,\ell,t)}.
+  \]
+  The family in this last display must be the concrete decision family from
+  Definition~\ref{def:lsd-dec} instantiated at the returned threshold $t$. A
+  conclusion about an uninstantiated `def_lsd_dec' object, or about a threshold
+  chosen outside the witness package, is not this field.
+  In particular, the statement
+  \[
+    \exists t,\ 0\le t\le1\wedge
+      \NoTSQAlg{\operatorname{def\_lsd\_dec.family}}
+  \]
+  is explicitly rejected: the right-hand side does not apply the family to the
+  witness parameter $(n,\ell,t)$ and therefore does not identify which
+  threshold decision problem is hard.
   None of these fields may have type `True', `Unit', `True -> True', or be only
   an implication between abstract $\operatorname{TSQAlgorithm}$ existence
   propositions. In particular, the threshold field must quantify and return a
@@ -2677,11 +4537,148 @@
   $0\le t\le1$; the conclusion
   $\NoTSQAlg{\text{def\_lsd\_dec}}$ without a bound threshold is not this
   corollary.
+  The threshold witness also exposes the instantiated family equation
+  \[
+    \operatorname{thresholdFamilyAt}(n,\ell,t)
+      =
+      \operatorname{LSDThresholdFamily}(n,\ell,t)
+  \]
+  and the hard-threshold field has exactly the dependent type
+  \[
+  \begin{array}{l}
+    \operatorname{existsHardThreshold}:\\
+    \qquad
+    \exists t:\R,\ 0\le t\le1\ \wedge\
+      \NoTSQAlg{\operatorname{thresholdFamilyAt}(n,\ell,t)}.
+  \end{array}
+  \]
+  The variable $t$ returned by the existential must occur in the family
+  argument on the right-hand side. The field is rejected if the right-hand side
+  is independent of $t$, if it names only $\operatorname{def\_lsd\_dec}$ or
+  $\operatorname{def\_lsd\_dec.family}$, or if the threshold range proof
+  $0\le t\le1$ is not paired with the same $t$.
   These fields must retain the parameter regime
   $\ell\ge\logDim(c,n)$ and the bichromatic $\gamma$-LSD claim. A corollary
   statement that only mentions the abstract families
   $\LSD$, $\gamma$-LSD and $\LSD$-decision, or omits the existential threshold,
   is weaker than the paper's Corollary 3.2.
+  The three transfer fields named by the critic are reserved names with
+  non-vacuous meanings:
+  \[
+  \begin{array}{ll}
+    \operatorname{largerDimensionTransfer}:&
+      \text{the package containing } \operatorname{padInst},
+      \operatorname{padInst\_row},\operatorname{padCosine},
+      \operatorname{unpadOutput},\operatorname{largerDimensionCorrect},
+      \operatorname{largerDimensionRuntimeDef};\\
+    \operatorname{bichromaticTransfer}:&
+      \text{the cosine split-tree package containing }
+      \operatorname{cosineCrossInst},
+      \operatorname{cosineCallsAtNode\_eq},
+      \operatorname{cosineReconstructGamma},
+      \operatorname{bichromaticCosineNodeCorrectness},
+      \operatorname{bichromaticGammaCorrectness};\\
+    \operatorname{thresholdTransfer}:&
+      \text{the finite-spectrum package containing }
+      \operatorname{thresholdValues},
+      \operatorname{thresholdFamilyAt},
+      \operatorname{thresholdSearchCorrectness},
+      \operatorname{existsHardThreshold}.
+  \end{array}
+  \]
+  None of these three fields may have type $\mathrm{True}$, $\mathrm{Unit}$, or
+  only an implication between $\TSQAlg$ or $\NoTSQAlg$ propositions. If
+  `largerDimensionTransfer' unfolds to `True', if `bichromaticTransfer' unfolds
+  only to
+  $\TSQAlg{\text{bichromatic }\gamma\text{-}\LSD}\to
+  \TSQAlg{\gamma\text{-}\LSD}$, or if `thresholdTransfer' unfolds only to an
+  abstract implication from all threshold solvers to exact LSD, the declaration
+  is rejected. Each field must project the concrete maps, equations, returned
+  candidates and runtime definitions listed in this node, and the derived
+  lower-bound statements must be proved from those projections.
+
+  The following field names have reserved concrete types in this corollary.
+  `largerDimensionTransfer' is a record with the fields
+  `padInst', `padInst_row', `padInner', `padNorm', `padCosine',
+  `unpadOutput', `largerDimensionCorrect',
+  `largerDimensionRuntime', `largerDimensionRuntimeDef', and
+  `largerDimensionRuntimeBound'. It is rejected if it is a proposition, `True',
+  or a bare lower-bound implication.
+  `bichromaticTransfer' is a record with the fields
+  `cosineSplitTree', `cosineCrossInst', `cosineCallsAtNode_eq',
+  `cosineCandidateSet', `cosineReconstructGamma',
+  `bichromaticCosineNodeCorrectness',
+  `bichromaticGammaCorrectness', `cosineSplitRuntime',
+  `cosineSplitRuntimeDef', and `cosineSplitRuntimeBound'. It is rejected if it
+  is only
+  $\TSQAlg{\text{bichromatic }\gamma\text{-}\LSD}\to
+    \TSQAlg{\gamma\text{-}\LSD}$.
+  `thresholdTransfer' is a record with the fields
+  `thresholdValues', `cosineValue_mem_thresholdValues',
+  `thresholdFamilyAt', `thresholdFamilyAt_eq',
+  `thresholdSearchRun', `thresholdSearchCorrectness',
+  `thresholdSearchRuntimeDef', and `existsHardThreshold'. The field
+  `existsHardThreshold' must have the dependent type
+  \[
+    \exists t:\R,\ 0\le t\le1\ \wedge\
+      \NoTSQAlg{\operatorname{thresholdFamilyAt}(n,\ell,t)},
+  \]
+  where the same existentially bound $t$ occurs in the family argument.
+  Therefore a conclusion involving only `def_lsd_dec.family', or any family
+  expression independent of $t$, does not satisfy the threshold part of the
+  corollary.
+
+  Trial-8 alignment requirement: the three transfer fields named in the audit
+  are records with fixed projections, never propositions.
+  `exactSearchTransfer' has projections
+  \[
+  \begin{array}{ll}
+    \operatorname{exactSearchRun}(V)&=\operatorname{run}_{\LSD}(V),\\
+    \operatorname{exactSearchCorrect}:&
+      \operatorname{LSDValidOut}(V,\operatorname{exactSearchRun}(V))
+      \to
+      \operatorname{GammaLSDValidOut}
+        (n,\ell,1,V,\operatorname{exactSearchRun}(V)),\\
+    \operatorname{exactSearchRuntimeDef}:&
+      T_{\mathrm{exact}\to\gamma=1}(n,\ell)
+      =T_{\LSD}(n,\ell)+c_{\mathrm{return}}.
+  \end{array}
+  \]
+  `largerDimensionTransfer' has type a record containing at least the padding
+  instance, the row equation, `padInner', `padNorm', `padCosine',
+  `unpadOutput', `largerDimensionCorrect',
+  `largerDimensionRuntimeDef', and `largerDimensionRuntimeBound'. Its type is
+  rejected if it is `True', `Unit', or a theorem with no `padInst' projection.
+  `bichromaticTransfer' has type a cosine split-tree record whose correctness
+  fields explicitly mention
+  $m_{\mathrm{cross}}(U)$, $m_L(U)$, $m_R(U)$, the concrete cross instance
+  $(U_L,U_R)$, the returned cross candidate, and the reconstructed candidate.
+  It is rejected if it is only the implication
+  $\TSQAlg{\text{bichromatic }\gamma\text{-}\LSD}\to
+  \TSQAlg{\gamma\text{-}\LSD}$.
+
+  The threshold transfer record binds the hard threshold in the algorithm type.
+  It must define
+  \[
+    \operatorname{thresholdFamilyAt}(n,\ell,t)
+      := \operatorname{LSDThresholdFamily}(n,\ell,t)
+  \]
+  and its `existsHardThreshold' projection has exactly the type
+  \[
+    \exists t:\R,\ 0\le t\le1\ \wedge\
+      \NoTSQAlg{\operatorname{thresholdFamilyAt}(n,\ell,t)}.
+  \]
+  The same bound variable $t$ must occur in the family argument. A field of type
+  $\exists t,\ 0\le t\le1\wedge
+  \NoTSQAlg{\operatorname{def\_lsd\_dec.family}}$, or any conclusion whose
+  family expression is independent of $t$, is a statement about an
+  uninstantiated family and fails this corollary. The threshold search
+  algorithm must also be exposed by projections
+  `thresholdSearchRun',
+  `thresholdSearchCorrectness', and `thresholdSearchRuntimeDef', with
+  `thresholdSearchRun' querying the decision oracle only at values from
+  $\mathcal T_\ell$ and returning an index pair attaining the least feasible
+  threshold.
 \end{theorem}
 \begin{proof}
   \uses{thm:gamma-lsd-hardness, def:lsd, def:lsd-dec, def:no-tsq-alg, def:log-parameter-regimes}
@@ -2696,18 +4693,18 @@
   the problem harder, giving the bound for all $\ell \ge \logDim(c,n)$.)
 \end{proof}
 
-\begin{theorem}[Hardness of $\gamma$-MSD, Theorem 3.3 / B.1]
+\begin{theorem}[Hardness of polylog-approximate $\gamma$-MSD, Theorem 1.2 from Theorem 3.3 / B.1]
   \label{thm:gamma-msd-hardness}
   \uses{def:gamma-msd, assumption:seth, conjecture:ovc, def:no-tsq-alg, def:log-parameter-regimes}
-  Assuming SETH or OVC, for every $\eps>0$ there exists a constant $c>0$ such
-  that $\NoTSQAlg{\gamma\text{-}\MSD_{n,\msdHardDim(c,n)}}$ whenever
-  $\msdHardGammaAllowed(n,\gamma)$, i.e.
+  Assuming SETH or OVC, for every $\eps>0$ and every fixed
+  $C_\gamma>0$ there exists a constant $c>0$ such that
+  $\NoTSQAlg{\gamma\text{-}\MSD_{n,\msdHardDim(c,n)}}$ whenever
+  $\msdHardGammaAllowed(C_\gamma,n,\gamma)$, i.e.
   \[
     \ell = \msdHardDim(c,n)
-      = (\log n)^{\frac{c\log n}{(\log\log n)^{2}}}
+      = \left\lceil n^{\frac{c}{\log\log n}}\right\rceil
     \quad\text{and}\quad
-    \gamma \le \left(1 + \frac{1}{\log\log n}\right)^{\frac{\log n}{(\log\log n)^{2}}}
-    = 2^{(\log n)^{1-o(1)}}.
+    1\le\gamma\le(\log n)^{C_\gamma}.
   \]
 \end{theorem}
 \begin{proof}
@@ -2717,7 +4714,7 @@
   Lemma~\ref{lem:additive-msd-maxip-equiv} and
   Theorem~\ref{thm:additive-bmaxip-to-ov}. A truly subquadratic algorithm for
   $\gamma\text{-}\MSD_{n,\msdHardDim(c,n)}$ with
-  $\msdHardGammaAllowed(n,\gamma)$ would, by
+  $\msdHardGammaAllowed(C_\gamma,n,\gamma)$ would, by
   Lemma~\ref{lem:msd-tensor-reduction}, give a truly subquadratic algorithm for
   $\mildMsdGamma(n)\text{-}\MSD_{n,\polylogDim(k,n)}$ for any constant $k>0$; by
   Lemma~\ref{lem:msd-to-additive-msd} (which itself combines
@@ -2739,9 +4736,9 @@
   Assuming SETH or OVC, for every $\eps>0$ there exists a constant $c>0$ such
   that $\NoTSQAlg{\MSD_{n,\ell}}$ when
   $\ell \ge \msdHardDim(c,n)$. Moreover the same lower bound holds for
-  bichromatic $\gamma\text{-}\MSD_{n,\ell}$ whenever
-  $\msdHardGammaAllowed(n,\gamma)$ and for $\MSD_{n,\ell,t}$ for some
-  $t \in [0,1]$.
+  bichromatic $\gamma\text{-}\MSD_{n,\ell}$ whenever, for some fixed
+  $C_\gamma>0$, $\msdHardGammaAllowed(C_\gamma,n,\gamma)$ holds, and for
+  $\MSD_{n,\ell,t}$ for some $t \in [0,1]$.
 \end{theorem}
 \begin{proof}
   \uses{thm:gamma-msd-hardness, def:msd, def:msd-dec, def:no-tsq-alg, def:log-parameter-regimes}
@@ -2816,10 +4813,154 @@
   \uses{def:gamma-msd, def:kron, lem:kron-power-cosine, def:tsq-alg-exists, def:log-parameter-regimes}
   Suppose $\TSQAlg{\gamma\text{-}\MSD_{n,\ell}}$ holds with
   $\ell = \msdHardDim(c,n)$ for any constant $c>0$ and
-  $\msdHardGammaAllowed(n,\gamma)$, running in $\bigO(n^{2-\eps})$ time for any
-  $\eps>0$. Then
+  $\msdHardGammaAllowed(C_\gamma,n,\gamma)$ for some fixed $C_\gamma>0$,
+  running in $\bigO(n^{2-\eps})$ time for any $\eps>0$. Then
   $\TSQAlg{\mildMsdGamma(n)\text{-}\MSD_{n,\polylogDim(k,n)}}$ holds with the
   same truly subquadratic exponent for any constant $k>0$.
+
+  The declaration audited at this label must expose the concrete reduction
+  package $\operatorname{MSDTensorAmplificationWitness}$. The package contains
+  the following data, equations and correctness fields; it is not a proposition
+  comparing two copies of `def_gamma_msd.family'.
+  First it defines the tensor exponent
+  \[
+    q(n)=\left\lceil\frac{\log n}{(\log\log n)^2}\right\rceil
+  \]
+  and, for an input instance
+  $V=(v_1,\ldots,v_n)$ of
+  $\mildMsdGamma(n)$-$\MSD_{n,\polylogDim(k,n)}$, the concrete target instance
+  \[
+    \operatorname{tensorInst}(V)
+      = (v_1^{\otimes q(n)},\ldots,v_n^{\otimes q(n)}).
+  \]
+  Its row equation is a required projection:
+  \[
+    \operatorname{tensorInst\_row}(V,i):
+      \operatorname{tensorInst}(V)_i=v_i^{\otimes q(n)}.
+  \]
+  The target dimension is also a projection, not a comment:
+  \[
+    \operatorname{tensorDim}(k,n)=\polylogDim(k,n)^{q(n)}
+  \]
+  together with the asymptotic hard-dimension comparison
+  \[
+    \operatorname{tensorDimBound}:
+      \operatorname{tensorDim}(k,n)
+      \le \msdHardDim(c',n)
+  \]
+  for a constant $c'$ depending only on $k$ and the fixed ceiling convention.
+  The witness must include the Kronecker-power cosine equation
+  \[
+    \operatorname{tensorCosine}(V,i,j):
+      \cossim{\operatorname{tensorInst}(V)_i}
+             {\operatorname{tensorInst}(V)_j}
+      =
+      \bigl(\cossim{v_i}{v_j}\bigr)^{q(n)}
+  \]
+  by Lemma~\ref{lem:kron-power-cosine}.
+
+  The approximation-transfer field is the real content of the lemma. If a
+  target oracle returns a pair $o=(i,j)$ satisfying
+  \[
+    \Gamma(n)^{-1}M_{\operatorname{tensorInst}(V)}
+      \le
+      \cossim{\operatorname{tensorInst}(V)_i}
+             {\operatorname{tensorInst}(V)_j}
+      \le
+      M_{\operatorname{tensorInst}(V)}
+  \]
+  with $\Gamma(n)\le(\log n)^{C_\gamma}$, then the same pair is returned for
+  $V$ and the witness proves
+  \[
+    \mildMsdGamma(n)^{-1}M_V
+      \le \cossim{v_i}{v_j}\le M_V.
+  \]
+  This proof must use
+  $\operatorname{tensorCosine}$, monotonicity of powers on $[0,1]$, and the
+  root bound
+  \[
+    \operatorname{gammaRootBound}:
+      \Gamma(n)^{1/q(n)}
+      \le 1+\frac{1}{\log\log n}
+      =\mildMsdGamma(n)
+  \]
+  for all sufficiently large $n$. A field named `tensorMapStatement' whose
+  content is an identity on `Fin 1', or a transfer implication between
+  identical $\operatorname{def\_gamma\_msd.family}$ algorithm types, is
+  rejected.
+
+  The runtime transfer is also part of the node. The package defines
+  \[
+    \operatorname{tensorReductionRuntime}(T_{\gamma\MSD},n,k,\gamma)
+      =
+      c_{\mathrm{build}}\,n\,\operatorname{tensorDim}(k,n)
+      +
+      c_{\mathrm{call}}T_{\gamma\MSD}
+        (n,\operatorname{tensorDim}(k,n),\gamma)
+      +c_{\mathrm{return}},
+  \]
+  proves a bound by the displayed expression, and proves an
+  exponent-preservation theorem: if the target runtime is
+  $O(n^{2-\eps})$ on the hard dimension with fixed polylogarithmic
+  approximation regime, then
+  $\operatorname{tensorReductionRuntime}$ is
+  $O(n^{2-\eps'})$ for some $\eps'>0$ after absorbing the
+  $n\,\operatorname{tensorDim}(k,n)$ construction cost into the
+  subquadratic slack for the chosen hard-dimension constant. The accepted
+  witness therefore has projections named, or transparently equivalent to,
+  `q', `tensorInst', `tensorInst_row', `tensorDim',
+  `tensorDimBound', `tensorCosine', `gammaRootBound',
+  `approximationTransfer', `tensorReductionRuntime',
+  `tensorReductionRuntimeDef', and `tensorRuntimeTsq'. None of these may be
+  replaced by `True', a `Fin 1' identity, or an implication between identical
+  algorithm-existence propositions.
+
+  Trial-8 alignment requirement: the field `q' is the tensor exponent
+  \[
+    q(n)=\left\lceil\frac{\log n}{(\log\log n)^2}\right\rceil
+  \]
+  and the witness must contain the projection
+  \[
+    \operatorname{q\_eq}(n):
+    q(n)=\left\lceil\frac{\log n}{(\log\log n)^2}\right\rceil .
+  \]
+  A generated definition `q n = n+1', or any exponent not asymptotic to the
+  displayed ratio, is not this lemma. The target dimension field is
+  \[
+    \operatorname{tensorDim}(k,n)
+      =\polylogDim(k,n)^{q(n)},
+  \]
+  with projection `tensorDim_eq'; it is not $n+1$ and it is not the original
+  source dimension. The target oracle call in `tensorReductionRuntimeDef' must
+  be
+  \[
+    T_{\gamma\MSD}(n,\operatorname{tensorDim}(k,n),\gamma),
+  \]
+  not $T_{\gamma\MSD}(n,n+1,\gamma)$ and not an unindexed call to
+  `def_gamma_msd.family'.
+
+  The root-bound field has the indexed form
+  \[
+  \begin{array}{l}
+    \operatorname{gammaRootBound}:\\
+    \qquad
+    \forall C_\gamma>0,\ \exists n_0,\ \forall n\ge n_0,\ \forall\gamma,\ 
+    \msdHardGammaAllowed(C_\gamma,n,\gamma)\to
+    \gamma^{1/q(n)}
+      \le 1+\frac{1}{\log\log n}.
+  \end{array}
+  \]
+  It is not the statement $\gamma\le\logn(n)^{-1}$, nor any formula involving
+  $\mildMsdGamma(n)=\logn(n)^{-1}$. The field `tensorRuntimeTsq' is an
+  exponent-preservation theorem about the named
+  $\operatorname{tensorReductionRuntime}$:
+  from a target runtime bound on the hard-dimension family it constructs a
+  source runtime bound for
+  $\mildMsdGamma(n)$-$\MSD_{n,\polylogDim(k,n)}$ with some $\eps'>0$. It is
+  rejected if its type is an implication between identical
+  $\operatorname{def\_tsq\_alg\_exists}$ propositions, or if neither
+  $\operatorname{tensorDim}(k,n)$ nor
+  $\operatorname{tensorReductionRuntime}$ occurs in the statement.
 \end{lemma}
 \begin{proof}
   \uses{lem:kron-power-cosine, def:gamma-msd, def:kron, def:cosine, def:log-parameter-regimes}
@@ -2827,19 +4968,34 @@
   $\mildMsdGamma(n)\text{-}\MSD_{n,\polylogDim(k,n)}$. Construct
   $V' = \{v_1^{\otimes q}, \ldots, v_n^{\otimes q}\}$ for
   $q = \frac{\log n}{(\log\log n)^{2}}$. The vectors of $V'$ have dimension
-  $(\log n)^{kq} = (\log n)^{\frac{k\log n}{(\log\log n)^{2}}}$, so the assumed
-  algorithm applies and finds a $\gamma$-approximation of MSD on $V'$ for some
-  $\gamma \le (1 + \tfrac{1}{\log\log n})^{q}$. By
+  \[
+    (\log n)^{kq}
+      =(\log n)^{\frac{k\log n}{(\log\log n)^2}}
+      =n^{\frac{k}{\log\log n}},
+  \]
+  so, up to the fixed ceiling convention and a harmless renaming of the constant
+  $c$, this is exactly the hard dimension
+  $\msdHardDim(k,n)=\lceil n^{k/\log\log n}\rceil$. Run the assumed hard-regime
+  algorithm on $V'$ with any fixed polylogarithmic approximation factor
+  $\Gamma(n)=(\log n)^{C_\gamma}$ satisfying
+  $\msdHardGammaAllowed(C_\gamma,n,\Gamma(n))$. By
   Lemma~\ref{lem:kron-power-cosine},
   \[
     \frac{\inner{v_i^{\otimes q}}{v_j^{\otimes q}}}
          {\norm{v_i^{\otimes q}}\cdot\norm{v_j^{\otimes q}}}
     = \left(\cossim{v_i}{v_j}\right)^{q}
   \]
-  for all $i,j$. Therefore a $\gamma$-approximation of MSD on $V'$ is a
-  $\gamma^{1/q} = \mildMsdGamma(n)$-approximation of MSD on
-  $v_1, \ldots, v_n$. The running time is preserved up to the $\bigO(n^{2-\eps})$
-  bound.
+  for all $i,j$. Therefore a $\Gamma(n)$-approximation of MSD on $V'$ is a
+  $\Gamma(n)^{1/q}$-approximation of MSD on $v_1,\ldots,v_n$. Since
+  \[
+    \Gamma(n)^{1/q}
+      =(\log n)^{C_\gamma(\log\log n)^2/\log n}
+      \le 1+\frac{1}{\log\log n}
+      =\mildMsdGamma(n)
+  \]
+  for all sufficiently large $n$, the returned pair is also a valid
+  $\mildMsdGamma(n)$-approximation. The running time is preserved up to the
+  $\bigO(n^{2-\eps})$ bound.
 \end{proof}
 
 \begin{assumption}[Karthik--Manurangsi reduction, Theorem B.4]
@@ -2855,6 +5011,91 @@
   A disposable Lean implementation should treat this node as an axiom/imported
   external theorem unless it formalizes the full graph construction and its
   approximation-gap analysis.
+
+  The imported theorem is still an indexed, parameter-sensitive statement. The
+  declaration audited at this label must be an axiom or theorem package
+  $\operatorname{KarthikManurangsiB4}$ with projections
+  \[
+  \begin{array}{ll}
+    \operatorname{sourceFamily}(k):&
+      \mildMsdGamma(n)\text{-}\MSD_{n,\polylogDim(k,n)},\\
+    \operatorname{targetFamily}(c):&
+      \text{bichromatic }\logn(n)\text{-Additive-Max-IP}_{n,\logDim(c,n)},\\
+    \operatorname{sourceApproxEq}:&
+      \mildMsdGamma(n)=1+\frac{1}{\log\log n},\\
+    \operatorname{sourceDimEq}:&
+      \polylogDim(k,n)=\lceil(\log n)^k\rceil,\\
+    \operatorname{targetGapEq}:&
+      \text{additive gap}=\logn(n),\\
+    \operatorname{targetDimEq}:&
+      \text{target dimension}=\logDim(c,n),\\
+    \operatorname{exponentTransfer}:&
+      \forall \eps>0,\ \exists \eps'>0,\ 
+      \TSQAlg{\operatorname{sourceFamily}(k)}
+      \Rightarrow
+      \TSQAlg{\operatorname{targetFamily}(c)}
+      \text{ with exponent }\eps'.
+  \end{array}
+  \]
+  The target family must be the bichromatic additive Max-IP promise family of
+  Definition~\ref{def:additive-maxip}, with two color classes, threshold
+  $\alpha$, yes predicate $\exists i,j,\inner{a_i}{b_j}\ge\alpha$, no predicate
+  $\forall i,j,\inner{a_i}{b_j}<\alpha-\logn(n)$, and dimension
+  $\logDim(c,n)$. A theorem whose type is only an unparameterized implication
+  \[
+    \operatorname{def\_tsq\_alg\_exists}(P)\to
+    \operatorname{def\_tsq\_alg\_exists}(Q)
+  \]
+  for generic family values $P,Q$ is not this imported result. The
+  approximation factor, the source dimension $\polylogDim(k,n)$, the
+  bichromatic target, the additive gap $\logn(n)$, the logarithmic target
+  dimension, and the positive target exponent must all occur in the audited
+  statement.
+
+  Trial-8 alignment requirement: this imported theorem package must not use the
+  uninstantiated family values `def_gamma_msd.family' and
+  `def_additive_maxip.family' as its source and target. It has indexed family
+  constructors
+  \[
+  \begin{array}{ll}
+    \operatorname{sourceFamily}(k,n):&
+      \gamma\text{-}\MSD\text{ instantiated at }
+      (n,\polylogDim(k,n),\mildMsdGamma(n)),\\
+    \operatorname{targetFamily}(c,n):&
+      \text{bichromatic additive Max-IP instantiated at }
+      (n,\logDim(c,n),\logn(n)).
+  \end{array}
+  \]
+  The projection equations are part of the axiom package:
+  \[
+  \begin{array}{ll}
+    \operatorname{sourceApproxEq}(n):&
+      \mildMsdGamma(n)=1+\frac{1}{\log\log n},\\
+    \operatorname{sourceDimEq}(k,n):&
+      \polylogDim(k,n)=\lceil(\log n)^k\rceil,\\
+    \operatorname{targetGapEq}(n):&
+      \operatorname{targetGap}(n)=\logn(n),\\
+    \operatorname{targetDimEq}(c,n):&
+      \operatorname{targetDim}(c,n)=\logDim(c,n).
+  \end{array}
+  \]
+  The statement
+  $\operatorname{sourceApproxEq}:\mildMsdGamma(n)=\logn(n)^{-1}$ is explicitly
+  wrong for this paper and fails the node. The algorithm-transfer field is
+  parameterized by $k,c,\eps$ and produces an $\eps'>0$ for the indexed target
+  family:
+  \[
+    \forall k,c,\eps>0,\ \exists\eps'>0,\quad
+    \TSQAlg{\operatorname{sourceFamily}(k,n)}
+    \Rightarrow
+    \TSQAlg{\operatorname{targetFamily}(c,n)}.
+  \]
+  Both occurrences of $\TSQAlg$ must mention these indexed constructors, and
+  the target family must unfold to the promise problem with yes predicate
+  $\exists i,j,\inner{a_i}{b_j}\ge\alpha$ and no predicate
+  $\forall i,j,\inner{a_i}{b_j}<\alpha-\logn(n)$. A generic transfer between
+  arbitrary problem-family variables, or a transfer between the two bare
+  `.family' fields, erases Theorem B.4's mathematical content.
 \end{assumption}
 
 \begin{lemma}[Additive-MSD is equivalent to Additive-Max-IP, Lemma B.5]

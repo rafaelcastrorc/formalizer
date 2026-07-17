@@ -52,6 +52,7 @@ PUBLISHED_LEAN_NAME = "formalization.lean"
 LEAN_GENERATION_RETRIES = 5
 AUTO_CHUNK_SIZE = 0
 DEFAULT_AUTO_CHUNK_LIMIT = 8
+MEDIUM_NODES_PER_CHUNK = 3
 CURRENT_LOG_PATH: Path | None = None
 MAX_LIBRARY_CANDIDATES = 40
 MIN_LIBRARY_CANDIDATES_BEFORE_MODEL_TERMS = 8
@@ -114,6 +115,7 @@ class LeanAttempt:
     stderr: str = ""
     reason: str = ""
     kind: str = "lean"
+    rejected_labels: set[str] | None = None
 
     @property
     def output(self) -> str:
@@ -150,16 +152,33 @@ class AcceptedChunk:
     signatures: str
 
 
+@dataclass
+class PrunedChunk:
+    labels: list[str]
+    lean_code: str
+    imports: list[str]
+    body: str
+    signatures: str
+
+
 class TeeStream:
     """Mirror script output to the terminal and a persistent run log."""
 
-    def __init__(self, terminal, log_file):
+    def __init__(self, terminal, log_file, *, started_at: float):
         self.terminal = terminal
         self.log_file = log_file
+        self.started_at = started_at
+        self.at_line_start = True
 
     def write(self, text: str) -> int:
-        self.terminal.write(text)
-        self.log_file.write(text)
+        for chunk in text.splitlines(keepends=True):
+            if self.at_line_start and chunk:
+                prefix = f"[+{int(time.monotonic() - self.started_at):06d}s] "
+                self.terminal.write(prefix)
+                self.log_file.write(prefix)
+            self.terminal.write(chunk)
+            self.log_file.write(chunk)
+            self.at_line_start = chunk.endswith("\n")
         return len(text)
 
     def flush(self) -> None:
@@ -242,10 +261,53 @@ def _node_order(nodes: dict[str, Node]) -> list[str]:
     ]
 
 
+HARD_NODE_KEYWORDS = (
+    "approximation",
+    "bichromatic",
+    "correctness",
+    "hardness",
+    "lower bound",
+    "ovc",
+    "reconstruction",
+    "reduction",
+    "runtime",
+    "seth",
+    "tensor",
+    "transfer",
+)
+
+
+def _node_difficulty(label: str, node: Node, block: str) -> str:
+    """Classify a blueprint node for scheduling, not for mathematical meaning."""
+    text = f"{label}\n{node.kind}\n{block}".lower()
+    score = 0
+    if node.kind in {"theorem", "corollary"}:
+        score += 5
+    elif node.kind in {"lemma", "proposition"}:
+        score += 2
+    score += min(len(node.uses), 6) // 2
+    if len(block) > 3500:
+        score += 3
+    elif len(block) > 1800:
+        score += 1
+    score += sum(1 for keyword in HARD_NODE_KEYWORDS if keyword in text)
+
+    if score >= 6:
+        return "hard"
+    if score >= 3:
+        return "medium"
+    return "easy"
+
+
 def _next_chunk(nodes: dict[str, Node], accepted: set[str], *, chunk_size: int) -> list[str]:
-    """Pick the next dependency-closed frontier of blueprint nodes to formalize."""
+    """Pick a dependency-closed chunk, batching easy nodes and isolating hard ones."""
     available = set(accepted) | {label for label, node in nodes.items() if node.mathlibok}
     remaining = [label for label in _node_order(nodes) if label not in available]
+    blocks = _node_tex_blocks(nodes)
+    difficulties = {
+        label: _node_difficulty(label, node, blocks.get(label, ""))
+        for label, node in nodes.items()
+    }
     chunk: list[str] = []
     progressed = True
     while progressed and len(chunk) < chunk_size:
@@ -254,16 +316,39 @@ def _next_chunk(nodes: dict[str, Node], accepted: set[str], *, chunk_size: int) 
             if label in chunk:
                 continue
             node = nodes[label]
-            if node.uses <= (available | set(chunk)):
-                chunk.append(label)
-                progressed = True
-                if len(chunk) >= chunk_size:
-                    break
+            if not node.uses <= (available | set(chunk)):
+                continue
+
+            difficulty = difficulties[label]
+            if difficulty == "hard":
+                # If a hard node is the first ready obligation, isolate it.
+                # If easy/medium nodes are already in this chunk, leave the
+                # hard node for the next pass instead of mixing obligations.
+                if not chunk:
+                    chunk.append(label)
+                return chunk
+
+            medium_count = sum(1 for item in chunk if difficulties[item] == "medium")
+            if difficulty == "medium" and medium_count >= MEDIUM_NODES_PER_CHUNK:
+                return chunk
+
+            chunk.append(label)
+            progressed = True
+            if len(chunk) >= chunk_size:
+                break
     return chunk
 
 
 def _chunk_summary(nodes: dict[str, Node], labels: list[str]) -> str:
     return _node_summary({label: nodes[label] for label in labels})
+
+
+def _chunk_difficulty_summary(nodes: dict[str, Node], labels: list[str]) -> str:
+    blocks = _node_tex_blocks({label: nodes[label] for label in labels})
+    return ", ".join(
+        f"{label}={_node_difficulty(label, nodes[label], blocks.get(label, ''))}"
+        for label in labels
+    )
 
 
 def _node_fingerprints(nodes: dict[str, Node]) -> dict[str, str]:
@@ -289,6 +374,11 @@ def _dependency_descendants(nodes: dict[str, Node], changed: set[str]) -> set[st
     return affected
 
 
+def _dependency_descendants_within(nodes: dict[str, Node], changed: set[str], universe: set[str]) -> set[str]:
+    """Return changed labels plus their blueprint descendants inside ``universe``."""
+    return _dependency_descendants(nodes, changed) & universe
+
+
 def _dependency_closure(nodes: dict[str, Node], labels: list[str]) -> set[str]:
     """Return all transitive blueprint dependencies of the supplied labels."""
     seen: set[str] = set()
@@ -304,6 +394,61 @@ def _dependency_closure(nodes: dict[str, Node], labels: list[str]) -> set[str]:
             seen.add(dep)
             stack.append(dep)
     return seen
+
+
+def _nonmathlib_uses_missing_from_decl(
+    label: str,
+    node: Node,
+    decl: LeanDecl,
+    nodes: dict[str, Node],
+    decls: dict[str, LeanDecl],
+) -> list[str]:
+    """Find explicit blueprint dependencies not visible in this Lean declaration.
+
+    ``\\uses`` is the blueprint's public dependency contract. For generated
+    declarations corresponding to blueprint nodes, the Lean statement/body
+    should mention each non-Mathlib dependency's generated declaration name,
+    either directly or through a same-module helper structure/result type used
+    by that declaration. This catches ignored dependencies without rejecting
+    patterns like ``def def_msd : MSDData := ...`` where ``MSDData`` carries the
+    dependency field type.
+    """
+    visible_text = _decl_text_with_local_helpers(decl, decls)
+    missing: list[str] = []
+    for dep in sorted(node.uses):
+        dep_node = nodes.get(dep)
+        if dep_node is None or dep_node.mathlibok:
+            continue
+        dep_name = _lean_name(dep)
+        if not re.search(rf"\b{re.escape(dep_name)}\b", visible_text):
+            missing.append(dep)
+    return missing
+
+
+def _decl_text_with_local_helpers(decl: LeanDecl, decls: dict[str, LeanDecl], *, max_depth: int = 2) -> str:
+    """Return declaration text plus nearby helper declarations it references.
+
+    This is a conservative local approximation of the Lean dependency graph.
+    It is only used for deterministic statement-audit coverage; Lean itself
+    remains the authority for compilation.
+    """
+    seen = {decl.name}
+    parts = [decl.text]
+    frontier = [decl]
+    for _depth in range(max_depth):
+        next_frontier: list[LeanDecl] = []
+        haystack = "\n".join(item.text for item in frontier)
+        for name, candidate in decls.items():
+            if name in seen:
+                continue
+            if re.search(rf"\b{re.escape(name)}\b", haystack):
+                seen.add(name)
+                parts.append(candidate.text)
+                next_frontier.append(candidate)
+        if not next_frontier:
+            break
+        frontier = next_frontier
+    return "\n\n".join(parts)
 
 
 def _accepted_state(chunks: list[AcceptedChunk]) -> tuple[set[str], list[str], list[str]]:
@@ -771,10 +916,15 @@ def _decl_signatures(code: str) -> str:
     return "\n\n".join(signatures)
 
 
-def _deterministic_statement_audit(code: str, nodes: dict[str, Node]) -> list[str]:
+def _deterministic_statement_audit(
+    code: str,
+    nodes: dict[str, Node],
+    all_nodes: dict[str, Node] | None = None,
+) -> list[str]:
     """Catch obvious coverage and weakening failures before using model judgment."""
     issues: list[str] = []
     decls = _lean_declarations(code)
+    all_nodes = all_nodes or nodes
     required = {label: node for label, node in nodes.items() if not node.mathlibok}
 
     missing = [f"{label} -> `{_lean_name(label)}`" for label in sorted(required) if _lean_name(label) not in decls]
@@ -818,6 +968,13 @@ def _deterministic_statement_audit(code: str, nodes: dict[str, Node]) -> list[st
             "class",
         }:
             issues.append(f"{label} is theorem-like but generated `{decl.kind} {decl.name}`")
+        missing_deps = _nonmathlib_uses_missing_from_decl(label, node, decl, all_nodes, decls)
+        if missing_deps:
+            shown = ", ".join(f"{dep} -> `{_lean_name(dep)}`" for dep in missing_deps[:12])
+            more = "" if len(missing_deps) <= 12 else f", ... ({len(missing_deps)} total)"
+            issues.append(
+                f"{label} does not mention required blueprint dependency/dependencies: {shown}{more}"
+            )
     return issues
 
 
@@ -902,6 +1059,57 @@ def _compose_module_file(module_imports: list[str], new_code: str = "") -> tuple
         ]
     )
     return code, new_imports, new_body
+
+
+def _prune_chunk_to_labels(
+    *,
+    module_imports: list[str],
+    original_chunk_code: str,
+    target_labels: list[str],
+    keep_labels: list[str],
+) -> PrunedChunk | None:
+    """Build a module body that exposes only the kept blueprint declarations.
+
+    Helpers are retained because accepted declarations may depend on them, but
+    public declarations for rejected/downstream target nodes are removed. The
+    caller must still compile and audit the pruned module before accepting it.
+    """
+    keep_set = set(keep_labels)
+    target_names = {_lean_name(label): label for label in target_labels}
+    decls = _lean_declarations(original_chunk_code)
+    if any(_lean_name(label) not in decls for label in keep_labels):
+        return None
+
+    lines = original_chunk_code.splitlines()
+    starts: list[tuple[int, re.Match[str]]] = []
+    for idx, line in enumerate(lines):
+        match = LEAN_DECL_START_RE.match(line)
+        if match:
+            starts.append((idx, match))
+    if not starts:
+        return None
+
+    preamble = "\n".join(lines[: starts[0][0]]).strip()
+    kept_parts: list[str] = []
+    if preamble:
+        kept_parts.append(preamble)
+    for pos, (start_idx, match) in enumerate(starts):
+        end_idx = starts[pos + 1][0] if pos + 1 < len(starts) else len(lines)
+        decl_name = match.group(2)
+        target_label = target_names.get(decl_name)
+        if target_label is not None and target_label not in keep_set:
+            continue
+        kept_parts.append("\n".join(lines[start_idx:end_idx]).strip())
+
+    pruned_chunk_code = "\n\n".join(part for part in kept_parts if part).strip() + "\n"
+    lean_code, new_imports, new_body = _compose_module_file(module_imports, pruned_chunk_code)
+    return PrunedChunk(
+        labels=list(keep_labels),
+        lean_code=lean_code,
+        imports=new_imports,
+        body=new_body,
+        signatures=_decl_signatures(lean_code),
+    )
 
 
 def _default_lean_command() -> list[str]:
@@ -1090,17 +1298,21 @@ def _run_statement_alignment_audit(
     nodes: dict[str, Node],
     lean_path: Path,
     paper_text: str,
+    *,
+    all_nodes: dict[str, Node] | None = None,
 ) -> LeanAttempt | None:
     """Return None when the compiled Lean is aligned enough to publish."""
     code = lean_path.read_text(encoding="utf-8")
-    deterministic_issues = _deterministic_statement_audit(code, nodes)
+    deterministic_issues = _deterministic_statement_audit(code, nodes, all_nodes)
     if deterministic_issues:
+        rejected = set(nodes)
         return LeanAttempt(
             ok=False,
             command=[],
             reason="Statement alignment audit failed deterministic checks:\n- "
             + "\n- ".join(deterministic_issues),
             kind=_deterministic_audit_kind(deterministic_issues),
+            rejected_labels=rejected,
         )
 
     decls = _lean_declarations(code)
@@ -1130,6 +1342,7 @@ def _run_statement_alignment_audit(
         return None
 
     formatted: list[str] = []
+    rejected_labels: set[str] = set()
     for issue in issues if isinstance(issues, list) else []:
         if not isinstance(issue, dict):
             continue
@@ -1137,8 +1350,12 @@ def _run_statement_alignment_audit(
         reason = str(issue.get("reason") or "no reason provided")
         severity = str(issue.get("severity") or "reject")
         formatted.append(f"{node} [{severity}]: {reason}")
+        if severity.lower() == "reject" and node in nodes:
+            rejected_labels.add(node)
     if not formatted:
         formatted.append(str(payload)[:4000])
+    if not rejected_labels:
+        rejected_labels = set(nodes)
 
     classification = str(payload.get("classification") or "lean_translation_issue")
     kind = _alignment_failure_kind(classification, formatted)
@@ -1147,6 +1364,7 @@ def _run_statement_alignment_audit(
         command=[],
         reason="Statement alignment audit rejected the compiled Lean:\n- " + "\n- ".join(formatted),
         kind=kind,
+        rejected_labels=rejected_labels,
     )
 
 
@@ -1382,6 +1600,11 @@ Hard constraints:
 - The blueprint below is the only mathematical source of truth.
 - Generate Lean declarations for every target node in the current chunk.
 - Do not redefine accepted declarations from earlier chunks.
+- If a target node has `\\uses{{label}}`, the generated public declaration for
+  that target node must visibly use the generated Lean declaration for `label`
+  (for example `lem_inner_scaled`), either directly or through a same-module
+  helper/result structure. Do not duplicate a dependency inline or silently
+  ignore it.
 - If one blueprint node explicitly introduces several named definitions,
   predicates, fields, or regimes, define those names separately. Do not hide
   them inside one bundled theorem/tuple/structure unless the blueprint itself
@@ -1580,6 +1803,104 @@ def _rebuild_site_for(name: str) -> Path:
     return REPO_ROOT / "site" / name / "lean" / "index.html"
 
 
+def _load_existing_accepted_chunks(
+    *,
+    name: str,
+    validation_nodes: dict[str, Node],
+    lean_command: list[str],
+    audit_runner,
+    paper_text: str,
+) -> tuple[list[AcceptedChunk], int]:
+    """Resume from generated chunk modules that still pass Lean and audit.
+
+    Continuing is intentionally not a blind trust operation: each existing
+    module is checked against the current blueprint before it is accepted as
+    context. The first stale/failing module and every later generated module are
+    removed, because later modules may import or rely on the failing one.
+    """
+    generated_dir = _generated_module_dir(name)
+    chunk_paths = sorted(generated_dir.glob("Chunk*.lean"))
+    accepted: list[AcceptedChunk] = []
+    next_number = 1
+    if not chunk_paths:
+        return accepted, next_number
+
+    print("==> Continuing from existing generated Lean chunks", flush=True)
+    for index, path in enumerate(chunk_paths):
+        match = re.fullmatch(r"Chunk(\d+)\.lean", path.name)
+        if not match:
+            continue
+        chunk_number = int(match.group(1))
+        module_name, _module_path = _chunk_module(name, chunk_number)
+        code = path.read_text(encoding="utf-8")
+        decls = _lean_declarations(code)
+        labels = [
+            label
+            for label in _node_order(validation_nodes)
+            if not validation_nodes[label].mathlibok and _lean_name(label) in decls
+        ]
+        if not labels:
+            print(f"  {path.relative_to(REPO_ROOT)} has no current blueprint declarations; discarding", flush=True)
+            failed_index = index
+            next_number = chunk_number
+            break
+
+        print(
+            f"  checking {path.relative_to(REPO_ROOT)} "
+            f"({', '.join(labels)})",
+            flush=True,
+        )
+        lean_attempt = _run_lean(path, lean_command)
+        audit_failure = None
+        if lean_attempt.ok:
+            audit_failure = _run_statement_alignment_audit(
+                audit_runner,
+                name,
+                {label: validation_nodes[label] for label in labels},
+                path,
+                paper_text,
+                all_nodes=validation_nodes,
+            )
+        object_attempt = _compile_module_olean(path, lean_command) if lean_attempt.ok and audit_failure is None else None
+        if not lean_attempt.ok or audit_failure is not None or object_attempt is None or not object_attempt.ok:
+            print(f"  {path.relative_to(REPO_ROOT)} is stale or no longer passes; discarding from here", flush=True)
+            failed_index = index
+            next_number = chunk_number
+            break
+
+        imports, body = _split_lean_imports_and_body(code)
+        imports = [item for item in imports if not item.startswith("import AutoBlueprint.Generated.")]
+        current_fingerprints = _node_fingerprints(validation_nodes)
+        accepted.append(
+            AcceptedChunk(
+                labels=labels,
+                imports=imports,
+                body=body,
+                fingerprints={label: current_fingerprints[label] for label in labels},
+                module=module_name,
+                path=path,
+                signatures=_decl_signatures(code),
+            )
+        )
+        next_number = chunk_number + 1
+    else:
+        failed_index = len(chunk_paths)
+
+    for stale in chunk_paths[failed_index:]:
+        for artifact in (stale, stale.with_suffix(".olean")):
+            try:
+                artifact.unlink()
+            except FileNotFoundError:
+                pass
+    if accepted:
+        accepted_labels, _imports, _signatures = _accepted_state(accepted)
+        partial = _standalone_accepted_code(accepted)
+        partial_path = SCRATCH_DIR / name / "partial_formalization.lean"
+        partial_path.write_text(partial.rstrip() + "\n", encoding="utf-8")
+        print(f"  resumed with {len(accepted_labels)} accepted blueprint node(s)", flush=True)
+    return accepted, next_number
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("name", help="Existing blueprint name under blueprints/<name>/")
@@ -1596,6 +1917,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--paper", help="Optional original paper path/URL/text for refinement context")
     parser.add_argument("--lean-command", help="Override checker command, e.g. 'lake env lean'")
+    parser.add_argument(
+        "--continue",
+        dest="continue_run",
+        action="store_true",
+        help=(
+            "Reuse existing generated ChunkNN.lean modules that still pass Lean "
+            "and statement alignment for the current blueprint, then continue "
+            "from the next unresolved dependency chunk."
+        ),
+    )
     parser.add_argument(
         "--reasoning-effort",
         choices=("low", "medium", "high", "xhigh"),
@@ -1658,6 +1989,7 @@ def main(argv: list[str] | None = None) -> int:
         f"- chunking: `automatic dependency traversal`",
         f"- internal chunk limit: `{chunk_size}`",
         f"- internal Lean-generation retries: `{LEAN_GENERATION_RETRIES}`",
+        f"- continue from generated chunks: `{args.continue_run}`",
         f"- Lean command: `{' '.join(lean_command)}`",
     ]
     if CURRENT_LOG_PATH is not None:
@@ -1669,13 +2001,30 @@ def main(argv: list[str] | None = None) -> int:
         print(f"==> removed {removed_stale} stale Lean attempt artifact(s)", flush=True)
 
     generated_dir = _generated_module_dir(args.name)
-    if generated_dir.exists():
+    if generated_dir.exists() and not args.continue_run:
         shutil.rmtree(generated_dir)
 
     accepted_chunks: list[AcceptedChunk] = []
+    if args.continue_run:
+        resume_validation = validate_blueprint(REPO_ROOT, args.name)
+        if not resume_validation.ok:
+            print_result(resume_validation)
+            report_lines.append("## Resume validation failed")
+            report_lines.extend(f"- {error}" for error in resume_validation.errors)
+            report = _write_report(args.name, report_lines)
+            print(f"Report written to {report.relative_to(REPO_ROOT)}")
+            return 1
+        accepted_chunks, chunk_number = _load_existing_accepted_chunks(
+            name=args.name,
+            validation_nodes=resume_validation.nodes,
+            lean_command=lean_command,
+            audit_runner=gen_runner,
+            paper_text=paper_text,
+        )
+    else:
+        chunk_number = 1
     accepted_labels, accepted_imports, accepted_signatures = _accepted_state(accepted_chunks)
     repair_trials = 0
-    chunk_number = 1
 
     while True:
         print(
@@ -1731,6 +2080,8 @@ def main(argv: list[str] | None = None) -> int:
             + f"{len(validation.nodes) - len(accepted_labels)} remaining including this chunk)",
             flush=True,
         )
+        difficulty_summary = _chunk_difficulty_summary(validation.nodes, target_labels)
+        print(f"  scheduler difficulty: {difficulty_summary}", flush=True)
         library_context, library_candidates = _search_local_lean_libraries(
             args.name,
             validation.nodes,
@@ -1740,6 +2091,7 @@ def main(argv: list[str] | None = None) -> int:
         report_lines.append(f"- local library candidates: `{len(library_candidates)}`")
         report_lines.append(f"## Chunk {chunk_number}")
         report_lines.append(f"- target nodes: `{', '.join(target_labels)}`")
+        report_lines.append(f"- scheduler difficulty: `{difficulty_summary}`")
         critic_output = ""
         last_attempt_kind = "lean-generation"
         for lean_try in range(1, LEAN_GENERATION_RETRIES + 1):
@@ -1813,6 +2165,7 @@ def main(argv: list[str] | None = None) -> int:
                     {label: validation.nodes[label] for label in target_labels},
                     lean_path,
                     paper_text,
+                    all_nodes=validation.nodes,
                 )
                 if audit_failure is not None:
                     attempt = audit_failure
@@ -1830,6 +2183,90 @@ def main(argv: list[str] | None = None) -> int:
                     report_lines.append(critic_output[-4000:])
                     report_lines.append("```")
                     report_lines.append("")
+                    if attempt.kind == "blueprint" and attempt.rejected_labels:
+                        rejected_in_chunk = set(attempt.rejected_labels) & set(target_labels)
+                        affected_in_chunk = _dependency_descendants_within(
+                            validation.nodes,
+                            rejected_in_chunk,
+                            set(target_labels),
+                        )
+                        keep_labels = [label for label in target_labels if label not in affected_in_chunk]
+                        if keep_labels:
+                            pruned = _prune_chunk_to_labels(
+                                module_imports=accepted_imports,
+                                original_chunk_code=chunk_code,
+                                target_labels=target_labels,
+                                keep_labels=keep_labels,
+                            )
+                            if pruned is not None:
+                                lean_path.write_text(pruned.lean_code, encoding="utf-8")
+                                pruned_attempt_path = (
+                                    trial_dir / f"chunk_{chunk_number:02d}_accepted_subset.lean"
+                                )
+                                pruned_attempt_path.write_text(pruned.lean_code, encoding="utf-8")
+                                print(
+                                    "  trying to keep independent passing subset: "
+                                    + ", ".join(keep_labels),
+                                    flush=True,
+                                )
+                                subset_lean = _run_lean(lean_path, lean_command)
+                                subset_audit = None
+                                if subset_lean.ok:
+                                    subset_audit = _run_statement_alignment_audit(
+                                        gen_runner,
+                                        args.name,
+                                        {label: validation.nodes[label] for label in keep_labels},
+                                        lean_path,
+                                        paper_text,
+                                        all_nodes=validation.nodes,
+                                    )
+                                if subset_lean.ok and subset_audit is None:
+                                    object_attempt = _compile_module_olean(module_path, lean_command)
+                                    if object_attempt.ok:
+                                        accepted_chunks.append(
+                                            AcceptedChunk(
+                                                labels=list(keep_labels),
+                                                imports=list(pruned.imports),
+                                                body=pruned.body,
+                                                fingerprints={
+                                                    label: current_fingerprints[label]
+                                                    for label in keep_labels
+                                                },
+                                                module=module_name,
+                                                path=module_path,
+                                                signatures=pruned.signatures,
+                                            )
+                                        )
+                                        accepted_labels, accepted_imports, accepted_signatures = (
+                                            _accepted_state(accepted_chunks)
+                                        )
+                                        partial = _standalone_accepted_code(accepted_chunks)
+                                        partial_path = trial_dir / "partial_formalization.lean"
+                                        partial_path.write_text(partial.rstrip() + "\n", encoding="utf-8")
+                                        print(
+                                            "  kept independent subset; rejected/downstream nodes "
+                                            "will be repaired/regenerated",
+                                            flush=True,
+                                        )
+                                        report_lines.append(
+                                            "  - kept independent passing subset: "
+                                            f"`{', '.join(keep_labels)}`"
+                                        )
+                                        report_lines.append(
+                                            f"  - pruned subset Lean: `{pruned_attempt_path.relative_to(REPO_ROOT)}`"
+                                        )
+                                    else:
+                                        print(
+                                            "  independent subset did not compile as an importable module; "
+                                            "discarding it",
+                                            flush=True,
+                                        )
+                                else:
+                                    print(
+                                        "  independent subset did not pass Lean/audit after pruning; "
+                                        "discarding it",
+                                        flush=True,
+                                    )
                     if attempt.kind != "lean-generation":
                         break
                     continue
@@ -2021,8 +2458,9 @@ def logged_main(argv: list[str] | None = None) -> int:
         log_file.write(f"# Auto-Blueprint Lean refinement log\n")
         log_file.write(f"# cwd: {REPO_ROOT}\n")
         log_file.write(f"# command: {' '.join([sys.argv[0], *(argv or sys.argv[1:])])}\n\n")
-        with contextlib.redirect_stdout(TeeStream(sys.stdout, log_file)), contextlib.redirect_stderr(
-            TeeStream(sys.stderr, log_file)
+        started_at = time.monotonic()
+        with contextlib.redirect_stdout(TeeStream(sys.stdout, log_file, started_at=started_at)), contextlib.redirect_stderr(
+            TeeStream(sys.stderr, log_file, started_at=started_at)
         ):
             print(f"Log file: {log_path.relative_to(REPO_ROOT)}", flush=True)
             try:

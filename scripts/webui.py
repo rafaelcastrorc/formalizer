@@ -544,6 +544,8 @@ def build_command(action: str, p: dict) -> list[str]:
         lean_command = (p.get("lean_command") or "").strip()
         if lean_command:
             cmd += ["--lean-command", lean_command]
+        if p.get("continue_run"):
+            cmd.append("--continue")
         return cmd
 
     if action == "validate":
@@ -776,6 +778,18 @@ PAGE = r"""<!doctype html>
   .status { font-size: 13px; margin-left: auto; }
   .status.running { color: var(--accent); } .status.done { color: var(--ok); }
   .status.failed, .status.stopped { color: var(--bad); }
+  .stages { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px;
+            overflow-y: auto; background: var(--bg); max-height: 168px; }
+  .stage { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px;
+           align-items: center; min-height: 34px; padding: 5px 10px; border-bottom: 1px solid var(--border);
+           font-size: 12.5px; }
+  .stage:last-child { border-bottom: none; }
+  .stage .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stage .time { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .stage .pill { border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px;
+                 color: var(--muted); font-size: 11.5px; }
+  .stage.running .pill { color: var(--accent); border-color: var(--accent); }
+  .stage.done .pill { color: var(--ok); border-color: var(--ok); }
   #log { background: var(--log-bg); color: var(--log-text); border-radius: 10px;
          padding: 14px; height: 430px; overflow: auto; white-space: pre-wrap;
          word-break: break-word; font: 12px/1.55 ui-monospace, "SF Mono", Menlo, monospace; }
@@ -816,6 +830,7 @@ PAGE = r"""<!doctype html>
   <div class="panel">
     <h2 style="display:flex"><span>Log</span>
       <span style="margin-left:auto;font-weight:normal;color:var(--muted);font-size:12px" id="cmdline"></span></h2>
+    <div id="stages" class="stages"><div class="stage"><span class="name">No running job</span><span class="time">0s</span><span class="pill">idle</span></div></div>
     <div id="log"></div>
   </div>
 </main>
@@ -830,9 +845,93 @@ let state = {blueprints: [], backends: [], efforts: []};
 let active = 'generate';
 let offset = 0;
 let jobWasRunning = false;
+let stageRows = [];
+let currentStage = null;
+let fallbackStageSecond = 0;
 
 function el(id){ return document.getElementById(id); }
 function esc(s){ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+
+function fmtDuration(sec){
+  sec = Math.max(0, Math.floor(sec || 0));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  if (h) return `${h}h ${String(m).padStart(2,'0')}m`;
+  if (m) return `${m}m ${String(s).padStart(2,'0')}s`;
+  return `${s}s`;
+}
+
+function logSecond(line, jobElapsed){
+  const m = line.match(/^\[\+(\d+)s\]\s*/);
+  if (m) return Number(m[1]);
+  fallbackStageSecond = Math.max(fallbackStageSecond + 1, jobElapsed || 0);
+  return fallbackStageSecond;
+}
+
+function stripLogPrefix(line){
+  return line.replace(/^\[\+\d+s\]\s*/, '');
+}
+
+function stageFromLine(line){
+  line = stripLogPrefix(line);
+  let m;
+  if (line.includes('Reading paper context') || line.includes('Reading paper from')) return 'Read paper';
+  if (line.includes('Checking Lean/Lake/Mathlib setup')) return 'Lean preflight';
+  if (line.includes('removed') && line.includes('stale Lean attempt')) return 'Cleanup stale attempts';
+  if ((m = line.match(/==> Chunk (\d+): validating blueprint/))) return `Chunk ${m[1]} · validate blueprint`;
+  if (line.includes('Searching local Lean libraries')) return 'Search local Lean libraries';
+  if ((m = line.match(/==> Chunk (\d+), Lean attempt (\d+)\/\d+: generating/))) {
+    return `Chunk ${m[1]} · generate Lean attempt ${m[2]}`;
+  }
+  if ((m = line.match(/==> Chunk (\d+): running Lean/))) return `Chunk ${m[1]} · Lean check`;
+  if ((m = line.match(/==> Chunk (\d+): auditing statement alignment/))) return `Chunk ${m[1]} · statement audit`;
+  if ((m = line.match(/==> Blueprint repair (\d+)\/(\d+)/))) return `Blueprint repair ${m[1]}/${m[2]}`;
+  if (line.includes('All chunks accepted; running final')) return 'Final Lean check';
+  if (line.includes('Site rebuilt') || line.includes('Build site')) return 'Rebuild site';
+  if (line.includes('Report written') || line.startsWith('==> exit code')) return 'Finish';
+  return null;
+}
+
+function resetStages(){
+  stageRows = [];
+  currentStage = null;
+  fallbackStageSecond = 0;
+  renderStages({status:'idle', elapsed:0});
+}
+
+function ingestStageLines(lines, job){
+  for (const line of lines || []){
+    const name = stageFromLine(line);
+    if (!name) continue;
+    const t = logSecond(line, job && job.elapsed);
+    if (currentStage && currentStage.name === name) continue;
+    if (currentStage && currentStage.end == null) currentStage.end = t;
+    currentStage = {name, start:t, end:null};
+    stageRows.push(currentStage);
+  }
+  renderStages(job || {status:'idle', elapsed:0});
+}
+
+function renderStages(job){
+  const box = el('stages');
+  if (!box) return;
+  if (!stageRows.length){
+    box.innerHTML = '<div class="stage"><span class="name">No stage data yet</span><span class="time">0s</span><span class="pill">idle</span></div>';
+    return;
+  }
+  const now = job && job.status === 'running' ? (job.elapsed || fallbackStageSecond) : fallbackStageSecond;
+  box.innerHTML = stageRows.map((row)=>{
+    const running = row.end == null && job && job.status === 'running';
+    const end = row.end == null ? now : row.end;
+    const state = running ? 'running' : 'done';
+    const pill = running ? 'running' : 'done';
+    return `<div class="stage ${state}">
+      <span class="name">${esc(row.name)}</span>
+      <span class="time">${fmtDuration(end - row.start)}</span>
+      <span class="pill">${pill}</span>
+    </div>`;
+  }).join('');
+  box.scrollTop = box.scrollHeight;
+}
 
 function runnerFields(){
   const opts = state.backends.map(b=>`<option ${b==='claude-code'?'selected':''}>${b}</option>`).join('');
@@ -888,6 +987,7 @@ const FORMS = {
     <div class="leanbox" id="leanStatus">Lean setup not checked.
       <br><button type="button" onclick="checkLean()">Check Lean setup</button>
     </div>
+    <div class="check"><input type="checkbox" id="f_continue"><label for="f_continue">Continue from accepted generated chunks</label></div>
     ${paperField(false)}
     ${runnerFields()}
     <label>Lean command override (optional)</label>
@@ -956,7 +1056,8 @@ function params(){
             force:c('f_force'), no_build:c('f_nobuild'), ...common};
   if (active === 'refine')
     return {action:'refine', name:v('f_name'), max_trials:v('f_trials'),
-            paper:v('f_paper'), lean_command:v('f_leancmd'), ...common};
+            paper:v('f_paper'), lean_command:v('f_leancmd'),
+            continue_run:c('f_continue'), ...common};
   const names = [...document.querySelectorAll('.bpcheck:checked')].map(n=>n.value);
   if (active === 'validate') return {action:'validate', names};
   return {action:'build', names, strict:c('f_strict')};
@@ -970,6 +1071,7 @@ async function run(){
   if (j.error){ el('error').textContent = j.error; return; }
   el('log').textContent = '';
   offset = 0;
+  resetStages();
 }
 
 async function stopJob(){ await fetch('/api/stop', {method:'POST'}); }
@@ -982,6 +1084,7 @@ async function runLeanSetup(){
   if (j.error){ el('error').textContent = j.error; return; }
   el('log').textContent = '';
   offset = 0;
+  resetStages();
 }
 
 async function checkLean(){
@@ -1018,6 +1121,7 @@ async function poll(){
       const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
       log.textContent += j.lines.join('\n') + '\n';
       offset = j.total;
+      ingestStageLines(j.lines, j);
       if (atBottom) log.scrollTop = log.scrollHeight;
     }
     const running = j.status === 'running';
@@ -1028,6 +1132,7 @@ async function poll(){
     st.textContent = j.status === 'idle' ? '' :
       (running ? `running · ${mins}m ${String(secs).padStart(2,'0')}s` : j.status);
     st.className = 'status ' + (j.status || '');
+    renderStages(j);
     if (jobWasRunning && !running) refreshState();
     jobWasRunning = running;
   } catch (e) { /* server briefly unavailable; keep polling */ }
