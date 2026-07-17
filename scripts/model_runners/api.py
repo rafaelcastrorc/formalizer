@@ -56,6 +56,21 @@ def _openai_text(payload: dict) -> str:
     return text if isinstance(text, str) else ""
 
 
+def _raise_if_openai_incomplete(payload: dict) -> None:
+    status = payload.get("status")
+    if status and status != "completed":
+        detail = payload.get("incomplete_details") or payload.get("error") or {}
+        raise RunnerError(f"OpenAI response status {status}: {str(detail)[:1000]}")
+    details = payload.get("incomplete_details")
+    if details:
+        raise RunnerError(f"OpenAI response incomplete: {str(details)[:1000]}")
+
+
+def _raise_if_anthropic_truncated(payload: dict) -> None:
+    if payload.get("stop_reason") == "max_tokens":
+        raise RunnerError("Anthropic response stopped at max_tokens; output was truncated")
+
+
 class OpenAIRunner(ModelRunner):
     backend_name = "openai"
     mode = "api"
@@ -93,6 +108,7 @@ class OpenAIRunner(ModelRunner):
             {"Authorization": f"Bearer {key}"},
             self.timeout,
         )
+        _raise_if_openai_incomplete(payload)
         text = _openai_text(payload)
         if not text:
             raise RunnerError(f"OpenAI returned no text: {str(payload)[:1000]}")
@@ -128,6 +144,7 @@ class AnthropicRunner(ModelRunner):
             {"x-api-key": key, "anthropic-version": ANTHROPIC_API_VERSION},
             self.timeout,
         )
+        _raise_if_anthropic_truncated(payload)
         text = "".join(
             part.get("text", "")
             for part in payload.get("content", [])

@@ -473,6 +473,13 @@ The shorter `report.md` links to that log. Use the log when you need the full
 terminal output for model calls, Lean failures, audit failures, and rebuild
 output.
 
+At the start of a fresh refinement run, the script deletes stale generated Lean
+attempts for that blueprint, such as `chunk_*_attempt_*.lean`,
+`trial_*.lean`, `partial_formalization.lean`, `assembled_formalization.lean`,
+and the previous `report.md`. Timestamped `run-*.log` files are kept. This keeps
+old failed implementations from becoming accidental context for agent-mode
+model calls while preserving the logs needed for debugging.
+
 If the read-only model call times out or fails before producing Lean, the run
 stops without changing the blueprint and writes a fresh `report.md` for that
 same run. That prevents an old report from looking like the current failure.

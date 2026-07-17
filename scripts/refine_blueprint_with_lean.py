@@ -32,6 +32,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -54,6 +55,23 @@ DEFAULT_AUTO_CHUNK_LIMIT = 8
 CURRENT_LOG_PATH: Path | None = None
 MAX_LIBRARY_CANDIDATES = 40
 MIN_LIBRARY_CANDIDATES_BEFORE_MODEL_TERMS = 8
+LEAN_IDIOM_CHEATSHEET = """\
+- Finite sums use `open scoped BigOperators`; common rewrites include
+  `Finset.sum_mul`, `Finset.mul_sum`, `Finset.sum_add_distrib`, and
+  `Finset.sum_congr`.
+- For finite functions `I -> R`, prefer explicit definitions like
+  `∑ i : I, v i * w i` when inner-product notation is not essential.
+- Continuity proofs often compose existing continuous maps; useful lemmas and
+  tactics include `continuous_const`, `continuous_id`, `.add`, `.sub`, `.mul`,
+  `.div_const`, `.const_mul`, `.min`, `.max`, and `continuity`.
+- Real square/root goals often use `sq_nonneg`, `sq`, `Real.sq_sqrt`, and
+  `Real.sqrt_sq_eq_abs`; check hypotheses before using nonneg-specific lemmas.
+- `EuclideanSpace R (Fin n)` is a function type indexed by `Fin n`; avoid
+  searching for bespoke vector APIs when pointwise functions or finite sums are
+  enough for the blueprint statement.
+- Avoid blanket imports. If a candidate snippet names the needed theorem, import
+  the candidate's listed module directly.
+"""
 FORBIDDEN_LEAN_PLACEHOLDERS = re.compile(r"\b(sorry|admit)\b|by\s*\?")
 FORBIDDEN_ASSUMPTIONS = re.compile(r"^\s*(axiom|constant|opaque)\s+([A-Za-z_][A-Za-z0-9_'.]*)", re.MULTILINE)
 FORBIDDEN_BLUEPRINT_STUBS = re.compile(
@@ -118,6 +136,7 @@ class LibraryCandidate:
     file: Path
     line: int
     matched: str
+    snippet: str = ""
 
 
 @dataclass
@@ -153,6 +172,33 @@ def _run_log_path(name: str) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     return out_dir / f"run-{stamp}.log"
+
+
+def _clear_stale_attempt_artifacts(name: str) -> int:
+    """Remove old model-generated Lean attempts before a fresh refinement run.
+
+    Timestamped run logs are intentionally kept for human debugging, but stale
+    Lean attempts and reports are deleted so a new agent run does not have
+    previous failed implementations sitting in the obvious scratch location.
+    """
+    out_dir = SCRATCH_DIR / name
+    if not out_dir.exists():
+        return 0
+    patterns = (
+        "chunk_*_attempt_*.lean",
+        "trial_*.lean",
+        "partial_formalization.lean",
+        "assembled_formalization.lean",
+        "report.md",
+    )
+    removed = 0
+    for pattern in patterns:
+        for path in out_dir.glob(pattern):
+            if not path.is_file():
+                continue
+            path.unlink()
+            removed += 1
+    return removed
 
 
 def _read_blueprint_source(name: str) -> str:
@@ -444,6 +490,25 @@ def _parse_declaration_from_line(line: str) -> str | None:
     return None
 
 
+def _lean_decl_snippet(path: Path, line_no: int, *, max_lines: int = 8, max_chars: int = 900) -> str:
+    """Return the declaration header near file:line so the model need not open it."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    start = max(0, line_no - 1)
+    out: list[str] = []
+    for line in lines[start : start + max_lines]:
+        stripped = line.rstrip()
+        if stripped.lstrip().startswith("--"):
+            continue
+        out.append(stripped)
+        joined = "\n".join(out).strip()
+        if ":=" in stripped or " where" in stripped or len(joined) >= max_chars:
+            break
+    return "\n".join(out).strip()[:max_chars]
+
+
 def _candidate_from_decl_line(
     roots: list[tuple[str, Path]],
     path: Path,
@@ -474,7 +539,15 @@ def _candidate_from_decl_line(
         ),
         terms[0],
     )
-    return LibraryCandidate(lib_name, module, decl, resolved, line_no, matched)
+    return LibraryCandidate(
+        lib_name,
+        module,
+        decl,
+        resolved,
+        line_no,
+        matched,
+        _lean_decl_snippet(resolved, line_no),
+    )
 
 
 def _python_library_candidates(
@@ -617,6 +690,10 @@ def _search_local_lean_libraries(
             candidates = _rg_library_candidates(roots, terms, max_candidates=MAX_LIBRARY_CANDIDATES)
 
     lines = []
+    lines.append(
+        "- Candidate modules below were found by deterministic local search; "
+        "treat module paths as already verified."
+    )
     if not any(lib == "CSLib" for lib, _root in roots):
         lines.append("- CS Lib: not installed locally under `.lake/packages/`; search used available local libraries only.")
     for cand in candidates:
@@ -629,6 +706,10 @@ def _search_local_lean_libraries(
             f"- {cand.library}: `{cand.declaration}` in `{cand.module}` "
             f"({rel}:{cand.line}, matched `{cand.matched}`)"
         )
+        if cand.snippet:
+            lines.append("  ```lean")
+            lines.extend(f"  {line}" for line in cand.snippet.splitlines())
+            lines.append("  ```")
 
     print(f"  found {len(candidates)} candidate declaration(s)", flush=True)
     summary = "\n".join(lines) if lines else "- No local Lean library candidates found."
@@ -1088,6 +1169,7 @@ def _run_lean(path: Path, lean_command: list[str]) -> LeanAttempt:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         raise FileNotFoundError(
@@ -1103,7 +1185,10 @@ def _run_lean(path: Path, lean_command: list[str]) -> LeanAttempt:
         except subprocess.TimeoutExpired:
             elapsed = int(time.time() - start)
             if elapsed >= 600:
-                proc.kill()
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 stdout, stderr = proc.communicate()
                 return LeanAttempt(
                     ok=False,
@@ -1128,29 +1213,37 @@ def _run_lean(path: Path, lean_command: list[str]) -> LeanAttempt:
 def _compile_module_olean(path: Path, lean_command: list[str]) -> LeanAttempt:
     """Compile an accepted generated module to .olean for later chunk imports."""
     olean_path = path.with_suffix(".olean")
+    command = lean_command + ["-o", str(olean_path), str(path)]
     try:
-        proc = subprocess.run(
-            lean_command + ["-o", str(olean_path), str(path)],
+        proc = subprocess.Popen(
+            command,
             cwd=str(REPO_ROOT),
             env=_lean_env(),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=600,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired as exc:
+        stdout, stderr = proc.communicate(timeout=600)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = proc.communicate()
         return LeanAttempt(
             ok=False,
-            command=lean_command + ["-o", str(olean_path), str(path)],
-            stdout=exc.stdout or "",
-            stderr=exc.stderr or "",
+            command=command,
+            stdout=stdout or "",
+            stderr=stderr or "",
             reason="Lean module object compilation timed out after 600s.",
             kind="lean-generation",
         )
     return LeanAttempt(
         ok=proc.returncode == 0,
-        command=lean_command + ["-o", str(olean_path), str(path)],
-        stdout=proc.stdout or "",
-        stderr=proc.stderr or "",
+        command=command,
+        stdout=stdout or "",
+        stderr=stderr or "",
         kind="lean-generation" if proc.returncode != 0 else "lean",
     )
 
@@ -1206,8 +1299,8 @@ Hard constraints:
 Imports:
 - Import only the specific Mathlib modules your file needs, e.g.
   `import Mathlib.Analysis.InnerProductSpace.Basic`.
-- Confirm each module path exists by checking the Mathlib source under
-  `.lake/packages/mathlib/Mathlib/` before using it.
+- Local library candidates below came from deterministic local search; trust
+  their module paths and snippets instead of reopening Mathlib to verify them.
 - Do not use the blanket `import Mathlib` or `import AutoBlueprint`; they load
   every Mathlib module and make each compile check several times slower.
 - Prefer the local library candidates below when they are relevant, but do not
@@ -1221,6 +1314,9 @@ Node summary:
 
 Local Lean library candidates:
 {library_context or "- No local library candidates were found."}
+
+Lean API idioms:
+{LEAN_IDIOM_CHEATSHEET}
 
 Current blueprint source:
 ```tex
@@ -1337,6 +1433,9 @@ Accepted Lean signatures:
 
 Local Lean library candidates:
 {library_context or "- No local library candidates were found."}
+
+Lean API idioms:
+{LEAN_IDIOM_CHEATSHEET}
 
 Target blueprint source:
 {target_text}
@@ -1564,6 +1663,10 @@ def main(argv: list[str] | None = None) -> int:
     if CURRENT_LOG_PATH is not None:
         report_lines.append(f"- full log: `{CURRENT_LOG_PATH.relative_to(REPO_ROOT)}`")
     report_lines.append("")
+
+    removed_stale = _clear_stale_attempt_artifacts(args.name)
+    if removed_stale:
+        print(f"==> removed {removed_stale} stale Lean attempt artifact(s)", flush=True)
 
     generated_dir = _generated_module_dir(args.name)
     if generated_dir.exists():
@@ -1832,7 +1935,20 @@ def main(argv: list[str] | None = None) -> int:
                 cwd=REPO_ROOT,
                 retries=1,
             )
-            _write_api_refinement(args.name, refine_result.text)
+            try:
+                _write_api_refinement(args.name, refine_result.text)
+            except ValueError as exc:
+                report_lines.append("## API blueprint repair returned invalid JSON/content")
+                report_lines.append("")
+                report_lines.append("```text")
+                report_lines.append(str(exc))
+                report_lines.append("")
+                report_lines.append(refine_result.text[-4000:])
+                report_lines.append("```")
+                report = _write_report(args.name, report_lines)
+                print(f"API blueprint repair failed: {exc}", flush=True)
+                print(f"Report written to {report.relative_to(REPO_ROOT)}")
+                return 1
 
         repaired_validation = validate_blueprint(REPO_ROOT, args.name)
         if not repaired_validation.ok:
@@ -1881,7 +1997,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print("  blueprint repair did not change parsed node text; keeping accepted chunks", flush=True)
             report_lines.append("- blueprint repair did not change parsed node text; kept accepted chunks")
-        chunk_number = len(accepted_chunks) + 1
+        chunk_number += 1
 
     report_lines.append(f"Stopped after {args.max_trials} failed trial(s).")
     report = _write_report(args.name, report_lines)

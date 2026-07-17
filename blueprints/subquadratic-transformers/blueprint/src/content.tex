@@ -600,14 +600,27 @@
   \label{def:tsq-alg-exists}
   \uses{def:problem-family, def:parameter-sensitive-placeholder, def:truly-subquadratic}
   For a concrete problem family $\mathcal P$, this node introduces, or
-  transparently re-exports, the auditable structure
-  $\operatorname{TSQAlgorithm}(\mathcal P)$. The declaration at this label is
-  the structure itself, an equivalent dependent Sigma package with the same
-  projections, or a reducible alias to such a package. It is not merely the
-  proposition $\operatorname{Nonempty}(\operatorname{TSQAlgorithm}(\mathcal P))$.
-  If implemented as an alias, unfolding the audited declaration must expose the
-  regime, run, correctness, runtime and exponent fields below. An element
-  $\mathcal A:\operatorname{TSQAlgorithm}(\mathcal P)$ has the following fields:
+  transparently re-exports, the auditable structure named at this label. In the
+  generated Lean this declaration is `def_tsq_alg_exists'. The declaration
+  `def_tsq_alg_exists P' itself must be the algorithm package, an equivalent
+  dependent Sigma package with the same projections, or a reducible alias to
+  such a package. If a helper structure named
+  $\operatorname{TSQAlgorithm}(\mathcal P)$ is also used, then
+  `def_tsq_alg_exists P' must be definitionally equal to it, for example a
+  transparent abbreviation
+  \[
+    \operatorname{def\_tsq\_alg\_exists}(\mathcal P)
+      := \operatorname{TSQAlgorithm}(\mathcal P).
+  \]
+  It is not merely the proposition
+  $\operatorname{Nonempty}(\operatorname{TSQAlgorithm}(\mathcal P))$ or
+  $\operatorname{Nonempty}(\operatorname{def\_tsq\_alg\_exists}(\mathcal P))$.
+  If implemented as an alias, unfolding the audited declaration
+  `def_tsq_alg_exists' must expose the regime, run, correctness, runtime and
+  exponent fields below. An element
+  $\mathcal A:\operatorname{def\_tsq\_alg\_exists}(\mathcal P)$, equivalently
+  $\mathcal A:\operatorname{TSQAlgorithm}(\mathcal P)$ when that name is a
+  transparent alias, has the following fields:
   \begin{itemize}
     \item a parameter-regime predicate
       $\operatorname{Regime}_{\mathcal A} :
@@ -679,8 +692,15 @@
   \[
     \TSQAlg{\mathcal P}
     \quad\text{means}\quad
-    \operatorname{Nonempty}(\operatorname{TSQAlgorithm}(\mathcal P)).
+    \operatorname{Nonempty}(
+      \operatorname{def\_tsq\_alg\_exists}(\mathcal P)).
   \]
+  If the implementation also exposes the notation as
+  $\operatorname{Nonempty}(\operatorname{TSQAlgorithm}(\mathcal P))$, then the
+  transparent equality
+  $\operatorname{def\_tsq\_alg\_exists}(\mathcal P)
+  = \operatorname{TSQAlgorithm}(\mathcal P)$ must be available by reduction at
+  this label.
   Thus $\TSQAlg{\MSD_{n,\ell,t}}$ asserts existence of an algorithm for the
   concrete threshold cosine-similarity predicate, not for a family tag named
   ``MSD''. A Lean declaration at this label that merely states
@@ -688,7 +708,7 @@
   would not itself expose the regime, run, correctness, runtime function, and
   truly-subquadratic bound data. A reducible type alias to an existing
   `TSQAlgorithm P' structure is acceptable only if these projections are
-  available after unfolding the alias. If an implementation uses helper
+  available after unfolding `def_tsq_alg_exists'. If an implementation uses helper
   definitions such as `AlgOut' and `AlgCorrect', this node must define them,
   import them transparently, or unfold them at this label, and the structure
   must have exactly one kind-indexed run field and exactly one kind-indexed
@@ -705,19 +725,24 @@
     \NoTSQAlg{\mathcal P}
     \quad := \quad
     \neg\,\operatorname{Nonempty}
-      \bigl(\operatorname{TSQAlgorithm}(\mathcal P)\bigr).
+      \bigl(\operatorname{def\_tsq\_alg\_exists}(\mathcal P)\bigr).
   \]
   Equivalently, it is the function type
   \[
-    \operatorname{TSQAlgorithm}(\mathcal P)\to\mathrm{False}
+    \operatorname{def\_tsq\_alg\_exists}(\mathcal P)\to\mathrm{False}
   \]
   after unpacking `Nonempty'. The definition at this label must mention
-  $\operatorname{TSQAlgorithm}(\mathcal P)$ itself and must reduce to its
-  negation. It must not negate a separate opaque predicate named `TSQAlg P'
-  unless that notation is a transparent abbreviation for the displayed
-  `Nonempty (TSQAlgorithm P)'. Otherwise the lower-bound predicate is no longer
-  audibly tied to the run, correctness, runtime and exponent fields specified in
-  Definition~\ref{def:tsq-alg-exists}.
+  `def_tsq_alg_exists P' itself and must reduce to its negation. It may also
+  display $\operatorname{TSQAlgorithm}(\mathcal P)$, but only when
+  `def_tsq_alg_exists P' is a transparent alias for
+  $\operatorname{TSQAlgorithm}(\mathcal P)$ at
+  Definition~\ref{def:tsq-alg-exists}. It must not negate
+  `Nonempty (TSQAlgorithm P)' while leaving `def_tsq_alg_exists P' as a
+  different audited declaration, and it must not negate a separate opaque
+  predicate named `TSQAlg P' unless that notation is a transparent abbreviation
+  for the displayed `Nonempty (def_tsq_alg_exists P)'. Otherwise the lower-bound
+  predicate is no longer audibly tied to the run, correctness, runtime and
+  exponent fields specified in Definition~\ref{def:tsq-alg-exists}.
 \end{definition}
 
 \begin{definition}[Fine-grained reduction and equivalence predicates]
@@ -831,6 +856,49 @@
       for the parameter transformation, dimension blowup, number of calls,
       overhead, and all $\operatorname{poly}(\ell)$ factors.
   \end{itemize}
+  The induced algorithm is not independent data. In a compliant Lean
+  implementation, the reduction witness does \emph{not} contain a free field
+  with type
+  \[
+    \operatorname{transformedAlgorithm} :
+      \operatorname{def\_tsq\_alg\_exists}(\mathcal Q)\to
+      \operatorname{def\_tsq\_alg\_exists}(\mathcal P),
+  \]
+  nor the same type with $\operatorname{TSQAlgorithm}$ in place of
+  `def_tsq_alg_exists'. Instead, the transformed source algorithm is the
+  transparent definition
+  \[
+    \operatorname{mkInducedAlgorithm}(R,\mathcal A_Q),
+  \]
+  whose projections reduce to the formulas already displayed:
+  \[
+  \begin{array}{ll}
+    \operatorname{mkInducedAlgorithm}(R,\mathcal A_Q).\operatorname{run}
+      &= \operatorname{inducedRun}_{R,\mathcal A_Q},\\
+    \operatorname{mkInducedAlgorithm}(R,\mathcal A_Q).\operatorname{correct}
+      &= \operatorname{inducedCorrect}_{R,\mathcal A_Q},\\
+    \operatorname{mkInducedAlgorithm}(R,\mathcal A_Q).T
+      &= \operatorname{inducedRuntime}_{R,\mathcal A_Q},\\
+    \operatorname{mkInducedAlgorithm}(R,\mathcal A_Q).\operatorname{eps}
+      &>0
+        \quad\text{is the exponent produced by the
+        subquadratic-preservation theorem.}
+  \end{array}
+  \]
+  If an implementation insists on exposing a convenience name
+  `transformedAlgorithm' or `algorithmTransform', that name must be a reducible
+  definition or theorem alias for $\operatorname{mkInducedAlgorithm}$, not a
+  structure field. At minimum, the audited declaration must include projection
+  equations named, for example,
+  `transformedAlgorithm_run',
+  `transformedAlgorithm_correct',
+  `transformedAlgorithm_runtime', and
+  `transformedAlgorithm_tsq', proving that the alleged transformed algorithm's
+  run, correctness proof, runtime function, and truly-subquadratic bound are
+  exactly the induced objects above. A field
+  `transformedAlgorithm : TSQAlgorithm Q -> TSQAlgorithm P' with no such
+  projection equations is rejected even if the structure separately contains
+  call lists, reconstruction maps, or runtime expressions.
   The eventual-coverage and call/reconstruction fields are logically essential:
   choosing $\operatorname{SrcRegime}_R=\emptyset$ makes all later obligations
   vacuous, and restricting reductions to one target instance cannot express the
@@ -849,11 +917,15 @@
   fields are respectively
   $\operatorname{inducedRun}_{R,\mathcal A_Q}$, the induced correctness theorem,
   and $\operatorname{inducedRuntime}_{R,\mathcal A_Q}$ above. The audited
-  declaration must expose this constructor or an equivalent theorem with these
-  exact projection equations. There is no free-standing opaque
-  `transformedAlgorithm' or `algorithmTransform' field whose behavior can be
-  unrelated to the parameter map, call list, target runs, reconstruction,
-  correctness proof and runtime theorem. There is also no arbitrary
+  declaration must expose `mkInducedAlgorithm' or an equivalent transparent
+  constructor with these exact projection equations. There is no free-standing
+  opaque `transformedAlgorithm' or `algorithmTransform' field whose behavior can
+  be unrelated to the parameter map, call list, target runs, reconstruction,
+  correctness proof and runtime theorem. In particular, a structure containing
+  an unconstrained field
+  `transformedAlgorithm : TSQAlgorithm Q -> TSQAlgorithm P' fails this node
+  unless that field is definitionally forced, by the projection equations above,
+  to be the induced algorithm. There is also no arbitrary
   `runtimeExpression' field: a nonnegative expression with no equality to the
   target-runtime sum is not runtime accounting. If helper fields with these
   names are present, their equations must reduce to

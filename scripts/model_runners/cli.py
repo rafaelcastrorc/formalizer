@@ -12,6 +12,8 @@ deterministic. The deterministic safety gate is still
 from __future__ import annotations
 
 import json
+import os
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -99,6 +101,7 @@ class ClaudeCodeRunner(ModelRunner):
             stderr=subprocess.PIPE,
             text=True,
             cwd=str(cwd) if cwd else None,
+            start_new_session=True,
         )
         assert proc.stdin and proc.stdout and proc.stderr
 
@@ -111,15 +114,19 @@ class ClaudeCodeRunner(ModelRunner):
 
         stderr_lines: list[str] = []
         threading.Thread(target=_feed_stdin, daemon=True).start()
-        threading.Thread(
+        stderr_thread = threading.Thread(
             target=lambda: stderr_lines.extend(proc.stderr), daemon=True
-        ).start()
+        )
+        stderr_thread.start()
 
         timed_out = threading.Event()
 
         def _kill_on_timeout() -> None:
             timed_out.set()
-            proc.kill()
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
         watchdog = threading.Timer(self.timeout, _kill_on_timeout)
         watchdog.daemon = True
@@ -171,8 +178,9 @@ class ClaudeCodeRunner(ModelRunner):
         finally:
             watchdog.cancel()
             heartbeat_stop.set()
+            stderr_thread.join(timeout=1)
 
-        if timed_out.is_set():
+        if timed_out.is_set() and returncode != 0:
             raise RunnerError(f"claude CLI timed out after {self.timeout}s")
         if returncode != 0:
             tail = "\n".join(stderr_lines).strip()[-3000:]
@@ -224,22 +232,30 @@ class CodexRunner(ModelRunner):
         cmd += ["-"]
         try:
             print("  launching Codex CLI; live output follows if Codex emits any", flush=True)
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
-                input=full_prompt,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
                 cwd=str(cwd) if cwd else None,
-                timeout=self.timeout,
+                start_new_session=True,
             )
+            stdout, _stderr = proc.communicate(input=full_prompt, timeout=self.timeout)
             if proc.returncode != 0:
                 raise RunnerError(f"codex CLI exit {proc.returncode}; see output above")
             text = output_path.read_text(encoding="utf-8").strip() if output_path.exists() else ""
             if not text:
-                text = (proc.stdout or "").strip()
+                text = (stdout or "").strip()
             if not text:
                 raise RunnerError("codex CLI returned empty output")
             return RunResult(text=text)
         except subprocess.TimeoutExpired as exc:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.communicate()
             raise RunnerError(f"codex CLI timed out after {self.timeout}s") from exc
         finally:
             output_path.unlink(missing_ok=True)

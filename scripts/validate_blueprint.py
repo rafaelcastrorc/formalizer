@@ -30,7 +30,7 @@ BLUEPRINTS_DIR = REPO_ROOT / "blueprints"
 BUILTIN_ENVS = ("definition", "lemma", "proposition", "theorem", "corollary")
 
 _BEGIN_RE = re.compile(r"\\begin\{([a-zA-Z*]+)\}")
-_INPUT_RE = re.compile(r"^[^%\n]*?\\(?:input|include)\{([^}]*)\}", re.MULTILINE)
+_INPUT_RE = re.compile(r"\\(?:input|include)\{([^}]*)\}")
 _LABEL_RE = re.compile(r"\\label\{([^}]*)\}")
 _LEAN_RE = re.compile(r"\\lean\{([^}]*)\}")
 _MATHLIBOK_RE = re.compile(r"\\mathlibok\b")
@@ -171,7 +171,11 @@ def _parse_file(path: Path, envs: set[str], result: ValidationResult) -> None:
         body = text[begin.end():end]
 
         if env == "proof" or env not in envs:
-            pos = block_end
+            # Keep scanning inside non-node environments. Some generated or
+            # hand-written TeX nests theorem-like nodes inside wrappers or even
+            # proof blocks; plasTeX can render those, so the validator should
+            # still see their labels and dependencies.
+            pos = begin.end()
             continue
 
         label_matches = list(_LABEL_RE.finditer(body))

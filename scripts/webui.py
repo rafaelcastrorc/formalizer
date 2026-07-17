@@ -265,7 +265,7 @@ def _adopted_job_snapshot(offset: int) -> dict | None:
         job_pid = int(state.get("job_pid") or 0)
     except (TypeError, ValueError):
         job_pid = 0
-    if not _pid_is_running(job_pid):
+    if not _pid_is_running(job_pid) or not _recorded_job_matches(job_pid):
         if state.get("pid") == os.getpid() and job_pid:
             _clear_webui_job_state(job_pid)
         return None
@@ -297,7 +297,7 @@ def _stop_recorded_job() -> bool:
         job_pgid = int(state.get("job_pgid") or job_pid)
     except (TypeError, ValueError):
         return False
-    if not _pid_is_running(job_pid):
+    if not _pid_is_running(job_pid) or not _recorded_job_matches(job_pid):
         return False
     try:
         os.killpg(job_pgid, signal.SIGTERM)
@@ -315,6 +315,22 @@ def _pid_command(pid: int) -> str:
     if proc.returncode != 0:
         return ""
     return proc.stdout.strip()
+
+
+def _recorded_job_matches(pid: int) -> bool:
+    command = _pid_command(pid)
+    if not command:
+        return False
+    markers = (
+        "scripts/refine_blueprint_with_lean.py",
+        "scripts/generate_blueprint.py",
+        "scripts/setup_lean.py",
+        "scripts/validate_blueprint.py",
+        "scripts/build.py",
+    )
+    return any(marker in command for marker in markers) and (
+        "Auto-Blueprint" in command or str(REPO_ROOT) in command
+    )
 
 
 def _looks_like_previous_webui(pid: int) -> bool:
@@ -1056,7 +1072,6 @@ def main() -> int:
 
     if not args.keep_existing:
         _stop_previous_webui()
-        _stop_stale_pipeline_jobs()
 
     server = None
     port = args.port

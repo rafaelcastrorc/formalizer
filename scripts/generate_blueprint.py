@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+from json import JSONDecoder
 from pathlib import Path
 
 from model_runners import RunnerError, get_runner
@@ -42,11 +43,17 @@ def _slug(value: str) -> str:
 
 
 def _extract_json(text: str) -> dict:
-    fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-    candidates = [fence.group(1)] if fence else []
-    brace = re.search(r"\{[\s\S]*\}", text)
-    if brace:
-        candidates.append(brace.group(0))
+    candidates = [match.group(1) for match in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", text)]
+    decoder = JSONDecoder()
+    for start, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            data, _end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
     for candidate in candidates:
         try:
             data = json.loads(candidate)
@@ -94,12 +101,27 @@ def _read_pdf_with_pypdf(path: Path) -> str:
     return text
 
 
+def _looks_like_pdf(data: bytes, content_type: str = "") -> bool:
+    return data.lstrip().startswith(b"%PDF") or "pdf" in content_type.lower()
+
+
+def _decode_text_bytes(data: bytes, source: str) -> str:
+    text = data.decode("utf-8", "replace")
+    if "\x00" in text or text.count("\ufffd") > max(20, len(text) // 100):
+        raise RuntimeError(
+            f"{source} did not look like UTF-8 text or a PDF; pass a PDF/text file "
+            "or an arXiv PDF URL."
+        )
+    return text
+
+
 def read_paper(source: str) -> tuple[str, str]:
     """Return ``(paper_text, source_label)`` from a file path, URL, or raw text."""
     if source.startswith(("http://", "https://")):
         with urllib.request.urlopen(source, timeout=60) as resp:
+            content_type = resp.headers.get("Content-Type", "")
             data = resp.read()
-        if source.lower().endswith(".pdf"):
+        if source.lower().split("?", 1)[0].endswith(".pdf") or _looks_like_pdf(data, content_type):
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
                 tmp.write(data)
                 tmp_path = Path(tmp.name)
@@ -107,7 +129,7 @@ def read_paper(source: str) -> tuple[str, str]:
                 return _read_pdf_with_pdftotext(tmp_path), source
             finally:
                 tmp_path.unlink(missing_ok=True)
-        return data.decode("utf-8", "replace"), source
+        return _decode_text_bytes(data, source), source
 
     path = Path(source).expanduser()
     if path.is_file():
@@ -188,7 +210,7 @@ status. Do not commit changes.
 
 
 def _replace_tex_command(text: str, command: str, value: str) -> str:
-    escaped = value.replace("\\", r"\textbackslash{}").replace("{", r"\{").replace("}", r"\}")
+    escaped = _tex_escape_text(value)
     pattern = re.compile(rf"\\{command}\{{[^}}]*\}}")
     replacement = f"\\{command}{{{escaped}}}"
     if pattern.search(text):
@@ -196,13 +218,29 @@ def _replace_tex_command(text: str, command: str, value: str) -> str:
     return text
 
 
+def _tex_escape_text(value: str) -> str:
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "{": r"\{",
+        "}": r"\}",
+        "%": r"\%",
+        "&": r"\&",
+        "#": r"\#",
+        "_": r"\_",
+        "$": r"\$",
+        "^": r"\textasciicircum{}",
+        "~": r"\textasciitilde{}",
+    }
+    return "".join(replacements.get(ch, ch) for ch in value)
+
+
 def _set_home(text: str, home: str) -> str:
     if not home:
         return text
-    if re.search(r"^\s*%?\s*\\home\{", text, re.MULTILINE):
+    if re.search(r"^\s*\\home\{", text, re.MULTILINE):
         replacement = f"\\home{{{home}}}"
         return re.sub(
-            r"^\s*%?\s*\\home\{[^}]*\}",
+            r"^\s*\\home\{[^}]*\}",
             lambda _match: replacement,
             text,
             count=1,
@@ -226,6 +264,20 @@ def scaffold_from_payload(payload: dict, *, requested_name: str | None, force: b
     if r"\begin{document}" in content_tex or r"\end{document}" in content_tex:
         raise ValueError("content_tex must not contain document environment")
 
+    description = str(payload.get("description") or "").strip()
+    authors = str(payload.get("authors") or "").strip()
+    home = str(payload.get("home") or "").strip()
+    github = str(payload.get("github") or "").strip()
+    build_pdf = bool(payload.get("build_pdf", False))
+    meta_content = build_meta(
+        name=name,
+        title=title,
+        description=description,
+        build_pdf=build_pdf,
+        home=home,
+        github=github,
+    )
+
     dest = BLUEPRINTS_DIR / name
     if dest.exists():
         if not force:
@@ -235,23 +287,7 @@ def scaffold_from_payload(payload: dict, *, requested_name: str | None, force: b
     BLUEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
     shutil.copytree(SKELETON_DIR, dest)
 
-    description = str(payload.get("description") or "").strip()
-    authors = str(payload.get("authors") or "").strip()
-    home = str(payload.get("home") or "").strip()
-    github = str(payload.get("github") or "").strip()
-    build_pdf = bool(payload.get("build_pdf", False))
-
-    (dest / "meta.yml").write_text(
-        build_meta(
-            name=name,
-            title=title,
-            description=description,
-            build_pdf=build_pdf,
-            home=home,
-            github=github,
-        ),
-        encoding="utf-8",
-    )
+    (dest / "meta.yml").write_text(meta_content, encoding="utf-8")
     src = dest / "blueprint" / "src"
     (src / "content.tex").write_text(content_tex.rstrip() + "\n", encoding="utf-8")
     for tex_name in ("web.tex", "print.tex"):
