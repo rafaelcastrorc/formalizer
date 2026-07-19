@@ -91,13 +91,15 @@ class ModelRunner(abc.ABC):
         cwd_path = Path(cwd) if cwd else None
         last_exc: Exception | None = None
         for attempt in range(retries + 1):
-            start = time.time()
+            # monotonic: wall-clock (time.time) counts machine sleep, which made
+            # reported durations disagree with the run log's monotonic stamps.
+            start = time.monotonic()
             try:
                 result = self._run_impl(prompt, full_system, cwd_path)
                 result.backend = self.backend_name
                 result.model = result.model or self.model
                 result.mode = self.mode
-                result.duration_s = time.time() - start
+                result.duration_s = time.monotonic() - start
                 return result
             except RunnerError as exc:
                 last_exc = exc

@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -899,6 +900,93 @@ def _chunk_module(name: str, chunk_number: int) -> tuple[str, Path]:
     return module, path
 
 
+def _chunk_manifest_path(name: str) -> Path:
+    return _generated_module_dir(name) / "manifest.json"
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_chunk_manifest(name: str, accepted_chunks: list[AcceptedChunk]) -> None:
+    """Record accepted chunks so --continue can skip re-verifying unchanged ones.
+
+    Each entry stores enough to prove nothing relevant changed: the chunk file
+    hash (the Lean code) and the per-label blueprint fingerprints (the TeX the
+    audit judged it against). If both still match at resume time, the previous
+    Lean check and alignment audit verdicts still hold.
+    """
+    entries = []
+    for chunk in accepted_chunks:
+        try:
+            sha = _file_sha256(chunk.path)
+        except OSError:
+            continue
+        entries.append(
+            {
+                "file": chunk.path.name,
+                "sha256": sha,
+                "labels": list(chunk.labels),
+                "fingerprints": dict(chunk.fingerprints),
+            }
+        )
+    path = _chunk_manifest_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"chunks": entries}, indent=2) + "\n", encoding="utf-8")
+
+
+def _read_chunk_manifest(name: str) -> dict[str, dict]:
+    try:
+        data = json.loads(_chunk_manifest_path(name).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    entries = data.get("chunks") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return {}
+    return {entry["file"]: entry for entry in entries if isinstance(entry, dict) and "file" in entry}
+
+
+def _olean_roots() -> list[Path]:
+    """Directories holding compiled .olean trees for local packages."""
+    roots = [REPO_ROOT / ".lake" / "build" / "lib" / "lean"]
+    packages = REPO_ROOT / ".lake" / "packages"
+    if packages.is_dir():
+        roots.extend(sorted(packages.glob("*/.lake/build/lib/lean")))
+    return [root for root in roots if root.is_dir()]
+
+
+def _missing_olean_imports(import_lines: list[str]) -> list[str]:
+    """Return import lines whose module has no compiled .olean locally.
+
+    Only flags modules whose top-level namespace is owned by a local package
+    root (e.g. Mathlib, Batteries); core namespaces like Init/Lean/Std live in
+    the toolchain and are never flagged. Generated AutoBlueprint modules are
+    compiled by this script itself and are skipped too.
+    """
+    roots = _olean_roots()
+    missing: list[str] = []
+    for line in import_lines:
+        module = line.strip()
+        if not module.startswith("import "):
+            continue
+        module = module[len("import "):].strip()
+        if not module or module.startswith("AutoBlueprint"):
+            continue
+        top = module.split(".", 1)[0]
+        rel = Path(*module.split("."))
+        owned = False
+        found = False
+        for root in roots:
+            if (root / top).is_dir() or (root / f"{top}.olean").is_file():
+                owned = True
+                if (root / rel.parent / f"{rel.name}.olean").is_file():
+                    found = True
+                    break
+        if owned and not found:
+            missing.append(line.strip())
+    return missing
+
+
 def _decl_signatures(code: str) -> str:
     signatures: list[str] = []
     for decl in _lean_declarations(code).values():
@@ -1554,9 +1642,27 @@ def _chunk_lean_prompt(
     *,
     library_context: str = "",
     previous_lean_error: str = "",
+    previous_chunk_code: str = "",
+    audit_history: str = "",
+    unavailable_imports: list[str] | None = None,
 ) -> str:
     retry_block = ""
     if previous_lean_error:
+        previous_code_block = ""
+        if previous_chunk_code:
+            code = previous_chunk_code
+            if len(code) > 45000:
+                code = code[:45000] + "\n-- ... (truncated)"
+            previous_code_block = f"""
+Your previous attempt is below. START FROM IT: keep every declaration that is
+not implicated in the errors exactly as written, and change only what is needed
+to fix the reported errors. Do not re-derive or restyle unaffected code. Return
+the full corrected file.
+
+```lean
+{code}
+```
+"""
         retry_block = f"""
 
 Previous generated Lean attempt for this same chunk failed. Do not change the
@@ -1567,7 +1673,31 @@ Previous Lean/audit output:
 ```text
 {previous_lean_error[-12000:]}
 ```
+{previous_code_block}"""
+    audit_history_block = ""
+    if audit_history:
+        audit_history_block = f"""
+
+Earlier statement-alignment audit rejections for nodes in this chunk (possibly
+from previous attempts or previous chunk numbers). The auditor WILL reject the
+same patterns again. Your new Lean must address these complaints directly. In
+particular, never satisfy a correctness field with a tautology (`rfl` against a
+definition you introduced for that purpose), an identity implication
+(`P -> P`), or by assuming the conclusion as an input field of an
+oracle-answer/witness structure.
+
+```text
+{audit_history[-8000:]}
+```
 """
+    unavailable_block = ""
+    if unavailable_imports:
+        unavailable_block = (
+            "\nUnavailable imports (no compiled .olean in this local build; NEVER import"
+            "\nthese, and avoid tactics/lemmas that require them):\n"
+            + "\n".join(f"- {item}" for item in sorted(unavailable_imports))
+            + "\n"
+        )
     target_set = set(target_labels)
     dependency_labels = [
         label
@@ -1631,7 +1761,7 @@ The script will compile:
 
 So your output should contain imports plus new declarations for this chunk. It
 must not repeat accepted declarations.
-{retry_block}
+{unavailable_block}{retry_block}{audit_history_block}
 
 Blueprint name: {name}
 
@@ -1668,14 +1798,24 @@ Relevant dependency source:
 """
 
 
-def _agent_refine_prompt(name: str, blueprint_source: str, lean_output: str, trial: int, paper_text: str) -> str:
+def _agent_refine_prompt(
+    name: str,
+    blueprint_source: str,
+    lean_output: str,
+    trial: int,
+    paper_text: str,
+    *,
+    escalation_note: str = "",
+) -> str:
     paper_block = f"\nOriginal paper context:\n<paper>\n{paper_text}\n</paper>\n" if paper_text else ""
+    escalation_block = f"\nIMPORTANT: {escalation_note}\n" if escalation_note else ""
     return f"""TASK: REFINE-BLUEPRINT-FROM-LEAN-FAILURE
 
 Trial {trial} failed when Lean checked a disposable implementation generated
 from the current blueprint.
 
 You are the blueprint author. Fix the blueprint, not the Lean implementation.
+{escalation_block}
 
 Rules:
 - Edit only `blueprints/{name}/blueprint/src/` and `blueprints/{name}/meta.yml`
@@ -1711,12 +1851,22 @@ Lean critic output:
 """
 
 
-def _api_refine_prompt(name: str, blueprint_source: str, lean_output: str, trial: int, paper_text: str) -> str:
+def _api_refine_prompt(
+    name: str,
+    blueprint_source: str,
+    lean_output: str,
+    trial: int,
+    paper_text: str,
+    *,
+    escalation_note: str = "",
+) -> str:
     paper_block = f"\nOriginal paper context:\n<paper>\n{paper_text}\n</paper>\n" if paper_text else ""
+    escalation_block = f"\nIMPORTANT: {escalation_note}\n" if escalation_note else ""
     return f"""TASK: REFINE-BLUEPRINT-CONTENT-TEX
 
 Trial {trial} failed when Lean checked a disposable implementation generated
 from the current blueprint.
+{escalation_block}
 
 Return exactly one JSON object:
 {{
@@ -1826,6 +1976,8 @@ def _load_existing_accepted_chunks(
         return accepted, next_number
 
     print("==> Continuing from existing generated Lean chunks", flush=True)
+    manifest = _read_chunk_manifest(name)
+    current_fingerprints_all = _node_fingerprints(validation_nodes)
     for index, path in enumerate(chunk_paths):
         match = re.fullmatch(r"Chunk(\d+)\.lean", path.name)
         if not match:
@@ -1833,6 +1985,44 @@ def _load_existing_accepted_chunks(
         chunk_number = int(match.group(1))
         module_name, _module_path = _chunk_module(name, chunk_number)
         code = path.read_text(encoding="utf-8")
+
+        # Fast path: the manifest proves this exact code already passed Lean and
+        # the alignment audit against blueprint nodes whose TeX is unchanged, so
+        # re-running either would recompute a known verdict. Accept directly.
+        entry = manifest.get(path.name)
+        if (
+            entry is not None
+            and entry.get("labels")
+            and path.with_suffix(".olean").is_file()
+            and entry.get("sha256") == _file_sha256(path)
+            and all(
+                label in validation_nodes
+                and current_fingerprints_all.get(label) == fingerprint
+                for label, fingerprint in (entry.get("fingerprints") or {}).items()
+            )
+            and set(entry.get("fingerprints") or {}) == set(entry["labels"])
+        ):
+            imports, body = _split_lean_imports_and_body(code)
+            imports = [item for item in imports if not item.startswith("import AutoBlueprint.Generated.")]
+            accepted.append(
+                AcceptedChunk(
+                    labels=list(entry["labels"]),
+                    imports=imports,
+                    body=body,
+                    fingerprints=dict(entry["fingerprints"]),
+                    module=module_name,
+                    path=path,
+                    signatures=_decl_signatures(code),
+                )
+            )
+            next_number = chunk_number + 1
+            print(
+                f"  {path.relative_to(REPO_ROOT)} unchanged since acceptance (manifest); "
+                "skipping re-check",
+                flush=True,
+            )
+            continue
+
         decls = _lean_declarations(code)
         labels = [
             label
@@ -1892,6 +2082,7 @@ def _load_existing_accepted_chunks(
                 artifact.unlink()
             except FileNotFoundError:
                 pass
+    _write_chunk_manifest(name, accepted)
     if accepted:
         accepted_labels, _imports, _signatures = _accepted_state(accepted)
         partial = _standalone_accepted_code(accepted)
@@ -2025,6 +2216,13 @@ def main(argv: list[str] | None = None) -> int:
         chunk_number = 1
     accepted_labels, accepted_imports, accepted_signatures = _accepted_state(accepted_chunks)
     repair_trials = 0
+    # Audit rejections per blueprint label. Survives chunk renumbering so a
+    # regeneration of the same node after a (possibly no-op) blueprint repair
+    # still sees what the auditor rejected last time.
+    rejection_history: dict[str, list[str]] = {}
+    # Import lines discovered to have no compiled .olean locally; fed back into
+    # every later generation prompt so the model stops importing them.
+    unavailable_imports: set[str] = set()
 
     while True:
         print(
@@ -2094,6 +2292,7 @@ def main(argv: list[str] | None = None) -> int:
         report_lines.append(f"- scheduler difficulty: `{difficulty_summary}`")
         critic_output = ""
         last_attempt_kind = "lean-generation"
+        last_chunk_code = ""
         for lean_try in range(1, LEAN_GENERATION_RETRIES + 1):
             print(
                 f"==> Chunk {chunk_number}, Lean attempt "
@@ -2101,6 +2300,11 @@ def main(argv: list[str] | None = None) -> int:
                 "(read-only model call; Lean check runs locally afterwards)",
                 flush=True,
             )
+            history_snippets: list[str] = []
+            for label in target_labels:
+                for snippet in rejection_history.get(label, [])[-2:]:
+                    if snippet not in history_snippets:
+                        history_snippets.append(snippet)
             try:
                 lean_result = gen_runner.run(
                     _chunk_lean_prompt(
@@ -2113,6 +2317,9 @@ def main(argv: list[str] | None = None) -> int:
                         accepted_imports,
                         library_context=library_context,
                         previous_lean_error=critic_output if last_attempt_kind == "lean-generation" else "",
+                        previous_chunk_code=last_chunk_code if last_attempt_kind == "lean-generation" else "",
+                        audit_history="\n\n".join(history_snippets),
+                        unavailable_imports=sorted(unavailable_imports),
                     ),
                     cwd=REPO_ROOT,
                     retries=0,
@@ -2138,7 +2345,35 @@ def main(argv: list[str] | None = None) -> int:
             module_path.parent.mkdir(parents=True, exist_ok=True)
             lean_path = module_path
             chunk_code = _extract_lean_code(lean_result.text).rstrip() + "\n"
+            chunk_import_lines, _chunk_body = _split_lean_imports_and_body(chunk_code)
+            missing_imports = _missing_olean_imports(chunk_import_lines)
+            removed_imports_note = ""
+            if missing_imports:
+                # Deterministic pre-check: these imports would fail Lean with
+                # "object file ... does not exist" after a full (expensive)
+                # generation. Strip them, let Lean judge the rest, and remember
+                # them so later prompts forbid them up front.
+                unavailable_imports.update(missing_imports)
+                print(
+                    "  removed import(s) with no compiled .olean in the local build: "
+                    + ", ".join(item[len("import "):] for item in missing_imports),
+                    flush=True,
+                )
+                report_lines.append(
+                    f"  - removed unavailable import(s): `{', '.join(missing_imports)}`"
+                )
+                missing_set = set(missing_imports)
+                chunk_code = "\n".join(
+                    line for line in chunk_code.splitlines() if line.strip() not in missing_set
+                ).rstrip() + "\n"
+                removed_imports_note = (
+                    "\n\nNote: the following imports were removed before compiling because "
+                    "their modules have no compiled .olean in the local Mathlib build. Do "
+                    "not import them; avoid tactics/lemmas that need them: "
+                    + ", ".join(missing_imports)
+                )
             lean_code, new_imports, new_body = _compose_module_file(accepted_imports, chunk_code)
+            last_chunk_code = chunk_code
             lean_path.write_text(lean_code, encoding="utf-8")
             scratch_attempt = trial_dir / f"chunk_{chunk_number:02d}_attempt_{lean_try:02d}.lean"
             scratch_attempt.write_text(lean_code, encoding="utf-8")
@@ -2171,6 +2406,11 @@ def main(argv: list[str] | None = None) -> int:
                     attempt = audit_failure
                     critic_output = attempt.output
                     last_attempt_kind = attempt.kind
+                    rejected_for_history = (
+                        set(attempt.rejected_labels or []) & set(target_labels)
+                    ) or set(target_labels)
+                    for label in rejected_for_history:
+                        rejection_history.setdefault(label, []).append(critic_output[-2500:])
                     print(
                         f"  statement alignment audit failed ({attempt.kind}); last lines:",
                         flush=True,
@@ -2237,6 +2477,7 @@ def main(argv: list[str] | None = None) -> int:
                                                 signatures=pruned.signatures,
                                             )
                                         )
+                                        _write_chunk_manifest(args.name, accepted_chunks)
                                         accepted_labels, accepted_imports, accepted_signatures = (
                                             _accepted_state(accepted_chunks)
                                         )
@@ -2298,6 +2539,7 @@ def main(argv: list[str] | None = None) -> int:
                         signatures=signatures,
                     )
                 )
+                _write_chunk_manifest(args.name, accepted_chunks)
                 accepted_labels, accepted_imports, accepted_signatures = _accepted_state(accepted_chunks)
                 partial = _standalone_accepted_code(accepted_chunks)
                 partial_path = trial_dir / "partial_formalization.lean"
@@ -2314,7 +2556,7 @@ def main(argv: list[str] | None = None) -> int:
                 chunk_number += 1
                 break
 
-            critic_output = attempt.output
+            critic_output = attempt.output + removed_imports_note
             last_attempt_kind = attempt.kind
             print(
                 f"  lean failed on chunk {chunk_number}, attempt {lean_try} "
@@ -2353,56 +2595,93 @@ def main(argv: list[str] | None = None) -> int:
         if repair_trials >= args.max_trials:
             break
 
-        repair_trials += 1
-        print(
-            f"==> Blueprint repair {repair_trials}/{args.max_trials} "
-            f"from chunk {chunk_number} Lean/audit output",
-            flush=True,
-        )
-        if runner.mode == "agent":
-            repair = runner.run(
-                _agent_refine_prompt(args.name, blueprint_source, critic_output, repair_trials, paper_text),
-                cwd=REPO_ROOT,
-                retries=0,
+        escalation_note = ""
+        while True:
+            repair_trials += 1
+            print(
+                f"==> Blueprint repair {repair_trials}/{args.max_trials} "
+                f"from chunk {chunk_number} Lean/audit output",
+                flush=True,
             )
-            print(f"  blueprint repair finished ({repair.duration_s:.0f}s)", flush=True)
-        else:
-            refine_result = runner.run(
-                _api_refine_prompt(args.name, blueprint_source, critic_output, repair_trials, paper_text),
-                cwd=REPO_ROOT,
-                retries=1,
-            )
-            try:
-                _write_api_refinement(args.name, refine_result.text)
-            except ValueError as exc:
-                report_lines.append("## API blueprint repair returned invalid JSON/content")
-                report_lines.append("")
-                report_lines.append("```text")
-                report_lines.append(str(exc))
-                report_lines.append("")
-                report_lines.append(refine_result.text[-4000:])
-                report_lines.append("```")
+            if runner.mode == "agent":
+                repair = runner.run(
+                    _agent_refine_prompt(
+                        args.name,
+                        blueprint_source,
+                        critic_output,
+                        repair_trials,
+                        paper_text,
+                        escalation_note=escalation_note,
+                    ),
+                    cwd=REPO_ROOT,
+                    retries=0,
+                )
+                print(f"  blueprint repair finished ({repair.duration_s:.0f}s)", flush=True)
+            else:
+                refine_result = runner.run(
+                    _api_refine_prompt(
+                        args.name,
+                        blueprint_source,
+                        critic_output,
+                        repair_trials,
+                        paper_text,
+                        escalation_note=escalation_note,
+                    ),
+                    cwd=REPO_ROOT,
+                    retries=1,
+                )
+                try:
+                    _write_api_refinement(args.name, refine_result.text)
+                except ValueError as exc:
+                    report_lines.append("## API blueprint repair returned invalid JSON/content")
+                    report_lines.append("")
+                    report_lines.append("```text")
+                    report_lines.append(str(exc))
+                    report_lines.append("")
+                    report_lines.append(refine_result.text[-4000:])
+                    report_lines.append("```")
+                    report = _write_report(args.name, report_lines)
+                    print(f"API blueprint repair failed: {exc}", flush=True)
+                    print(f"Report written to {report.relative_to(REPO_ROOT)}")
+                    return 1
+
+            repaired_validation = validate_blueprint(REPO_ROOT, args.name)
+            if not repaired_validation.ok:
+                print_result(repaired_validation)
+                report_lines.append("## Blueprint repair produced invalid structure")
+                report_lines.extend(f"- {error}" for error in repaired_validation.errors)
                 report = _write_report(args.name, report_lines)
-                print(f"API blueprint repair failed: {exc}", flush=True)
                 print(f"Report written to {report.relative_to(REPO_ROOT)}")
                 return 1
 
-        repaired_validation = validate_blueprint(REPO_ROOT, args.name)
-        if not repaired_validation.ok:
-            print_result(repaired_validation)
-            report_lines.append("## Blueprint repair produced invalid structure")
-            report_lines.extend(f"- {error}" for error in repaired_validation.errors)
-            report = _write_report(args.name, report_lines)
-            print(f"Report written to {report.relative_to(REPO_ROOT)}")
-            return 1
-
-        repaired_fingerprints = _node_fingerprints(repaired_validation.nodes)
-        changed = {
-            label
-            for label, before in current_fingerprints.items()
-            if repaired_fingerprints.get(label) != before
-        }
-        changed |= {label for label in repaired_fingerprints if label not in current_fingerprints}
+            repaired_fingerprints = _node_fingerprints(repaired_validation.nodes)
+            changed = {
+                label
+                for label, before in current_fingerprints.items()
+                if repaired_fingerprints.get(label) != before
+            }
+            changed |= {label for label in repaired_fingerprints if label not in current_fingerprints}
+            if changed or escalation_note or repair_trials >= args.max_trials:
+                break
+            # The repair call ran but left every node's TeX untouched — the
+            # audit will reject the exact same content again. Escalate once
+            # with an explicit instruction instead of regenerating blind.
+            print(
+                "  blueprint repair did not change parsed node text; escalating once "
+                "with explicit instructions",
+                flush=True,
+            )
+            report_lines.append("- blueprint repair was a no-op; escalated with explicit instructions")
+            escalation_note = (
+                "Your previous repair attempt changed NOTHING in the parsed node text — "
+                "the validator found zero modified nodes, so the audit will reject the "
+                "same content again. You MUST materially edit the TeX of the rejected "
+                "node(s) this time: add the missing concrete semantics, hypotheses, "
+                "parameters, or split the node into smaller nodes. If you believe the "
+                "blueprint is already correct and the Lean generation is at fault, "
+                "still make the node text more explicit about the required statement "
+                "shape so the generator cannot satisfy it with a tautology."
+            )
         invalidated = _dependency_descendants(repaired_validation.nodes, changed) if changed else set()
         before_count = len(accepted_chunks)
         kept_chunks: list[AcceptedChunk] = []
@@ -2419,6 +2698,7 @@ def main(argv: list[str] | None = None) -> int:
                 except FileNotFoundError:
                     pass
         accepted_chunks = kept_chunks
+        _write_chunk_manifest(args.name, accepted_chunks)
         accepted_labels, accepted_imports, accepted_signatures = _accepted_state(accepted_chunks)
         dropped = before_count - len(accepted_chunks)
         if changed:
