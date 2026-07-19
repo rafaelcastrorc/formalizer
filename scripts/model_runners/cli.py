@@ -125,19 +125,19 @@ class ClaudeCodeRunner(ModelRunner):
         watchdog.daemon = True
         watchdog.start()
 
-        start = time.time()
+        start = time.monotonic()
         last_output = [start]
         heartbeat_stop = threading.Event()
 
         def _heartbeat() -> None:
             while not heartbeat_stop.wait(15):
-                if time.time() - last_output[0] >= 60:
-                    elapsed = int(time.time() - start)
+                if time.monotonic() - last_output[0] >= 60:
+                    elapsed = int(time.monotonic() - start)
                     print(
                         f"  [claude] still working... {elapsed // 60}m{elapsed % 60:02d}s elapsed",
                         flush=True,
                     )
-                    last_output[0] = time.time()
+                    last_output[0] = time.monotonic()
 
         threading.Thread(target=_heartbeat, daemon=True).start()
 
@@ -152,7 +152,7 @@ class ClaudeCodeRunner(ModelRunner):
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                last_output[0] = time.time()
+                last_output[0] = time.monotonic()
                 etype = event.get("type")
                 if etype == "system" and event.get("subtype") == "init":
                     print(f"  [claude] session started (model {event.get('model', '?')})", flush=True)
@@ -179,7 +179,7 @@ class ClaudeCodeRunner(ModelRunner):
             raise RunnerError(f"claude CLI exit {returncode}: {tail}")
         if not final_text:
             raise RunnerError("claude CLI returned empty output")
-        elapsed = int(time.time() - start)
+        elapsed = int(time.monotonic() - start)
         print(f"  [claude] finished in {elapsed // 60}m{elapsed % 60:02d}s", flush=True)
         return RunResult(text=final_text, raw=result_event)
 
