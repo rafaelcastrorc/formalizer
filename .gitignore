@@ -25,6 +25,10 @@ notes/
 
 # Disposable Lean attempts and refinement reports.
 .auto-blueprint/
+AutoBlueprint/Generated/
+
+# Local Lean/Lake build and dependency cache. Commit lake-manifest.json, not .lake/.
+.lake/
 
 # Cloudflare Wrangler local account/project cache
 .wrangler/

@@ -11,9 +11,11 @@ Two runner modes matter:
 * ``mode = "agent"``: the runner may edit files in the repo.
 * ``mode = "api"``: the runner only returns text; Python code writes files.
 
-Constructing any runner with ``readonly=True`` guarantees it cannot change the
-repo or run commands: agent backends restrict their tools/sandbox accordingly,
-and API backends already satisfy this by construction.
+Constructing any runner with ``readonly=True`` means the caller is asking for a
+read-only generation pass. API backends satisfy this by construction. Local
+agent backends apply the strongest restriction their CLI exposes; some CLIs can
+still execute read-only shell commands inside a sandbox, so callers must still
+use external timeouts and audits.
 """
 from __future__ import annotations
 

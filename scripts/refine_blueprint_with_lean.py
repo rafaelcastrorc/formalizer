@@ -4,28 +4,36 @@
 This is the author/critic loop:
 
 1. validate the current blueprint;
-2. ask a model to generate a disposable Lean file from the blueprint only;
-3. run Lean through this repo's Lake project;
-4. if Lean fails, ask the model to fix the blueprint, not the Lean file;
-5. repeat until Lean passes or ``--max-trials`` is exhausted.
+2. choose the next dependency-closed chunk from the blueprint ``\\uses`` graph;
+3. ask a read-only model call to generate disposable Lean for that chunk only,
+   while still showing the whole blueprint as context;
+4. run Lean on accepted chunk context plus the new chunk;
+5. audit that the compiled Lean statements actually align with the target nodes;
+6. if Lean/audit fails because the generated Lean is malformed or mistranslated,
+   retry Lean generation for the same chunk;
+7. if Lean/audit fails because the blueprint is missing mathematical content, ask
+   a second model call to fix the blueprint, not the Lean file;
+8. after a blueprint repair, revalidate and replan chunks from the repaired
+   blueprint;
+9. publish only when every chunk has passed.
 
 Lean code is not the source of truth here. The generated files under
 ``.auto-blueprint/formalization/`` are test artifacts and are overwritten across
 trials. A failed proof should cause better blueprint statements, hypotheses,
-dependencies, or intermediate lemmas.
+dependencies, or intermediate lemmas. Errors from trial N are used to repair the
+blueprint before the next chunk pass generates fresh Lean.
 """
 from __future__ import annotations
 
 import argparse
-<<<<<<< Updated upstream
-=======
 import contextlib
 import hashlib
 import json
 import os
->>>>>>> Stashed changes
 import re
 import shlex
+import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -33,6 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from generate_blueprint import _extract_json, read_paper
+from lean_preflight import check_lean_environment, default_lean_command
 from model_runners import RunnerError, get_runner
 from validate_blueprint import Node, print_result, validate_blueprint
 
@@ -41,7 +50,62 @@ REPO_ROOT = SCRIPTS_DIR.parent
 SKILL_PATH = REPO_ROOT / ".claude" / "skills" / "paper-to-blueprint" / "SKILL.md"
 SCRATCH_DIR = REPO_ROOT / ".auto-blueprint" / "formalization"
 PUBLISHED_LEAN_NAME = "formalization.lean"
+LEAN_GENERATION_RETRIES = 5
+AUTO_CHUNK_SIZE = 0
+DEFAULT_AUTO_CHUNK_LIMIT = 8
+MEDIUM_NODES_PER_CHUNK = 3
+CURRENT_LOG_PATH: Path | None = None
+MAX_LIBRARY_CANDIDATES = 40
+MIN_LIBRARY_CANDIDATES_BEFORE_MODEL_TERMS = 8
+LEAN_IDIOM_CHEATSHEET = """\
+- Finite sums use `open scoped BigOperators`; common rewrites include
+  `Finset.sum_mul`, `Finset.mul_sum`, `Finset.sum_add_distrib`, and
+  `Finset.sum_congr`.
+- For finite functions `I -> R`, prefer explicit definitions like
+  `∑ i : I, v i * w i` when inner-product notation is not essential.
+- Continuity proofs often compose existing continuous maps; useful lemmas and
+  tactics include `continuous_const`, `continuous_id`, `.add`, `.sub`, `.mul`,
+  `.div_const`, `.const_mul`, `.min`, `.max`, and `continuity`.
+- Real square/root goals often use `sq_nonneg`, `sq`, `Real.sq_sqrt`, and
+  `Real.sqrt_sq_eq_abs`; check hypotheses before using nonneg-specific lemmas.
+- `EuclideanSpace R (Fin n)` is a function type indexed by `Fin n`; avoid
+  searching for bespoke vector APIs when pointwise functions or finite sums are
+  enough for the blueprint statement.
+- Avoid blanket imports. If a candidate snippet names the needed theorem, import
+  the candidate's listed module directly.
+"""
 FORBIDDEN_LEAN_PLACEHOLDERS = re.compile(r"\b(sorry|admit)\b|by\s*\?")
+FORBIDDEN_ASSUMPTIONS = re.compile(r"^\s*(axiom|constant|opaque)\s+([A-Za-z_][A-Za-z0-9_'.]*)", re.MULTILINE)
+FORBIDDEN_BLUEPRINT_STUBS = re.compile(
+    r"\b(?:"
+    r"[A-Za-z_][A-Za-z0-9_'.]*(?:_from_blueprint|_from_paper|_from_the_paper|FromBlueprint|FromPaper)"
+    r"|[A-Z][A-Za-z0-9_'.]*_\d{4}_[A-Za-z0-9_'.]*"
+    r")\b"
+)
+LEAN_DECL_START_RE = re.compile(
+    r"^\s*(?:noncomputable\s+)?(?:private\s+)?(?:protected\s+)?"
+    r"(theorem|lemma|def|abbrev|structure|inductive|class)\s+"
+    r"([A-Za-z_][A-Za-z0-9_'.]*)\b"
+)
+VACUOUS_TRUE_EXAMPLES = re.compile(r"^\s*example[\s\S]*?:\s*True\s*:=", re.MULTILINE)
+PLACEHOLDER_NAME_RE = re.compile(r"(?:^|_)(?:stub|gap|todo|sorry|trivial)(?:_|$)", re.IGNORECASE)
+
+LEAN_GENERATION_ERROR_PATTERNS = (
+    "unexpected token",
+    "unknown constant",
+    "unknown identifier",
+    "unknown module",
+    "unknown namespace",
+    "function expected",
+    "type mismatch",
+    "application type mismatch",
+    "invalid projection",
+    "failed to synthesize",
+    "invalid field notation",
+    "ambiguous",
+    "object file",
+    ".olean",
+)
 
 
 @dataclass
@@ -51,10 +115,110 @@ class LeanAttempt:
     stdout: str = ""
     stderr: str = ""
     reason: str = ""
+    kind: str = "lean"
+    rejected_labels: set[str] | None = None
 
     @property
     def output(self) -> str:
         return "\n".join(part for part in (self.reason, self.stdout, self.stderr) if part).strip()
+
+
+@dataclass
+class LeanDecl:
+    kind: str
+    name: str
+    line: int
+    text: str
+
+
+@dataclass
+class LibraryCandidate:
+    library: str
+    module: str
+    declaration: str
+    file: Path
+    line: int
+    matched: str
+    snippet: str = ""
+
+
+@dataclass
+class AcceptedChunk:
+    labels: list[str]
+    imports: list[str]
+    body: str
+    fingerprints: dict[str, str]
+    module: str
+    path: Path
+    signatures: str
+
+
+@dataclass
+class PrunedChunk:
+    labels: list[str]
+    lean_code: str
+    imports: list[str]
+    body: str
+    signatures: str
+
+
+class TeeStream:
+    """Mirror script output to the terminal and a persistent run log."""
+
+    def __init__(self, terminal, log_file, *, started_at: float):
+        self.terminal = terminal
+        self.log_file = log_file
+        self.started_at = started_at
+        self.at_line_start = True
+
+    def write(self, text: str) -> int:
+        for chunk in text.splitlines(keepends=True):
+            if self.at_line_start and chunk:
+                prefix = f"[+{int(time.monotonic() - self.started_at):06d}s] "
+                self.terminal.write(prefix)
+                self.log_file.write(prefix)
+            self.terminal.write(chunk)
+            self.log_file.write(chunk)
+            self.at_line_start = chunk.endswith("\n")
+        return len(text)
+
+    def flush(self) -> None:
+        self.terminal.flush()
+        self.log_file.flush()
+
+
+def _run_log_path(name: str) -> Path:
+    out_dir = SCRATCH_DIR / name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return out_dir / f"run-{stamp}.log"
+
+
+def _clear_stale_attempt_artifacts(name: str) -> int:
+    """Remove old model-generated Lean attempts before a fresh refinement run.
+
+    Timestamped run logs are intentionally kept for human debugging, but stale
+    Lean attempts and reports are deleted so a new agent run does not have
+    previous failed implementations sitting in the obvious scratch location.
+    """
+    out_dir = SCRATCH_DIR / name
+    if not out_dir.exists():
+        return 0
+    patterns = (
+        "chunk_*_attempt_*.lean",
+        "trial_*.lean",
+        "partial_formalization.lean",
+        "assembled_formalization.lean",
+        "report.md",
+    )
+    removed = 0
+    for pattern in patterns:
+        for path in out_dir.glob(pattern):
+            if not path.is_file():
+                continue
+            path.unlink()
+            removed += 1
+    return removed
 
 
 def _read_blueprint_source(name: str) -> str:
@@ -88,8 +252,6 @@ def _node_summary(nodes: dict[str, Node]) -> str:
     return "\n".join(lines)
 
 
-<<<<<<< Updated upstream
-=======
 def _node_order(nodes: dict[str, Node]) -> list[str]:
     return [
         label
@@ -918,40 +1080,402 @@ def _deterministic_audit_kind(issues: list[str]) -> str:
     return "lean-generation"
 
 
->>>>>>> Stashed changes
 def _extract_lean_code(text: str) -> str:
     fence = re.search(r"```(?:lean|lean4)?\s*([\s\S]*?)```", text)
     return (fence.group(1) if fence else text).strip()
 
 
+def _split_lean_imports_and_body(code: str) -> tuple[list[str], str]:
+    imports: list[str] = []
+    body_lines: list[str] = []
+    for line in code.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("import "):
+            imports.append(stripped)
+            continue
+        if stripped == "set_option autoImplicit false":
+            continue
+        body_lines.append(line)
+    body = "\n".join(body_lines).strip()
+    return imports, body
+
+
+def _compose_lean_file(imports: list[str], accepted_bodies: list[str], new_code: str = "") -> str:
+    new_imports, new_body = _split_lean_imports_and_body(new_code)
+    all_imports: list[str] = []
+    seen_imports: set[str] = set()
+    for item in [*imports, *new_imports]:
+        if item not in seen_imports:
+            all_imports.append(item)
+            seen_imports.add(item)
+    if not all_imports:
+        all_imports = ["import Mathlib.Data.Real.Basic"]
+
+    body_parts = [part.strip() for part in [*accepted_bodies, new_body] if part.strip()]
+    return "\n".join(
+        [
+            *all_imports,
+            "",
+            "set_option autoImplicit false",
+            "set_option linter.unusedVariables false",
+            "",
+            *body_parts,
+            "",
+        ]
+    )
+
+
+def _compose_module_file(module_imports: list[str], new_code: str = "") -> tuple[str, list[str], str]:
+    new_imports, new_body = _split_lean_imports_and_body(new_code)
+    all_imports: list[str] = []
+    seen_imports: set[str] = set()
+    for item in [*module_imports, *new_imports]:
+        if item not in seen_imports:
+            all_imports.append(item)
+            seen_imports.add(item)
+    if not all_imports:
+        all_imports = ["import Mathlib.Data.Real.Basic"]
+    code = "\n".join(
+        [
+            *all_imports,
+            "",
+            "set_option autoImplicit false",
+            "set_option linter.unusedVariables false",
+            "",
+            new_body.strip(),
+            "",
+        ]
+    )
+    return code, new_imports, new_body
+
+
+def _prune_chunk_to_labels(
+    *,
+    module_imports: list[str],
+    original_chunk_code: str,
+    target_labels: list[str],
+    keep_labels: list[str],
+) -> PrunedChunk | None:
+    """Build a module body that exposes only the kept blueprint declarations.
+
+    Helpers are retained because accepted declarations may depend on them, but
+    public declarations for rejected/downstream target nodes are removed. The
+    caller must still compile and audit the pruned module before accepting it.
+    """
+    keep_set = set(keep_labels)
+    target_names = {_lean_name(label): label for label in target_labels}
+    decls = _lean_declarations(original_chunk_code)
+    if any(_lean_name(label) not in decls for label in keep_labels):
+        return None
+
+    lines = original_chunk_code.splitlines()
+    starts: list[tuple[int, re.Match[str]]] = []
+    for idx, line in enumerate(lines):
+        match = LEAN_DECL_START_RE.match(line)
+        if match:
+            starts.append((idx, match))
+    if not starts:
+        return None
+
+    preamble = "\n".join(lines[: starts[0][0]]).strip()
+    kept_parts: list[str] = []
+    if preamble:
+        kept_parts.append(preamble)
+    for pos, (start_idx, match) in enumerate(starts):
+        end_idx = starts[pos + 1][0] if pos + 1 < len(starts) else len(lines)
+        decl_name = match.group(2)
+        target_label = target_names.get(decl_name)
+        if target_label is not None and target_label not in keep_set:
+            continue
+        kept_parts.append("\n".join(lines[start_idx:end_idx]).strip())
+
+    pruned_chunk_code = "\n\n".join(part for part in kept_parts if part).strip() + "\n"
+    lean_code, new_imports, new_body = _compose_module_file(module_imports, pruned_chunk_code)
+    return PrunedChunk(
+        labels=list(keep_labels),
+        lean_code=lean_code,
+        imports=new_imports,
+        body=new_body,
+        signatures=_decl_signatures(lean_code),
+    )
+
+
 def _default_lean_command() -> list[str]:
-    if not (REPO_ROOT / "lean-toolchain").is_file() or not (REPO_ROOT / "lakefile.lean").is_file():
-        raise FileNotFoundError(
-            "Lean is not declared for this repo. Expected lean-toolchain and lakefile.lean."
+    return default_lean_command(REPO_ROOT)
+
+
+def _lean_env() -> dict[str, str]:
+    env = os.environ.copy()
+    existing = env.get("LEAN_PATH", "")
+    paths = [str(REPO_ROOT)]
+    if existing:
+        paths.append(existing)
+    env["LEAN_PATH"] = os.pathsep.join(paths)
+    return env
+
+
+def _audit_lean_code(code: str) -> list[str]:
+    """Reject Lean that compiles by cheating instead of implementing nodes."""
+    issues: list[str] = []
+    if FORBIDDEN_LEAN_PLACEHOLDERS.search(code):
+        issues.append("contains a forbidden placeholder (`sorry`, `admit`, or `by ?`)")
+    if "set_option autoImplicit true" in code:
+        issues.append("enables `autoImplicit`; generated Lean must keep unknown names explicit")
+    if "set_option autoImplicit false" not in code:
+        issues.append("missing `set_option autoImplicit false`")
+    bad = [f"{kind} {name}" for kind, name in FORBIDDEN_ASSUMPTIONS.findall(code)]
+    if bad:
+        shown = ", ".join(bad[:12])
+        more = "" if len(bad) <= 12 else f", ... ({len(bad)} total)"
+        issues.append(
+            "uses top-level assumptions instead of implementations: "
+            f"{shown}{more}"
         )
-    if not any((Path.home() / ".elan" / "bin" / exe).is_file() for exe in ("lake", "lake.exe")):
-        # lake may still be on PATH elsewhere, checked below; this message keeps
-        # the common local setup failure direct.
-        pass
-    return ["lake", "env", "lean"]
+    invented = sorted(set(FORBIDDEN_BLUEPRINT_STUBS.findall(code)))
+    if invented:
+        shown = ", ".join(invented[:12])
+        more = "" if len(invented) <= 12 else f", ... ({len(invented)} total)"
+        issues.append(
+            "calls invented paper/blueprint helper declarations instead of proving "
+            f"the nodes: {shown}{more}"
+        )
+    decls = _lean_declarations(code)
+    vacuous = [
+        f"{decl.kind} {decl.name}"
+        for decl in decls.values()
+        if decl.kind in {"theorem", "lemma"} and re.search(r":\s*True\s*:=", decl.text)
+    ]
+    example_count = len(VACUOUS_TRUE_EXAMPLES.findall(code))
+    if vacuous or example_count:
+        shown_parts = vacuous[:12]
+        if example_count:
+            shown_parts.append(f"{example_count} example(s)")
+        shown = ", ".join(shown_parts)
+        total = len(vacuous) + example_count
+        more = "" if total <= 12 else f", ... ({total} total)"
+        issues.append(
+            "proves only `True` instead of the blueprint's mathematical claims: "
+            f"{shown}{more}"
+        )
+    return issues
+
+
+def _is_lean_generation_issue(output: str) -> bool:
+    low = output.lower()
+    return any(pattern in low for pattern in LEAN_GENERATION_ERROR_PATTERNS)
+
+
+def _statement_audit_prompt(
+    name: str,
+    nodes: dict[str, Node],
+    blueprint_blocks: dict[str, str],
+    decls: dict[str, LeanDecl],
+    paper_text: str,
+) -> str:
+    pairs: list[str] = []
+    for label, node in sorted(nodes.items(), key=lambda item: (item[1].file, item[1].line, item[0])):
+        if node.mathlibok:
+            continue
+        lean_name = _lean_name(label)
+        decl = decls.get(lean_name)
+        pairs.append(
+            f"## Node {label}\n"
+            f"- kind: {node.kind}\n"
+            f"- expected Lean declaration name: {lean_name}\n"
+            f"- uses: {', '.join(sorted(node.uses)) or '(none)'}\n"
+            f"\nBlueprint text:\n```tex\n{blueprint_blocks.get(label, '')[:5000]}\n```\n"
+            f"\nGenerated Lean declaration:\n```lean\n{decl.text[:5000] if decl else '(missing)'}\n```\n"
+        )
+    paper_block = f"\nOriginal paper context:\n<paper>\n{paper_text[:20000]}\n</paper>\n" if paper_text else ""
+    return f"""TASK: STATEMENT-ALIGNMENT-AUDIT
+
+You are the publication gate for Auto-Blueprint.
+
+Lean has already accepted the generated file, but that is not enough. Decide
+whether each generated Lean declaration actually formalizes the corresponding
+blueprint node without weakening, erasing parameters, replacing concrete
+claims by abstract placeholders, or changing the mathematical content.
+
+Return exactly one JSON object:
+{{
+  "accepted": true,
+  "classification": "accepted",
+  "issues": []
+}}
+
+If anything should block publication, return:
+{{
+  "accepted": false,
+  "classification": "lean_translation_issue" | "blueprint_issue",
+  "issues": [
+    {{
+      "node": "label",
+      "severity": "reject",
+      "reason": "specific reason"
+    }}
+  ]
+}}
+
+Use `lean_translation_issue` only when the blueprint is already concrete enough
+and the generated Lean simply mistranslated it. Use `blueprint_issue` when a
+faithful Lean implementation would require making the blueprint more concrete:
+adding missing semantics, hypotheses, parameters, promised behavior,
+input/output relations, or replacing abstract problem tags by real definitions.
+
+Reject examples:
+- Lean statement is just `True`, a placeholder proposition, or an uninterpreted
+  problem tag when the blueprint gives concrete hypotheses/conclusions.
+- Lean declaration drops parameters, hypotheses, quantifiers, approximation
+  factors, complexity assumptions, or dependency requirements.
+- Lean declaration proves a different or much weaker theorem.
+- A required non-Mathlib node has no matching Lean declaration.
+
+Do not reject merely because the Lean proof is ugly. Judge statement alignment.
+
+Blueprint name: {name}
+{paper_block}
+Pairs to audit:
+{"\n\n".join(pairs)}
+"""
+
+
+BLUEPRINT_REPAIR_AUDIT_MARKERS = (
+    "abstract",
+    "behavior",
+    "branch",
+    "concrete",
+    "drops",
+    "dropped",
+    "erased",
+    "erases",
+    "erasing",
+    "missing",
+    "normalization",
+    "omits",
+    "omitted",
+    "omitting",
+    "placeholder",
+    "range hypothesis",
+    "range hypotheses",
+    "semantics",
+    "semantic",
+    "tag",
+    "too weak",
+    "too-weak",
+    "underspecified",
+    "vacuous",
+    "weaken",
+    "weakens",
+    "zeroTransformer",
+)
+
+
+def _alignment_failure_kind(classification: str, formatted_issues: list[str]) -> str:
+    """Route compiled-but-wrong Lean to either Lean retry or blueprint repair."""
+    if classification == "blueprint_issue":
+        return "blueprint"
+    text = "\n".join(formatted_issues).lower()
+    if any(marker.lower() in text for marker in BLUEPRINT_REPAIR_AUDIT_MARKERS):
+        return "blueprint"
+    return "lean-generation"
+
+
+def _run_statement_alignment_audit(
+    runner,
+    name: str,
+    nodes: dict[str, Node],
+    lean_path: Path,
+    paper_text: str,
+    *,
+    all_nodes: dict[str, Node] | None = None,
+) -> LeanAttempt | None:
+    """Return None when the compiled Lean is aligned enough to publish."""
+    code = lean_path.read_text(encoding="utf-8")
+    deterministic_issues = _deterministic_statement_audit(code, nodes, all_nodes)
+    if deterministic_issues:
+        rejected = set(nodes)
+        return LeanAttempt(
+            ok=False,
+            command=[],
+            reason="Statement alignment audit failed deterministic checks:\n- "
+            + "\n- ".join(deterministic_issues),
+            kind=_deterministic_audit_kind(deterministic_issues),
+            rejected_labels=rejected,
+        )
+
+    decls = _lean_declarations(code)
+    prompt = _statement_audit_prompt(
+        name,
+        nodes,
+        _node_tex_blocks(nodes),
+        decls,
+        paper_text,
+    )
+    result = runner.run(prompt, cwd=REPO_ROOT, retries=0)
+    try:
+        payload = _extract_json(result.text)
+    except ValueError as exc:
+        return LeanAttempt(
+            ok=False,
+            command=[],
+            reason=f"Statement alignment audit did not return valid JSON: {exc}\n\n{result.text[-4000:]}",
+            kind="lean-generation",
+        )
+
+    issues = payload.get("issues") or []
+    accepted = bool(payload.get("accepted")) and not any(
+        str(issue.get("severity", "")).lower() == "reject" for issue in issues if isinstance(issue, dict)
+    )
+    if accepted:
+        return None
+
+    formatted: list[str] = []
+    rejected_labels: set[str] = set()
+    for issue in issues if isinstance(issues, list) else []:
+        if not isinstance(issue, dict):
+            continue
+        node = str(issue.get("node") or "(unknown node)")
+        reason = str(issue.get("reason") or "no reason provided")
+        severity = str(issue.get("severity") or "reject")
+        formatted.append(f"{node} [{severity}]: {reason}")
+        if severity.lower() == "reject" and node in nodes:
+            rejected_labels.add(node)
+    if not formatted:
+        formatted.append(str(payload)[:4000])
+    if not rejected_labels:
+        rejected_labels = set(nodes)
+
+    classification = str(payload.get("classification") or "lean_translation_issue")
+    kind = _alignment_failure_kind(classification, formatted)
+    return LeanAttempt(
+        ok=False,
+        command=[],
+        reason="Statement alignment audit rejected the compiled Lean:\n- " + "\n- ".join(formatted),
+        kind=kind,
+        rejected_labels=rejected_labels,
+    )
 
 
 def _run_lean(path: Path, lean_command: list[str]) -> LeanAttempt:
     code = path.read_text(encoding="utf-8")
-    if FORBIDDEN_LEAN_PLACEHOLDERS.search(code):
+    audit_issues = _audit_lean_code(code)
+    if audit_issues:
         return LeanAttempt(
             ok=False,
             command=lean_command + [str(path)],
-            reason="Lean attempt contains a forbidden placeholder (`sorry`, `admit`, or `by ?`).",
+            reason="Lean attempt failed the correctness audit:\n- " + "\n- ".join(audit_issues),
+            kind="lean-generation",
         )
 
     try:
         proc = subprocess.Popen(
             lean_command + [str(path)],
             cwd=str(REPO_ROOT),
+            env=_lean_env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         raise FileNotFoundError(
@@ -967,7 +1491,10 @@ def _run_lean(path: Path, lean_command: list[str]) -> LeanAttempt:
         except subprocess.TimeoutExpired:
             elapsed = int(time.time() - start)
             if elapsed >= 600:
-                proc.kill()
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 stdout, stderr = proc.communicate()
                 return LeanAttempt(
                     ok=False,
@@ -975,28 +1502,99 @@ def _run_lean(path: Path, lean_command: list[str]) -> LeanAttempt:
                     stdout=stdout or "",
                     stderr=stderr or "",
                     reason="Lean check timed out after 600s.",
+                    kind="lean-generation",
                 )
             print(f"  lean still checking... {elapsed}s elapsed", flush=True)
 
+    combined = "\n".join(part for part in (stdout or "", stderr or "") if part)
     return LeanAttempt(
         ok=proc.returncode == 0,
         command=lean_command + [str(path)],
         stdout=stdout or "",
         stderr=stderr or "",
+        kind="lean-generation" if proc.returncode != 0 and _is_lean_generation_issue(combined) else "blueprint",
     )
 
 
-def _lean_prompt(name: str, blueprint_source: str, nodes: dict[str, Node]) -> str:
+def _compile_module_olean(path: Path, lean_command: list[str]) -> LeanAttempt:
+    """Compile an accepted generated module to .olean for later chunk imports."""
+    olean_path = path.with_suffix(".olean")
+    command = lean_command + ["-o", str(olean_path), str(path)]
+    try:
+        proc = subprocess.Popen(
+            command,
+            cwd=str(REPO_ROOT),
+            env=_lean_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        stdout, stderr = proc.communicate(timeout=600)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = proc.communicate()
+        return LeanAttempt(
+            ok=False,
+            command=command,
+            stdout=stdout or "",
+            stderr=stderr or "",
+            reason="Lean module object compilation timed out after 600s.",
+            kind="lean-generation",
+        )
+    return LeanAttempt(
+        ok=proc.returncode == 0,
+        command=command,
+        stdout=stdout or "",
+        stderr=stderr or "",
+        kind="lean-generation" if proc.returncode != 0 else "lean",
+    )
+
+
+def _lean_prompt(
+    name: str,
+    blueprint_source: str,
+    nodes: dict[str, Node],
+    *,
+    library_context: str = "",
+    previous_lean_error: str = "",
+) -> str:
+    retry_block = ""
+    if previous_lean_error:
+        retry_block = f"""
+
+Previous generated Lean attempt failed. This is a Lean-generation retry from the
+same blueprint; do not change the mathematical content. Fix the Lean encoding,
+imports, names, explicit arguments, and proofs.
+
+Previous Lean/audit output:
+```text
+{previous_lean_error[-12000:]}
+```
+"""
     return f"""TASK: BLUEPRINT-TO-LEAN-CHECK-ATTEMPT
 
 Return exactly one Lean 4 file. Do not return markdown commentary.
 
 Hard constraints:
 - The blueprint below is the only mathematical source of truth.
+- The goal is correct Lean, not a file that compiles by assuming the paper.
 - Do not strengthen, weaken, skip, or silently reinterpret blueprint statements.
 - Do not use facts that are not Mathlib imports, explicit \\lean{{...}} settled
   declarations in the blueprint, or earlier blueprint nodes listed in \\uses{{...}}.
 - Do not use `sorry`, `admit`, `by ?`, or comments that stand in for proof.
+- Do not emit declarations like `theorem name : True := by trivial`; that is a
+  failed formalization, not a proof of the blueprint.
+- Do not call invented helpers such as `foo_from_blueprint`,
+  `foo_from_paper`, `Karthik_Manurangsi_2020_reduction`, or similar names that
+  merely assert a paper result. Every name you use must be imported from a real
+  local library, defined earlier in this file, or listed as an existing
+  `\\lean{...}` declaration in the blueprint.
+- Include `set_option autoImplicit false` near the top of the file.
+- Do not use `axiom`, `constant`, or `opaque`; implement definitions and prove theorem nodes.
 - Give each generated declaration the Lean name listed in the node summary.
 - If the blueprint is missing a lemma/hypothesis/dependency, let Lean fail.
   Do not patch around missing blueprint content.
@@ -1007,15 +1605,24 @@ Hard constraints:
 Imports:
 - Import only the specific Mathlib modules your file needs, e.g.
   `import Mathlib.Analysis.InnerProductSpace.Basic`.
-- Confirm each module path exists by checking the Mathlib source under
-  `.lake/packages/mathlib/Mathlib/` before using it.
+- Local library candidates below came from deterministic local search; trust
+  their module paths and snippets instead of reopening Mathlib to verify them.
 - Do not use the blanket `import Mathlib` or `import AutoBlueprint`; they load
   every Mathlib module and make each compile check several times slower.
+- Prefer the local library candidates below when they are relevant, but do not
+  force them if they do not match the blueprint statement.
+{retry_block}
 
 Blueprint name: {name}
 
 Node summary:
 {_node_summary(nodes)}
+
+Local Lean library candidates:
+{library_context or "- No local library candidates were found."}
+
+Lean API idioms:
+{LEAN_IDIOM_CHEATSHEET}
 
 Current blueprint source:
 ```tex
@@ -1024,9 +1631,6 @@ Current blueprint source:
 """
 
 
-<<<<<<< Updated upstream
-def _agent_refine_prompt(name: str, blueprint_source: str, lean_output: str, trial: int, paper_text: str) -> str:
-=======
 def _chunk_lean_prompt(
     name: str,
     blueprint_source: str,
@@ -1203,7 +1807,6 @@ def _agent_refine_prompt(
     *,
     escalation_note: str = "",
 ) -> str:
->>>>>>> Stashed changes
     paper_block = f"\nOriginal paper context:\n<paper>\n{paper_text}\n</paper>\n" if paper_text else ""
     escalation_block = f"\nIMPORTANT: {escalation_note}\n" if escalation_note else ""
     return f"""TASK: REFINE-BLUEPRINT-FROM-LEAN-FAILURE
@@ -1221,6 +1824,15 @@ Rules:
 - Do not make the theorem weaker just to satisfy Lean.
 - If Lean failed because the blueprint skipped an argument, add the missing
   lemma/proposition/definition as a blueprint node.
+- If the statement audit says the generated Lean used abstract tags, erased
+  semantics, dropped parameters, or proved only a vacuous/too-weak behavior,
+  strengthen the blueprint itself with concrete mathematical content.
+- Definitions for new problem nodes must specify real input/output relations,
+  promises, thresholds, approximation factors, and yes/no conditions. They
+  cannot merely introduce a family tag.
+- Construction lemmas must state the actual constructed object and behavior
+  equalities/inequalities, not just existence, continuity, or a placeholder
+  predicate.
 - If a proof needs an unstated dependency, add or correct `\\uses{{...}}`.
 - If a statement is mathematically wrong compared with the paper, correct the
   statement in the blueprint.
@@ -1266,6 +1878,15 @@ Rules:
 - Fix the blueprint, not the Lean code.
 - Do not make the theorem weaker just to satisfy Lean.
 - Add missing intermediate blueprint nodes when the proof needs them.
+- If the statement audit says the generated Lean used abstract tags, erased
+  semantics, dropped parameters, or proved only a vacuous/too-weak behavior,
+  strengthen the blueprint itself with concrete mathematical content.
+- Definitions for new problem nodes must specify real input/output relations,
+  promises, thresholds, approximation factors, and yes/no conditions. They
+  cannot merely introduce a family tag.
+- Construction lemmas must state the actual constructed object and behavior
+  equalities/inequalities, not just existence, continuity, or a placeholder
+  predicate.
 - Correct `\\uses{{...}}` whenever dependencies were missing or wrong.
 - Do not include `\\begin{{document}}` or `\\end{{document}}`.
 
@@ -1313,8 +1934,6 @@ def _publish_passing_lean(name: str, lean_path: Path) -> Path:
     return dest
 
 
-<<<<<<< Updated upstream
-=======
 def _publish_lean_text(name: str, code: str) -> Path:
     """Save the assembled passing Lean entrypoint as a tracked blueprint artifact."""
     dest_dir = REPO_ROOT / "blueprints" / name / "blueprint" / "lean"
@@ -1473,14 +2092,32 @@ def _load_existing_accepted_chunks(
     return accepted, next_number
 
 
->>>>>>> Stashed changes
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("name", help="Existing blueprint name under blueprints/<name>/")
     parser.add_argument("--runner", default="codex", help="Runner spec, e.g. codex, openai:gpt-5")
-    parser.add_argument("--max-trials", type=int, default=3, help="Stop after this many Lean attempts")
+    parser.add_argument("--max-trials", type=int, default=3, help="Stop after this many blueprint-repair trials")
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=AUTO_CHUNK_SIZE,
+        help=(
+            "Advanced override for the maximum number of dependency-ready nodes "
+            "per chunk. Default 0 means automatic graph traversal."
+        ),
+    )
     parser.add_argument("--paper", help="Optional original paper path/URL/text for refinement context")
     parser.add_argument("--lean-command", help="Override checker command, e.g. 'lake env lean'")
+    parser.add_argument(
+        "--continue",
+        dest="continue_run",
+        action="store_true",
+        help=(
+            "Reuse existing generated ChunkNN.lean modules that still pass Lean "
+            "and statement alignment for the current blueprint, then continue "
+            "from the next unresolved dependency chunk."
+        ),
+    )
     parser.add_argument(
         "--reasoning-effort",
         choices=("low", "medium", "high", "xhigh"),
@@ -1491,6 +2128,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.max_trials < 1:
         raise SystemExit("--max-trials must be at least 1")
+    if args.chunk_size < 0:
+        raise SystemExit("--chunk-size must be 0 for auto or a positive integer")
+    chunk_size = args.chunk_size or DEFAULT_AUTO_CHUNK_LIMIT
 
     runner_kwargs = {}
     if args.reasoning_effort:
@@ -1504,6 +2144,15 @@ def main(argv: list[str] | None = None) -> int:
         paper_text, _source = read_paper(args.paper)
 
     lean_command = shlex.split(args.lean_command) if args.lean_command else _default_lean_command()
+    print("==> Checking Lean/Lake/Mathlib setup", flush=True)
+    preflight = check_lean_environment(REPO_ROOT, lean_command=lean_command)
+    if not preflight.ok:
+        raise FileNotFoundError(
+            f"{preflight.message}\n"
+            f"Command: {' '.join(preflight.command)}\n"
+            f"{(preflight.stderr or preflight.stdout).strip()}"
+        )
+    print(f"  {preflight.message} ({preflight.elapsed_s:.1f}s)", flush=True)
     runner = get_runner(
         args.runner,
         context_files=[SKILL_PATH],
@@ -1528,14 +2177,16 @@ def main(argv: list[str] | None = None) -> int:
         "",
         f"- runner: `{args.runner}`",
         f"- max trials: `{args.max_trials}`",
+        f"- chunking: `automatic dependency traversal`",
+        f"- internal chunk limit: `{chunk_size}`",
+        f"- internal Lean-generation retries: `{LEAN_GENERATION_RETRIES}`",
+        f"- continue from generated chunks: `{args.continue_run}`",
         f"- Lean command: `{' '.join(lean_command)}`",
-        "",
     ]
+    if CURRENT_LOG_PATH is not None:
+        report_lines.append(f"- full log: `{CURRENT_LOG_PATH.relative_to(REPO_ROOT)}`")
+    report_lines.append("")
 
-<<<<<<< Updated upstream
-    for trial in range(1, args.max_trials + 1):
-        print(f"==> Trial {trial}/{args.max_trials}: validating blueprint", flush=True)
-=======
     removed_stale = _clear_stale_attempt_artifacts(args.name)
     if removed_stale:
         print(f"==> removed {removed_stale} stale Lean attempt artifact(s)", flush=True)
@@ -1579,90 +2230,47 @@ def main(argv: list[str] | None = None) -> int:
             f"(blueprint repairs used {repair_trials}/{args.max_trials})",
             flush=True,
         )
->>>>>>> Stashed changes
         validation = validate_blueprint(REPO_ROOT, args.name)
         print_result(validation)
         if not validation.ok:
-            report_lines.append(f"## Trial {trial}: structural validation failed")
+            report_lines.append(f"## Chunk {chunk_number}: structural validation failed")
             report_lines.extend(f"- {error}" for error in validation.errors)
             report = _write_report(args.name, report_lines)
             print(f"Report written to {report.relative_to(REPO_ROOT)}")
             return 1
 
         blueprint_source = _read_blueprint_source(args.name)
-
-        print(
-            f"==> Trial {trial}/{args.max_trials}: generating disposable Lean attempt "
-            "(read-only model call; Lean check runs locally afterwards)",
-            flush=True,
-        )
-        lean_result = gen_runner.run(
-            _lean_prompt(args.name, blueprint_source, validation.nodes),
-            cwd=REPO_ROOT,
-            retries=0,
-        )
-        trial_dir = SCRATCH_DIR / args.name
-        trial_dir.mkdir(parents=True, exist_ok=True)
-        lean_path = trial_dir / f"trial_{trial:02d}.lean"
-        lean_code = _extract_lean_code(lean_result.text).rstrip() + "\n"
-        lean_path.write_text(lean_code, encoding="utf-8")
-        print(
-            f"  wrote {lean_path.relative_to(REPO_ROOT)} "
-            f"({len(lean_code.splitlines())} lines, model took {lean_result.duration_s:.0f}s)",
-            flush=True,
-        )
-        if re.search(r"^import (Mathlib|AutoBlueprint)\s*$", lean_code, re.MULTILINE):
-            print(
-                "  note: attempt uses a blanket Mathlib import; the compile check will be slower",
-                flush=True,
-            )
-
-        print(f"==> Trial {trial}/{args.max_trials}: running Lean", flush=True)
-        attempt = _run_lean(lean_path, lean_command)
-        report_lines.append(f"## Trial {trial}")
-        report_lines.append(f"- Lean file: `{lean_path.relative_to(REPO_ROOT)}`")
-
-        if attempt.ok:
-            published = _publish_passing_lean(args.name, lean_path)
-            report_lines.append("- result: passed")
+        current_fingerprints = _node_fingerprints(validation.nodes)
+        accepted_labels, accepted_imports, accepted_signatures = _accepted_state(accepted_chunks)
+        target_labels = _next_chunk(validation.nodes, accepted_labels, chunk_size=chunk_size)
+        if not target_labels:
+            assembled = _standalone_accepted_code(accepted_chunks)
+            final_path = SCRATCH_DIR / args.name / "assembled_formalization.lean"
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            final_path.write_text(assembled.rstrip() + "\n", encoding="utf-8")
+            print("==> All chunks accepted; running final module-import Lean check", flush=True)
+            final_attempt = _run_lean(final_path, lean_command)
+            if not final_attempt.ok:
+                report_lines.append("## Final assembled Lean check failed")
+                report_lines.append("```text")
+                report_lines.append(final_attempt.output[-4000:])
+                report_lines.append("```")
+                report = _write_report(args.name, report_lines)
+                print("Final assembled Lean file did not compile.")
+                print(f"Report written to {report.relative_to(REPO_ROOT)}")
+                return 1
+            published = _publish_lean_text(args.name, assembled)
+            site_lean = _rebuild_site_for(args.name)
+            report_lines.append("## Complete")
+            report_lines.append(f"- accepted chunks: `{chunk_number - 1}`")
             report_lines.append(f"- published Lean: `{published.relative_to(REPO_ROOT)}`")
+            report_lines.append(f"- site Lean: `{site_lean.relative_to(REPO_ROOT)}`")
             report = _write_report(args.name, report_lines)
-            print(f"Lean passed on trial {trial}.")
-            print(f"Published Lean saved to {published.relative_to(REPO_ROOT)}")
+            print(f"All chunks passed. Published Lean saved to {published.relative_to(REPO_ROOT)}")
+            print(f"Site rebuilt; Lean viewer available at {site_lean.relative_to(REPO_ROOT)}")
             print(f"Report written to {report.relative_to(REPO_ROOT)}")
             return 0
 
-<<<<<<< Updated upstream
-        critic_output = attempt.output
-        print(f"  lean failed on trial {trial}; last lines of output:", flush=True)
-        for line in critic_output.strip().splitlines()[-8:]:
-            print(f"    {line}", flush=True)
-        report_lines.append("- result: failed")
-        report_lines.append("")
-        report_lines.append("```text")
-        report_lines.append(critic_output[-4000:])
-        report_lines.append("```")
-        report_lines.append("")
-
-        if trial == args.max_trials:
-            break
-
-        print(f"==> Trial {trial}/{args.max_trials}: repairing blueprint from Lean output", flush=True)
-        if runner.mode == "agent":
-            repair = runner.run(
-                _agent_refine_prompt(args.name, blueprint_source, critic_output, trial, paper_text),
-                cwd=REPO_ROOT,
-                retries=0,
-            )
-            print(f"  blueprint repair finished ({repair.duration_s:.0f}s)", flush=True)
-        else:
-            refine_result = runner.run(
-                _api_refine_prompt(args.name, blueprint_source, critic_output, trial, paper_text),
-                cwd=REPO_ROOT,
-                retries=1,
-            )
-            _write_api_refinement(args.name, refine_result.text)
-=======
         print(
             "==> Next dependency-closed chunk: "
             + ", ".join(target_labels)
@@ -2107,7 +2715,6 @@ def main(argv: list[str] | None = None) -> int:
             print("  blueprint repair did not change parsed node text; keeping accepted chunks", flush=True)
             report_lines.append("- blueprint repair did not change parsed node text; kept accepted chunks")
         chunk_number += 1
->>>>>>> Stashed changes
 
     report_lines.append(f"Stopped after {args.max_trials} failed trial(s).")
     report = _write_report(args.name, report_lines)
@@ -2116,9 +2723,35 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
+def logged_main(argv: list[str] | None = None) -> int:
+    """Run main while saving the complete terminal transcript to a log file."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("name", nargs="?")
+    known, _unknown = parser.parse_known_args(argv)
+    if not known.name:
+        return main(argv)
+
+    global CURRENT_LOG_PATH
+    log_path = _run_log_path(known.name)
+    CURRENT_LOG_PATH = log_path
+    with log_path.open("w", encoding="utf-8") as log_file:
+        log_file.write(f"# Auto-Blueprint Lean refinement log\n")
+        log_file.write(f"# cwd: {REPO_ROOT}\n")
+        log_file.write(f"# command: {' '.join([sys.argv[0], *(argv or sys.argv[1:])])}\n\n")
+        started_at = time.monotonic()
+        with contextlib.redirect_stdout(TeeStream(sys.stdout, log_file, started_at=started_at)), contextlib.redirect_stderr(
+            TeeStream(sys.stderr, log_file, started_at=started_at)
+        ):
+            print(f"Log file: {log_path.relative_to(REPO_ROOT)}", flush=True)
+            try:
+                code = main(argv)
+            except (FileNotFoundError, RunnerError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                code = 2
+            finally:
+                print(f"Log file: {log_path.relative_to(REPO_ROOT)}", flush=True)
+            return code
+
+
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except (FileNotFoundError, RunnerError, subprocess.TimeoutExpired) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        raise SystemExit(2)
+    raise SystemExit(logged_main())
