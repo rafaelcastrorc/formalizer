@@ -47,6 +47,34 @@
   entries are all products of one entry of $v$ and one entry of $w$. We write
   $v^{\otimes q}$ for the $q$-fold Kronecker power $v \otimes \cdots \otimes v$.
   This is the vector-indexed Kronecker product used in the paper.
+
+  For the $q$-fold power, fix the following \emph{recursive product} indexing
+  convention, which the Kronecker-power nodes below all use. Define the index
+  type recursively by
+  \[
+    I^{\otimes 0} = \mathrm{Unit},
+    \qquad
+    I^{\otimes (q+1)} = I \times I^{\otimes q},
+  \]
+  and the power vector recursively by
+  \[
+    v^{\otimes 0} = (\_ \mapsto 1) : \mathrm{Unit}\to\R,
+    \qquad
+    v^{\otimes (q+1)} = v \otimes v^{\otimes q}
+      = \operatorname{def\_kron}(v, v^{\otimes q}).
+  \]
+  Both $\mathrm{Unit}$ and $I\times I^{\otimes q}$ are finite types, so
+  $v^{\otimes q}$ is a genuine finite-dimensional vector, and the empty product
+  gives $v^{\otimes 0}\equiv 1$. This convention makes each power the binary
+  Kronecker product of $v$ with the previous power \emph{definitionally}, so the
+  induction proofs below reduce to one application of
+  Lemma~\ref{lem:kron-inner} with no tuple-reindexing step. Do \emph{not}
+  formalize the power with a $\mathrm{Fin}\,q\to I$ (function-tuple) index type:
+  that forces a peeling lemma proved via $\mathrm{Fin.cons}$,
+  $\mathrm{Fin.consEquiv}$ or $\operatorname{Equiv.sum\_comp}$, which pulls in
+  the module `Mathlib.Logic.Equiv.Fin` (unavailable in this build) and whose
+  $\mathrm{congr}$-based proof leaves a definitionally closed goal that makes a
+  trailing $\mathrm{Finset.prod\_congr}$ fail with ``No goals to be solved''.
 \end{definition}
 
 \begin{lemma}[Finite sum over a product type]
@@ -132,30 +160,33 @@
   \label{lem:kron-power-inner}
   \uses{def:inner-prod, def:kron, lem:kron-inner}
   For every finite index set $I$, every $v,w:I\to\R$, and every natural
-  $q$, where $v^{\otimes q}$ and $w^{\otimes q}$ are indexed by functions
-  $\{1,\ldots,q\}\to I$,
+  $q$, with $v^{\otimes q}$ and $w^{\otimes q}$ indexed by the recursive product
+  type $I^{\otimes q}$ of Definition~\ref{def:kron},
   \[
     \inner{v^{\otimes q}}{w^{\otimes q}}=\inner{v}{w}^{q}.
   \]
-  The formal statement must specify the indexing convention for the $q$-fold
-  power, for example the index type $\mathrm{Fin}\,q\to I$ with the empty product
-  equal to $1$ when $q=0$.
+  The formal statement must use the recursive product index type
+  ($I^{\otimes 0}=\mathrm{Unit}$, $I^{\otimes(q+1)}=I\times I^{\otimes q}$) fixed
+  in Definition~\ref{def:kron}, with the empty product equal to $1$ when $q=0$.
+  It must \emph{not} use a $\mathrm{Fin}\,q\to I$ function-tuple index type, and
+  its proof must not introduce a per-coordinate peeling lemma.
 \end{lemma}
 \begin{proof}
   \uses{def:inner-prod, def:kron, lem:kron-inner}
-  Induct on $q$.  For $q=0$, both sides are $1$: the Kronecker power has one
-  coordinate indexed by the unique function from the empty index set, its entry
-  is the empty product, and the scalar power $\inner{v}{w}^{0}$ is $1$.
+  Induct on $q$.  For $q=0$ the index type is $\mathrm{Unit}$ and both power
+  vectors are the constant $1$, so the sum $\inner{v^{\otimes 0}}{w^{\otimes 0}}$
+  is $1\cdot 1=1$, matching the scalar power $\inner{v}{w}^{0}=1$.
 
-  For the induction step, identify the index type for $q+1$ factors with
-  $I\times(\mathrm{Fin}\,q\to I)$, separating the first tensor coordinate from
-  the remaining $q$ coordinates. Under this identification
+  For the induction step, the recursive convention gives, definitionally,
   \[
     v^{\otimes(q+1)} = v\otimes v^{\otimes q},
     \qquad
-    w^{\otimes(q+1)} = w\otimes w^{\otimes q}.
+    w^{\otimes(q+1)} = w\otimes w^{\otimes q},
   \]
-  Lemma~\ref{lem:kron-inner} gives
+  as vectors indexed by $I\times I^{\otimes q}$ (no separate reindexing or
+  peeling step is required, because this is the definition of the power).
+  Lemma~\ref{lem:kron-inner}, applied with the second factor being the
+  $q$-fold powers over the index type $I^{\otimes q}$, gives
   \[
     \inner{v^{\otimes(q+1)}}{w^{\otimes(q+1)}}
     =
@@ -164,6 +195,17 @@
   \]
   Substitute the induction hypothesis and simplify scalar powers to obtain
   $\inner{v}{w}^{q+1}$.
+
+  In Lean, define the power by structural recursion on $q$ so that
+  $v^{\otimes(q+1)}$ is \emph{syntactically} $\operatorname{def\_kron}(v,
+  v^{\otimes q})$, and prove the lemma by `induction q` whose successor case is
+  closed by rewriting with Lemma~\ref{lem:kron-inner}, the induction hypothesis
+  and `pow_succ`. Do not use `Fin.cons`, `Fin.consEquiv`,
+  `Equiv.sum_comp`, `Fintype.sum_equiv` over a `Fin`-tuple equivalence, or any
+  lemma from `Mathlib.Logic.Equiv.Fin` or `Mathlib.Algebra.BigOperators.Ring`
+  (both modules are unavailable here), and do not follow a `congr`/`rfl`-closed
+  goal with a further `Finset.prod_congr` (that yields ``No goals to be
+  solved'').
 \end{proof}
 
 \begin{lemma}[Euclidean norms of Kronecker powers]
@@ -1069,6 +1111,18 @@
   `logn' data field, or if its bundled type has the six function fields but
   lacks the six displayed equation fields. The six functions/predicate and their
   formulas must be recoverable from the label declaration itself.
+
+  Computability note. The functions $\logn$, $\logDim$, $\polylogDim$,
+  $\msdHardDim$ and $\mildMsdGamma$ are built from $\log$, real division, real
+  powers ($\operatorname{rpow}$) and the ceiling $\lceil\cdot\rceil$, all of
+  which depend on $\log$, the real $\operatorname{DivInvMonoid}$ instance, or the
+  real linear order (used by $\operatorname{Nat.ceil}$, $\max$ and $\min$); these
+  are `noncomputable' in Mathlib. Therefore the Lean realizations of these five
+  real/natural-valued functions, and of any bundled package value that sets its
+  data fields to them (e.g. `def_log_parameter_regimes'), must be declared
+  `noncomputable def'. The predicate $\msdHardGammaAllowed$ is a $\mathrm{Prop}$
+  and needs no modifier. This annotation does not change any defining equation or
+  regime.
 \end{definition}
 
 \chapter{The transformer architecture}
@@ -1102,6 +1156,16 @@
   expose both the vector function and the row-wise matrix function, together
   with the displayed row equation. A declaration containing only vector softmax
   omits part of Definition~2.1's mathematical input and is not this node.
+
+  Computability note. Both softmax functions use $\exp$ and real division, and
+  therefore depend on the real exponential and on the real
+  $\operatorname{DivInvMonoid}$ instance, which are `noncomputable' in Mathlib.
+  Consequently the Lean realizations of $\operatorname{vectorSoftmax}$,
+  $\operatorname{matrixSoftmax}$, and any packaged value bundling them (e.g.
+  `def_softmax') must be declared with the `noncomputable' modifier
+  (`noncomputable def'). This is a computability annotation only; it does not
+  weaken or change the stated equations, and structures merely storing these as
+  function-typed fields do not themselves need the modifier.
 \end{definition}
 
 \begin{definition}[Attention, Definition 2.1]
@@ -1514,6 +1578,14 @@
   complete similarity and $0$ means no similarity. (Used instead of the raw inner
   product so that two vectors with similar directions but large magnitude are
   still considered close.)
+
+  Computability note. The cosine function uses the Euclidean norm and real
+  division, which depend on the real square root and the real
+  $\operatorname{DivInvMonoid}$ instance, both `noncomputable' in Mathlib.
+  The Lean realization of the $\operatorname{cosine}$ function, and of any
+  package value bundling it (e.g. `CosineData'), must therefore be declared
+  `noncomputable def'. This annotation does not alter the quotient equation,
+  the $[0,1]$ range property, or the zero-iff-inner-zero property required above.
 \end{definition}
 
 \begin{lemma}[Cosine as inner product after Euclidean normalization]
@@ -1745,7 +1817,7 @@
 
 \begin{definition}[Least Similar Document, $\LSD_{n,\ell}$, Definition A.14]
   \label{def:lsd}
-  \uses{def:cosine, def:parameter-sensitive-placeholder}
+  \uses{def:cosine, def:problem-family, def:msd}
   For parameters $n,\ell\in\N$, an instance of $\LSD_{n,\ell}$ is an $n$-tuple
   of nonzero vectors $v_1,\ldots,v_n\in\{0,1\}^{\ell}$. A valid output is a pair
   $(i,j)$ with $i\ne j$ minimizing $\cossim{v_i}{v_j}$ over all distinct pairs:
@@ -1757,11 +1829,26 @@
   Formally this is a search relation over nonzero binary vectors and distinct
   output indices, not a tag.
 
-  The audited declaration must expose the least-similarity analogue of the MSD
-  fields:
+  The declaration audited at this label is a self-contained data package
+  `def_lsd' (for example a structure value `LSDProblemData'), not
+  `def_parameter_sensitive_placeholder', not a call to that placeholder, and not
+  a bare `ConcreteProblemFamily' value whose concrete score and optimum are only
+  hidden in external helpers. In particular, the `family' field consumed by
+  downstream algorithmic and hardness nodes must be a concrete
+  `ConcreteProblemFamily' built as a projection of the package's own concrete
+  score/optimum fields, exactly as `def_msd' exposes the concrete `MSDFamily'.
+  A `family' field of the form
+  `(LSDFamily : def_parameter_sensitive_placeholder)', or any value whose type
+  is `def_parameter_sensitive_placeholder', is rejected: it replaces the
+  concrete least-similarity relation by an abstract parameter-sensitive tag.
+  The package may contain a field `family : ConcreteProblemFamily' for use by
+  later nodes, but the audited declaration itself must also expose the concrete
+  fields and projection equations below, under these names or transparent
+  equivalents (the least-similarity analogue of the MSD fields):
   \[
   \begin{array}{ll}
-    \operatorname{LSDParam} &= \operatorname{MSDParam},\\
+    \operatorname{LSDParam} &= \operatorname{MSDParam}
+      = \{(n,\ell): n,\ell\in\N,\ n\ge2,\ \ell\ge1\},\\
     \operatorname{LSDInst}(n,\ell) &= \operatorname{MSDInst}(n,\ell),\\
     \operatorname{LSDOut}(n,\ell,V) &=
       \{(i,j): i,j:\operatorname{Fin} n,\ i\ne j\},\\
@@ -1774,14 +1861,40 @@
       \operatorname{LSDScore}(V,i,j)=\operatorname{LSDOpt}(V).
   \end{array}
   \]
+  In field form, the package must contain at least
+  \[
+  \begin{array}{ll}
+    \operatorname{param} &: \mathrm{Type},\\
+    \operatorname{inst} &: \operatorname{param}\to\mathrm{Type},\\
+    \operatorname{out} &: \prod_p \operatorname{inst}(p)\to\mathrm{Type},\\
+    \operatorname{score} &: \prod_{p,V}
+      \operatorname{out}(p,V)\to\R,\\
+    \operatorname{opt} &: \prod_{p,V}\R,\\
+    \operatorname{validOut} &: \prod_{p,V}
+      \operatorname{out}(p,V)\to\mathrm{Prop},\\
+    \operatorname{family} &: \operatorname{ConcreteProblemFamily},
+  \end{array}
+  \]
+  together with equations identifying these fields with `LSDParam',
+  `LSDInst', `LSDOut', `LSDScore', `LSDOpt', and `LSDValidOut' as displayed
+  above, and equations saying that `family.Param', `family.Inst', `family.Out',
+  and `family.ValidOut' are exactly the package's own `param', `inst', `out',
+  and `validOut'. The minimum in `LSDOpt' is over distinct pairs only; the
+  diagonal is not part of the search space.
+
   Abstract components named `LSDParam', `LSDInst', `LSDOut' and `LSDValidOut'
   are acceptable only when these equations unfold from the declaration audited
-  at this label. Otherwise the concrete minimizing relation has been erased.
+  at this label and `family' is the concrete projection just described. A Lean
+  declaration whose body or main proof term is
+  `def_parameter_sensitive_placeholder', a wrapper around it, an opaque family
+  tag, `Unit', or a proposition ending in `True', or whose `family' field has
+  type `def_parameter_sensitive_placeholder', does not satisfy this definition;
+  the concrete minimizing relation has been erased.
 \end{definition}
 
 \begin{definition}[$\gamma$-LSD, Definition A.15]
   \label{def:gamma-lsd}
-  \uses{def:cosine, def:parameter-sensitive-placeholder}
+  \uses{def:cosine, def:problem-family, def:lsd}
   For parameters $n,\ell\in\N$ and approximation factor $\gamma\ge 1$, an
   instance of $\gamma\text{-}\LSD_{n,\ell}$ is an $n$-tuple of nonzero vectors
   $v_1,\ldots,v_n\in\{0,1\}^{\ell}$. A valid output is a pair
@@ -1796,14 +1909,25 @@
   over distinct pairs, and the two approximation inequalities. It cannot be
   represented by a bare family tag.
 
-  The audited declaration must expose a concrete family with parameter
-  $(n,\ell,\gamma)$ and the following equations:
+  The audited declaration is a self-contained data package `def_gamma_lsd', not
+  `def_parameter_sensitive_placeholder' and not a wrapper around the exact LSD
+  family. As in `def_gamma_msd', the `family' field consumed by downstream
+  nodes must be a concrete `ConcreteProblemFamily' built as a projection of this
+  package's own approximation-validity field; a `family' field of the form
+  `(GammaLSDFamily : def_parameter_sensitive_placeholder)', or of type
+  `def_parameter_sensitive_placeholder', is rejected. It must expose a concrete
+  family with parameter $(n,\ell,\gamma)$ and the following equations:
   \[
   \begin{array}{ll}
+    \operatorname{GammaLSDParam}
+      &= \{(n,\ell,\gamma): n,\ell\in\N,\ \gamma\in\R,\
+          n\ge2,\ \ell\ge1\},\\
     \operatorname{GammaLSDInst}(n,\ell,\gamma)
       &= \operatorname{LSDInst}(n,\ell),\\
     \operatorname{GammaLSDOut}(n,\ell,\gamma,V)
       &= \{(i,j): i,j:\operatorname{Fin} n,\ i\ne j\},\\
+    \operatorname{GammaLSDScore}(V,i,j)
+      &= \cossim{v_i}{v_j},\\
     m_V &= \min_{i\ne j}\cossim{v_i}{v_j},\\
     \operatorname{GammaLSDValidOut}(n,\ell,\gamma,V,(i,j))
       &\Longleftrightarrow
@@ -1812,9 +1936,22 @@
       \cossim{v_i}{v_j}\le\gamma m_V .
   \end{array}
   \]
-  The minimum $m_V$ and both inequalities are part of the validity relation.
-  A declaration that imports opaque components or stores only the tag
-  `GammaLSD' is not this node.
+  In field form, `def_gamma_lsd' contains at least
+  `param', `inst', `out', `score', `opt', `validOut', and
+  `family : ConcreteProblemFamily', plus transparent equations identifying all
+  of these projections with the displayed `GammaLSD...' objects and with the
+  search fields of `family'. The `validOut' field must mention the parameter
+  $\gamma$ directly and must include both inequalities
+  $m_V\le\cossim{v_i}{v_j}$ and $\cossim{v_i}{v_j}\le\gamma m_V$; the
+  minimum $m_V$ and both inequalities are part of the validity relation.
+
+  The factor $\gamma$ is a parameter of the family, not metadata outside the
+  problem. A declaration that imports opaque components, stores only the tag
+  `GammaLSD', proves only exact minimality, or whose `family' field has type
+  `def_parameter_sensitive_placeholder' is not this node. A declaration whose
+  audited body is `def_parameter_sensitive_placeholder', a delegated
+  placeholder-style family wrapper, an exact-LSD relation with $\gamma$ ignored,
+  `Unit', or a proof ending in `True' is rejected.
 \end{definition}
 
 \begin{definition}[LSD decision version, $\LSD_{n,\ell,t}$, Definition A.16]
@@ -3567,9 +3704,103 @@
   giving $\bigO(n^{2-\eps'}\operatorname{poly}(\ell))$.
 \end{proof}
 
+\begin{lemma}[Complement inner product identity]
+  \label{lem:complement-inner}
+  \uses{def:inner-prod, def:l2norm}
+  For binary vectors $v,u\in\{0,1\}^{\ell}$, write $\bar u\in\{0,1\}^{\ell}$ for
+  the coordinatewise complement defined by $\bar u[h]=1-u[h]$. If
+  $\norm{v}_1=r$, then
+  \[
+    \inner{v}{\bar u}=r-\inner{v}{u}.
+  \]
+  This is a concrete arithmetic identity, not an existence claim or a
+  placeholder. The declaration audited at this label must state exactly this
+  equality, with the complement given by $\bar u[h]=1-u[h]$ and the constant $r$
+  fixed as the Hamming weight $\norm{v}_1$. A statement that merely introduces
+  $\bar u$, or whose conclusion is $\mathrm{True}$/an $\inner{v}{\bar u}=\inner{v}{\bar u}$
+  tautology, does not satisfy this node.
+\end{lemma}
+\begin{proof}
+  \uses{def:inner-prod, def:l2norm}
+  Expand the inner product coordinatewise. For each $h$, since $v,u$ are binary,
+  \[
+    v[h]\,\bar u[h]=v[h](1-u[h])=v[h]-v[h]u[h].
+  \]
+  Summing over all $h$ and using $\sum_h v[h]=\norm{v}_1=r$ for a binary vector,
+  \[
+    \inner{v}{\bar u}=\sum_h v[h]-\sum_h v[h]u[h]
+      =\norm{v}_1-\inner{v}{u}=r-\inner{v}{u}.
+  \]
+\end{proof}
+
+\begin{lemma}[Maximum over complements detects orthogonality]
+  \label{lem:complement-max-iff-orthogonal}
+  \uses{lem:complement-inner, def:inner-prod}
+  Fix $0\le r,s\le\ell$ and, for an $\OV$ instance, let
+  $S_r,S_s\subseteq\{0,1\}^{\ell}$ be the classes of its vectors of Hamming
+  weight $r$ and $s$. For every $v\in S_r$ and every $u\in S_s$,
+  \[
+    \inner{v}{\bar u}\le r,
+    \qquad\text{with equality iff}\qquad
+    \inner{v}{u}=0.
+  \]
+  Consequently, when $S_r$ and $S_s$ are nonempty,
+  \[
+    \Bigl(\exists v\in S_r,\ \exists u\in S_s,\ \inner{v}{u}=0\Bigr)
+    \Longleftrightarrow
+    \max_{v\in S_r,\ u\in S_s}\inner{v}{\bar u}=r .
+  \]
+  The audited declaration must expose \emph{both} the per-pair inequality
+  $\inner{v}{\bar u}\le r$ with its equality condition, \emph{and} the
+  maximum-equals-$r$ equivalence. A field whose conclusion is $\mathrm{True}$,
+  or a tautology of the shape $P\leftrightarrow P$, does not satisfy this node;
+  the returned maximum is compared to the concrete weight $r$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:complement-inner, def:inner-prod}
+  By Lemma~\ref{lem:complement-inner}, $\inner{v}{\bar u}=r-\inner{v}{u}$. Since
+  $v,u$ are binary, $\inner{v}{u}\ge0$, hence $\inner{v}{\bar u}\le r$ with
+  equality iff $\inner{v}{u}=0$. Taking the maximum over the nonempty finite set
+  $S_r\times S_s$: the maximum equals $r$ iff some pair attains
+  $\inner{v}{\bar u}=r$, i.e.\ iff some pair has $\inner{v}{u}=0$.
+\end{proof}
+
+\begin{lemma}[Weight-class threshold equivalence for OV]
+  \label{lem:ov-weight-class-threshold-equiv}
+  \uses{def:ov, def:inner-prod, lem:complement-max-iff-orthogonal}
+  Given an $\OV_{n,\ell}$ instance $V=(v_1,\ldots,v_n)$, for $0\le r\le\ell$ let
+  $S_r=\{v_i:\norm{v_i}_1=r\}$. Then
+  \[
+    \operatorname{Yes}_{\OV}(V)
+    \Longleftrightarrow
+    \exists\,r,s\in\{0,\ldots,\ell\},\
+      \max_{v\in S_r,\ u\in S_s}\inner{v}{\bar u}=r .
+  \]
+  This is the concrete threshold equivalence consumed by
+  Lemma~\ref{lem:maxip-harder-ov} as its \texttt{thresholdEquivalence} field.
+  The formal declaration audited here must have exactly this type: its left-hand
+  side is the $\OV$ yes-predicate of Definition~\ref{def:ov} and its right-hand
+  side is the displayed disjunction over weight-class pairs of the
+  maximum-equals-weight condition. It must \emph{not} be formalized as the
+  tautology
+  $\operatorname{Yes}_{\OV}(V)\leftrightarrow\operatorname{Yes}_{\OV}(V)$,
+  proved by \texttt{Iff.rfl}, or with $\mathrm{True}$ on either side.
+\end{lemma}
+\begin{proof}
+  \uses{lem:complement-max-iff-orthogonal, def:ov, def:inner-prod}
+  Each vector $v_i$ lies in exactly one weight class $S_{\norm{v_i}_1}$, so a
+  distinct pair $i\ne j$ with $\inner{v_i}{v_j}=0$ exists iff there are weights
+  $r,s$ and vectors $v\in S_r$, $u\in S_s$ with $\inner{v}{u}=0$. By
+  Lemma~\ref{lem:complement-max-iff-orthogonal}, applied to the nonempty classes
+  (an empty class contributes no such pair and no maximum equal to $r$), this
+  holds iff for some $r,s$ the maximum
+  $\max_{v\in S_r,\ u\in S_s}\inner{v}{\bar u}$ equals $r$. Hence
+  $\operatorname{Yes}_{\OV}(V)$ is equivalent to the displayed disjunction.
+\end{proof}
+
 \begin{lemma}[Max-IP is at least as hard as OV, Lemma A.13]
   \label{lem:maxip-harder-ov}
-  \uses{def:maxip, def:bichromatic-maxip, def:ov, def:tsq-alg-exists, def:fg-reduction-predicates}
+  \uses{def:maxip, def:bichromatic-maxip, def:ov, def:tsq-alg-exists, def:fg-reduction-predicates, lem:complement-inner, lem:complement-max-iff-orthogonal, lem:ov-weight-class-threshold-equiv}
   $\AtLeastHard{\text{bichromatic }\MaxIP_{n,\ell}}{\OV_{n,\ell}}$: if
   $\TSQAlg{\text{bichromatic }\MaxIP_{n,\ell}}$ exists with polynomial factors in
   $\ell$, then $\TSQAlg{\OV_{n,\ell}}$ exists with polynomial factors in $\ell$.
@@ -3857,6 +4088,36 @@
     \operatorname{OVYes}(V)\Longleftrightarrow
     \exists r,s,\max_{v\in S_r,u\in S_s}\inner{v}{\overline u}=r .
   \]
+  This composed statement is exactly
+  Lemma~\ref{lem:ov-weight-class-threshold-equiv}, and the audited
+  `thresholdEquivalence' field must be that lemma (or a proof of literally its
+  type), not an independent placeholder. Likewise `complementInner' must be
+  Lemma~\ref{lem:complement-inner}
+  ($v\in S_r\Rightarrow\inner{v}{\overline u}=r-\inner{v}{u}$), and
+  `complementMaxIffZero' must be
+  Lemma~\ref{lem:complement-max-iff-orthogonal}. Because
+  Lemma~\ref{lem:ov-weight-class-threshold-equiv},
+  Lemma~\ref{lem:complement-inner} and
+  Lemma~\ref{lem:complement-max-iff-orthogonal} have non-tautological types,
+  neither `thresholdEquivalence' nor any field derived from them can be closed
+  by \texttt{Iff.rfl} or by reflexivity on $\operatorname{OVYes}(V)$.
+
+  The overall reduction-correctness field of this witness (the theorem that the
+  constructed OV algorithm answers true exactly on $\OV$ yes instances) must be
+  \emph{derived from} these concrete fields — the weight-class threshold
+  equivalence, the concrete `callScore'/`callScore\_eq' comparison of the
+  returned oracle score to the weight $r$, and the reconstruction equation. It
+  may \emph{not} be discharged by an abstract induced-correctness lemma of the
+  form `R.inducedCorrect', `FGReduction.correct', or any generic
+  algorithm-transfer theorem attached to
+  Definition~\ref{def:fg-reduction-predicates}: such a delegation erases the
+  weight-class construction and is rejected even if a separate
+  $\operatorname{FGReduction}$ value is also present. The
+  $\operatorname{FGReduction}$ machinery of
+  Definition~\ref{def:fg-reduction-predicates} may package this reduction only
+  \emph{after} its `oracleAnswer'/`reconstruct'/`correct' fields have themselves
+  been instantiated by the concrete weight-class objects above.
+
   The reconstruction theorem then uses valid oracle answers
   $o_{r,s}$ for every concrete call and states
   \[
@@ -3878,7 +4139,7 @@
   $(\ell+1)^2T_{\mathrm{BMaxIP}}(n,n,\ell)$.
 \end{lemma}
 \begin{proof}
-  \uses{def:maxip, def:bichromatic-maxip, def:ov, def:inner-prod}
+  \uses{def:maxip, def:bichromatic-maxip, def:ov, def:inner-prod, lem:complement-inner, lem:complement-max-iff-orthogonal, lem:ov-weight-class-threshold-equiv}
   Given an $\OV_{n,\ell}$ instance $v_1, \ldots, v_n \in \{0,1\}^{\ell}$,
   partition the vectors into subsets $S_1, \ldots, S_{\ell}$ where $S_j$ contains
   all vectors with exactly $j$ ones. For each pair $1 \le i,j \le \ell$ let
@@ -3902,14 +4163,34 @@
   that $\NoTSQAlg{\gamma\text{-}\LSD_{n,\ell}}$ for every $\gamma \ge 1$ when
   $\ell = \logDim(c,n)$.
 
-  The declaration audited at this label must expose the reduction package
-  $\operatorname{OVToGammaLSDHardnessWitness}$ used to derive the lower bound.
-  This package is the theorem's main data. It is not a field named
-  `lowerBound', not a proposition $\NoTSQAlg{\gamma\text{-}\LSD}$ by itself,
-  and not $\operatorname{Nonempty}(\operatorname{FGReduction})$ with hidden
-  internals. A lower-bound proposition may be derived from the package only
-  after the concrete maps, correctness proofs and runtime transfer below have
-  been provided.
+  The statement audited at this label is exactly the concrete lower-bound
+  proposition displayed above: for every $\eps>0$ there exists $c>0$ such that
+  for every $\gamma\ge1$, $\NoTSQAlg{\gamma\text{-}\LSD_{n,\logDim(c,n)}}$. This
+  is a hardness theorem, so its \emph{statement} is the lower-bound proposition
+  itself; the reduction package $\operatorname{OVToGammaLSDHardnessWitness}$
+  described below is the content of the \emph{proof}, not a field of the
+  statement. It is therefore acceptable, and expected, for the audited
+  declaration to be the bare lower-bound proposition
+  \[
+    \forall \eps>0,\ \exists c>0,\ \forall \gamma\ge1,\quad
+    \NoTSQAlg{\gamma\text{-}\LSD_{n,\logDim(c,n)}} ,
+  \]
+  with the witness invoked inside the proof term (for instance through a
+  `tsqTransfer' step). What the statement audit forbids is \emph{weakening the
+  statement}: the family must be the concrete $\gamma$-LSD family of
+  Definition~\ref{def:gamma-lsd} applied to the instantiated triple
+  $(n,\logDim(c,n),\gamma)$, the approximation factor must be genuinely
+  quantified over all $\gamma\ge1$ (never specialized to $\gamma=1$ only), and
+  the dimension must be pinned to $\ell=\logDim(c,n)$. A statement whose
+  conclusion is $\NoTSQAlg{\operatorname{def\_gamma\_lsd.family}}$ with an
+  uninstantiated family tag, which drops the $\ell=\logDim(c,n)$ regime, or
+  which collapses $\forall\gamma\ge1$ to a single $\gamma$, is rejected.
+
+  The \emph{proof} must in turn build and use the reduction package
+  $\operatorname{OVToGammaLSDHardnessWitness}$ with all of its concrete maps,
+  correctness proofs and runtime transfer below; a proof that asserts the
+  lower bound without constructing the OV$\leftarrow\gamma$-LSD reduction is not
+  a valid proof of this node.
   Its source slice is the nonempty logarithmic regime
   $\ell=\logDim(c,n)$ for all sufficiently large $n$, and its target parameter
   is the same $(n,\ell,\gamma)$ with $\gamma\ge1$. For an OV instance
@@ -4133,9 +4414,10 @@
   the runtime of the constructed OV algorithm with the zero-vector scan, at most
   one LSD oracle call, and the final inner-product test. It is not the
   tautology $n\ell+T_{\gamma\LSD}\le n\ell+T_{\gamma\LSD}$ and it is not a
-  stand-alone asymptotic lower-bound proposition. A declaration that states only
-  the high-level lower-bound proposition, without these maps, equivalences,
-  reconstructed answer and runtime accounting, is not this theorem.
+  stand-alone asymptotic lower-bound proposition. A \emph{proof} that concludes
+  the high-level lower-bound proposition without constructing these maps,
+  equivalences, reconstructed answer and runtime accounting is not a valid proof
+  of this theorem.
   As with Lemma~\ref{lem:minip-harder-ov}, this runtime appears through a named
   definition and a separate bound:
   \[

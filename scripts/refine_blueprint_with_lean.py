@@ -51,6 +51,11 @@ SKILL_PATH = REPO_ROOT / ".claude" / "skills" / "paper-to-blueprint" / "SKILL.md
 SCRATCH_DIR = REPO_ROOT / ".auto-blueprint" / "formalization"
 PUBLISHED_LEAN_NAME = "formalization.lean"
 LEAN_GENERATION_RETRIES = 5
+# Per-label ceilings: a single stuck node must not consume the whole run.
+# When either cap is hit, the node is skipped (reported as unformalized) and
+# the rest of the blueprint continues.
+PER_LABEL_REPAIR_CAP = 3
+PER_LABEL_MODEL_SECONDS_CAP = 1500
 AUTO_CHUNK_SIZE = 0
 DEFAULT_AUTO_CHUNK_LIMIT = 8
 MEDIUM_NODES_PER_CHUNK = 3
@@ -300,10 +305,66 @@ def _node_difficulty(label: str, node: Node, block: str) -> str:
     return "easy"
 
 
-def _next_chunk(nodes: dict[str, Node], accepted: set[str], *, chunk_size: int) -> list[str]:
-    """Pick a dependency-closed chunk, batching easy nodes and isolating hard ones."""
+def _parse_decomposition_refusal(text: str) -> dict | None:
+    """Detect a structured generation refusal (node needs blueprint helpers).
+
+    The generation prompt allows the model to reply with a single
+    ``NEEDS-DECOMPOSITION: {...json...}`` line instead of emitting weakened
+    Lean it knows cannot match the blueprint node 1-1.
+    """
+    match = re.search(r"NEEDS-DECOMPOSITION:\s*(\{.*\})", text, re.DOTALL)
+    if not match:
+        return None
+    payload: dict = {"label": "", "missing_helpers": [], "reason": ""}
+    try:
+        parsed = json.loads(match.group(1))
+        if isinstance(parsed, dict):
+            payload["label"] = str(parsed.get("label") or "")
+            payload["missing_helpers"] = [
+                str(h) for h in (parsed.get("missing_helpers") or []) if str(h).strip()
+            ]
+            payload["reason"] = str(parsed.get("reason") or "")
+    except json.JSONDecodeError:
+        payload["reason"] = match.group(1)[:2000]
+    return payload
+
+
+def _decomposition_note(labels: list[str], helpers: list[str] | None = None) -> str:
+    helper_text = ""
+    if helpers:
+        helper_text = (
+            " The generator identified these missing helper statements; add each as its "
+            "own blueprint node (definition/lemma) with correct \\uses edges: "
+            + " | ".join(helpers[:8])
+        )
+    return (
+        "Repair by DECOMPOSITION. Split the node(s) "
+        + ", ".join(labels)
+        + " into 2-4 smaller blueprint nodes (statement-level helper definitions/"
+        "lemmas), each individually formalizable as a single Lean declaration with "
+        "1-1 structural correspondence, and rewire \\uses so the original node "
+        "depends on the new helpers. Keep the mathematics identical; only the "
+        "packaging changes. Do NOT merely rephrase the existing node text."
+        + helper_text
+    )
+
+
+def _next_chunk(
+    nodes: dict[str, Node],
+    accepted: set[str],
+    *,
+    chunk_size: int,
+    skipped: set[str] | frozenset[str] = frozenset(),
+) -> list[str]:
+    """Pick a dependency-closed chunk, batching easy nodes and isolating hard ones.
+
+    ``skipped`` labels are unschedulable (given up on); nodes depending on them
+    never become ready, which is intended — they are reported as unformalized.
+    """
     available = set(accepted) | {label for label, node in nodes.items() if node.mathlibok}
-    remaining = [label for label in _node_order(nodes) if label not in available]
+    remaining = [
+        label for label in _node_order(nodes) if label not in available and label not in skipped
+    ]
     blocks = _node_tex_blocks(nodes)
     difficulties = {
         label: _node_difficulty(label, node, blocks.get(label, ""))
@@ -342,6 +403,27 @@ def _next_chunk(nodes: dict[str, Node], accepted: set[str], *, chunk_size: int) 
 
 def _chunk_summary(nodes: dict[str, Node], labels: list[str]) -> str:
     return _node_summary({label: nodes[label] for label in labels})
+
+
+def _dependency_checklist(nodes: dict[str, Node], labels: list[str]) -> str:
+    """Per-target list of non-Mathlib dependency Lean names the decl must mention.
+
+    Mirrors the deterministic audit (`_nonmathlib_uses_missing_from_decl`) so
+    the requirement is stated up front instead of discovered after a full
+    generation."""
+    lines: list[str] = []
+    for label in labels:
+        node = nodes.get(label)
+        if node is None:
+            continue
+        required = [
+            _lean_name(dep)
+            for dep in sorted(node.uses)
+            if dep in nodes and not nodes[dep].mathlibok
+        ]
+        if required:
+            lines.append(f"- {label}: {', '.join(required)}")
+    return "\n".join(lines) if lines else "- (no required dependency mentions)"
 
 
 def _chunk_difficulty_summary(nodes: dict[str, Node], labels: list[str]) -> str:
@@ -1507,6 +1589,17 @@ def _run_lean(path: Path, lean_command: list[str]) -> LeanAttempt:
             print(f"  lean still checking... {elapsed}s elapsed", flush=True)
 
     combined = "\n".join(part for part in (stdout or "", stderr or "") if part)
+    if proc.returncode == 0 and "declaration uses 'sorry'" in combined:
+        # Lean treats `sorry` as a warning; for us it voids the verification.
+        return LeanAttempt(
+            ok=False,
+            command=lean_command + [str(path)],
+            stdout=stdout or "",
+            stderr=stderr or "",
+            reason="Lean accepted the file but one or more declarations use `sorry`; "
+            "sorried proofs verify nothing and are rejected.",
+            kind="lean-generation",
+        )
     return LeanAttempt(
         ok=proc.returncode == 0,
         command=lean_command + [str(path)],
@@ -1728,6 +1821,14 @@ local contract for this generation call.
 
 Hard constraints:
 - The blueprint below is the only mathematical source of truth.
+- Formalize each node's statement EXACTLY as written: same objects, same
+  recursive structure, same fields and claims. Lean exists to verify the
+  blueprint, not to prove something adjacent — do not substitute an
+  equivalent-but-differently-shaped formulation, and do not weaken.
+- If a target node CANNOT be faithfully formalized as stated (it would need
+  helper statements the blueprint does not yet have), do NOT emit weakened
+  Lean for it. Instead return, as your entire reply, one line:
+  NEEDS-DECOMPOSITION: {{"label": "<node label>", "missing_helpers": ["<precise statement of each needed helper>"], "reason": "<why the node is not formalizable as one declaration>"}}
 - Generate Lean declarations for every target node in the current chunk.
 - Do not redefine accepted declarations from earlier chunks.
 - If a target node has `\\uses{{label}}`, the generated public declaration for
@@ -1775,6 +1876,11 @@ Accepted Lean module imports:
 
 Current target chunk:
 {_chunk_summary(nodes, target_labels)}
+
+Dependency checklist (deterministically enforced — the declaration for each
+node MUST textually mention every listed Lean name, directly or via a
+same-module helper it uses; a missing mention is an automatic rejection):
+{_dependency_checklist(nodes, target_labels)}
 
 Whole blueprint node graph:
 {_node_summary(nodes)}
@@ -1984,6 +2090,25 @@ def _load_existing_accepted_chunks(
             continue
         chunk_number = int(match.group(1))
         module_name, _module_path = _chunk_module(name, chunk_number)
+
+        # Files absent from a non-empty manifest are leftovers of failed
+        # attempts (a failed chunk's file survives renumbering). They were
+        # never accepted, no later chunk imports them, and re-checking them
+        # would fail and — worse — discard every accepted chunk after them.
+        # Delete just the leftover and keep walking.
+        if manifest and path.name not in manifest:
+            print(
+                f"  {path.relative_to(REPO_ROOT)} is not in the accepted-chunk "
+                "manifest (leftover failed attempt); deleting it only",
+                flush=True,
+            )
+            for artifact in (path, path.with_suffix(".olean")):
+                try:
+                    artifact.unlink()
+                except FileNotFoundError:
+                    pass
+            continue
+
         code = path.read_text(encoding="utf-8")
 
         # Fast path: the manifest proves this exact code already passed Lean and
@@ -2223,6 +2348,22 @@ def main(argv: list[str] | None = None) -> int:
     # Import lines discovered to have no compiled .olean locally; fed back into
     # every later generation prompt so the model stops importing them.
     unavailable_imports: set[str] = set()
+    # Per-label accounting so no single node can consume the run (repairs,
+    # model time), plus the set of labels given up on. Skipped labels and
+    # everything depending on them are reported as unformalized at the end.
+    label_repairs: dict[str, int] = {}
+    label_model_seconds: dict[str, float] = {}
+    decomposition_tried: set[str] = set()
+    skipped_labels: set[str] = set()
+
+    def _skip_labels(labels: list[str], why: str) -> None:
+        skipped_labels.update(labels)
+        print(
+            f"==> Skipping node(s) {', '.join(labels)} ({why}); they will be "
+            "reported as unformalized. The rest of the blueprint continues.",
+            flush=True,
+        )
+        report_lines.append(f"- skipped node(s) ({why}): `{', '.join(labels)}`")
 
     while True:
         print(
@@ -2242,8 +2383,45 @@ def main(argv: list[str] | None = None) -> int:
         blueprint_source = _read_blueprint_source(args.name)
         current_fingerprints = _node_fingerprints(validation.nodes)
         accepted_labels, accepted_imports, accepted_signatures = _accepted_state(accepted_chunks)
-        target_labels = _next_chunk(validation.nodes, accepted_labels, chunk_size=chunk_size)
+        target_labels = _next_chunk(
+            validation.nodes, accepted_labels, chunk_size=chunk_size, skipped=skipped_labels
+        )
+        over_budget = [
+            label
+            for label in target_labels
+            if label_model_seconds.get(label, 0.0) > PER_LABEL_MODEL_SECONDS_CAP
+        ]
+        if over_budget:
+            _skip_labels(over_budget, f"exceeded {PER_LABEL_MODEL_SECONDS_CAP}s model-time budget")
+            continue
         if not target_labels:
+            unfinished = [
+                label
+                for label in _node_order(validation.nodes)
+                if not validation.nodes[label].mathlibok and label not in accepted_labels
+            ]
+            if unfinished:
+                blocked = [label for label in unfinished if label not in skipped_labels]
+                report_lines.append("## Finished with unformalized nodes")
+                report_lines.append(
+                    f"- accepted: `{len(accepted_labels)}` node(s); "
+                    f"skipped: `{len(skipped_labels)}`; blocked by skipped: `{len(blocked)}`"
+                )
+                report_lines.append(f"- skipped node(s): `{', '.join(sorted(skipped_labels)) or '(none)'}`")
+                report_lines.append(f"- blocked node(s): `{', '.join(blocked) or '(none)'}`")
+                report_lines.append(
+                    "These nodes could not be formalized 1-1 as stated; the blueprint "
+                    "statements themselves need revision (see rejection details above)."
+                )
+                report = _write_report(args.name, report_lines)
+                print(
+                    f"==> No schedulable nodes left: {len(accepted_labels)} accepted, "
+                    f"{len(skipped_labels)} skipped, {len(blocked)} blocked by skipped. "
+                    "Partial Lean is in place; skipped nodes are findings about the blueprint.",
+                    flush=True,
+                )
+                print(f"Report written to {report.relative_to(REPO_ROOT)}")
+                return 1
             assembled = _standalone_accepted_code(accepted_chunks)
             final_path = SCRATCH_DIR / args.name / "assembled_formalization.lean"
             final_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2293,6 +2471,8 @@ def main(argv: list[str] | None = None) -> int:
         critic_output = ""
         last_attempt_kind = "lean-generation"
         last_chunk_code = ""
+        last_rejected_labels: set[str] = set()
+        refusal_payload: dict | None = None
         for lean_try in range(1, LEAN_GENERATION_RETRIES + 1):
             print(
                 f"==> Chunk {chunk_number}, Lean attempt "
@@ -2339,6 +2519,32 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Lean generation model call failed: {exc}", flush=True)
                 print(f"Report written to {report.relative_to(REPO_ROOT)}")
                 return 1
+            gen_share = lean_result.duration_s / max(1, len(target_labels))
+            for label in target_labels:
+                label_model_seconds[label] = label_model_seconds.get(label, 0.0) + gen_share
+
+            refusal = _parse_decomposition_refusal(lean_result.text)
+            if refusal is not None:
+                refused = [refusal["label"]] if refusal["label"] in target_labels else list(target_labels)
+                print(
+                    f"  generation refused: node(s) {', '.join(refused)} not formalizable "
+                    "as stated; routing to blueprint decomposition",
+                    flush=True,
+                )
+                report_lines.append(
+                    f"  - generation refused (NEEDS-DECOMPOSITION) for `{', '.join(refused)}`"
+                )
+                critic_output = (
+                    "The Lean generator determined the node cannot be formalized 1-1 as "
+                    "stated and needs blueprint helper nodes.\n"
+                    f"Reason: {refusal['reason']}\n"
+                    "Missing helpers:\n- " + "\n- ".join(refusal["missing_helpers"] or ["(unspecified)"])
+                )
+                last_attempt_kind = "blueprint"
+                last_rejected_labels = set(refused)
+                refusal_payload = refusal
+                break
+
             trial_dir = SCRATCH_DIR / args.name
             trial_dir.mkdir(parents=True, exist_ok=True)
             module_name, module_path = _chunk_module(args.name, chunk_number)
@@ -2388,6 +2594,26 @@ def main(argv: list[str] | None = None) -> int:
                     flush=True,
                 )
 
+            precheck_issues = _audit_lean_code(lean_code)
+            if precheck_issues:
+                # Free text-level rejection (sorry/admit, vacuous True, invented
+                # helpers) before paying for a Lean run.
+                critic_output = (
+                    "Deterministic code audit rejected the attempt before compiling:\n- "
+                    + "\n- ".join(precheck_issues)
+                ) + removed_imports_note
+                last_attempt_kind = "lean-generation"
+                print("  deterministic code audit failed pre-Lean; last lines:", flush=True)
+                for line in precheck_issues[:8]:
+                    print(f"    {line}", flush=True)
+                report_lines.append("  - result: failed deterministic pre-Lean code audit")
+                report_lines.append("")
+                report_lines.append("```text")
+                report_lines.append(critic_output[-4000:])
+                report_lines.append("```")
+                report_lines.append("")
+                continue
+
             print(f"==> Chunk {chunk_number}: running Lean", flush=True)
             attempt = _run_lean(lean_path, lean_command)
             report_lines.append(f"- Lean attempt {lean_try}: `{scratch_attempt.relative_to(REPO_ROOT)}`")
@@ -2409,6 +2635,7 @@ def main(argv: list[str] | None = None) -> int:
                     rejected_for_history = (
                         set(attempt.rejected_labels or []) & set(target_labels)
                     ) or set(target_labels)
+                    last_rejected_labels = set(rejected_for_history)
                     for label in rejected_for_history:
                         rejection_history.setdefault(label, []).append(critic_output[-2500:])
                     print(
@@ -2578,26 +2805,51 @@ def main(argv: list[str] | None = None) -> int:
         if set(target_labels) <= accepted_labels:
             continue
 
+        def _drop_failed_module_and_advance() -> None:
+            failed_path = _chunk_module(args.name, chunk_number)[1]
+            if not any(chunk.path == failed_path for chunk in accepted_chunks):
+                for artifact in (failed_path, failed_path.with_suffix(".olean")):
+                    try:
+                        artifact.unlink()
+                    except FileNotFoundError:
+                        pass
+
         if last_attempt_kind == "lean-generation":
-            report_lines.append(
-                "Stopped because Lean generation failed repeatedly for the same chunk; "
-                "the blueprint was not changed."
-            )
-            report = _write_report(args.name, report_lines)
-            print(
-                "Lean generation failed repeatedly; not safe to repair the blueprint from "
-                "syntax/elaboration/audit errors.",
-                flush=True,
-            )
-            print(f"Report written to {report.relative_to(REPO_ROOT)}")
-            return 1
+            # Persistent proof/encoding failure: skip these nodes rather than
+            # ending the run; they are findings about the blueprint.
+            _skip_labels(list(target_labels), "Lean generation retries exhausted")
+            _drop_failed_module_and_advance()
+            chunk_number += 1
+            continue
 
+        stuck_labels = sorted(last_rejected_labels or set(target_labels))
+        capped = [l for l in stuck_labels if label_repairs.get(l, 0) >= PER_LABEL_REPAIR_CAP]
+        if capped:
+            _skip_labels(capped, f"per-node repair budget ({PER_LABEL_REPAIR_CAP}) exhausted")
+            _drop_failed_module_and_advance()
+            chunk_number += 1
+            continue
         if repair_trials >= args.max_trials:
-            break
+            # Global repair budget gone: no more repairs, but don't end the run —
+            # skip the stuck nodes and let everything else finish.
+            _skip_labels(stuck_labels, "global repair budget exhausted")
+            _drop_failed_module_and_advance()
+            chunk_number += 1
+            continue
 
+        stuck_key = ",".join(stuck_labels)
         escalation_note = ""
+        if refusal_payload is not None:
+            # The generator itself asked for decomposition; start there.
+            escalation_note = _decomposition_note(
+                stuck_labels, refusal_payload.get("missing_helpers") or None
+            )
+            decomposition_tried.add(stuck_key)
+        give_up_on_stuck = False
         while True:
             repair_trials += 1
+            for label in stuck_labels:
+                label_repairs[label] = label_repairs.get(label, 0) + 1
             print(
                 f"==> Blueprint repair {repair_trials}/{args.max_trials} "
                 f"from chunk {chunk_number} Lean/audit output",
@@ -2661,27 +2913,52 @@ def main(argv: list[str] | None = None) -> int:
                 if repaired_fingerprints.get(label) != before
             }
             changed |= {label for label in repaired_fingerprints if label not in current_fingerprints}
-            if changed or escalation_note or repair_trials >= args.max_trials:
+            if changed or repair_trials >= args.max_trials:
                 break
-            # The repair call ran but left every node's TeX untouched — the
-            # audit will reject the exact same content again. Escalate once
-            # with an explicit instruction instead of regenerating blind.
-            print(
-                "  blueprint repair did not change parsed node text; escalating once "
-                "with explicit instructions",
-                flush=True,
-            )
-            report_lines.append("- blueprint repair was a no-op; escalated with explicit instructions")
-            escalation_note = (
-                "Your previous repair attempt changed NOTHING in the parsed node text — "
-                "the validator found zero modified nodes, so the audit will reject the "
-                "same content again. You MUST materially edit the TeX of the rejected "
-                "node(s) this time: add the missing concrete semantics, hypotheses, "
-                "parameters, or split the node into smaller nodes. If you believe the "
-                "blueprint is already correct and the Lean generation is at fault, "
-                "still make the node text more explicit about the required statement "
-                "shape so the generator cannot satisfy it with a tautology."
-            )
+            if any(label_repairs.get(l, 0) >= PER_LABEL_REPAIR_CAP for l in stuck_labels):
+                give_up_on_stuck = True
+                break
+            # No-op repair ladder: plain -> explicit escalation -> forced
+            # decomposition -> give up on the node. A repair that changes zero
+            # nodes guarantees the audit rejects the same content again, so
+            # each rung must materially change strategy, not just repeat.
+            if not escalation_note:
+                print(
+                    "  blueprint repair did not change parsed node text; escalating once "
+                    "with explicit instructions",
+                    flush=True,
+                )
+                report_lines.append("- blueprint repair was a no-op; escalated with explicit instructions")
+                escalation_note = (
+                    "Your previous repair attempt changed NOTHING in the parsed node text — "
+                    "the validator found zero modified nodes, so the audit will reject the "
+                    "same content again. You MUST materially edit the TeX of the rejected "
+                    "node(s) this time: add the missing concrete semantics, hypotheses, "
+                    "parameters, or split the node into smaller nodes. If you believe the "
+                    "blueprint is already correct and the Lean generation is at fault, "
+                    "still make the node text more explicit about the required statement "
+                    "shape so the generator cannot satisfy it with a tautology."
+                )
+                continue
+            if stuck_key not in decomposition_tried:
+                decomposition_tried.add(stuck_key)
+                print(
+                    "  repair still a no-op after escalation; forcing decomposition mode",
+                    flush=True,
+                )
+                report_lines.append("- repair no-op after escalation; forced decomposition mode")
+                escalation_note = _decomposition_note(stuck_labels)
+                continue
+            # Every repair strategy no-oped: stop fighting this node.
+            give_up_on_stuck = True
+            break
+
+        if give_up_on_stuck:
+            _skip_labels(stuck_labels, "all repair strategies were no-ops")
+            _drop_failed_module_and_advance()
+            chunk_number += 1
+            continue
+
         invalidated = _dependency_descendants(repaired_validation.nodes, changed) if changed else set()
         before_count = len(accepted_chunks)
         kept_chunks: list[AcceptedChunk] = []
@@ -2714,6 +2991,15 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print("  blueprint repair did not change parsed node text; keeping accepted chunks", flush=True)
             report_lines.append("- blueprint repair did not change parsed node text; kept accepted chunks")
+        # The failed chunk's module file was never accepted; remove it so a
+        # later --continue does not re-check it and discard accepted work.
+        failed_module_path = _chunk_module(args.name, chunk_number)[1]
+        if not any(chunk.path == failed_module_path for chunk in accepted_chunks):
+            for artifact in (failed_module_path, failed_module_path.with_suffix(".olean")):
+                try:
+                    artifact.unlink()
+                except FileNotFoundError:
+                    pass
         chunk_number += 1
 
     report_lines.append(f"Stopped after {args.max_trials} failed trial(s).")
