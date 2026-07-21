@@ -43,6 +43,7 @@ from pathlib import Path
 from generate_blueprint import _extract_json, read_paper
 from lean_preflight import check_lean_environment, default_lean_command
 from model_runners import RunnerError, get_runner
+from model_runners.base import is_environment_error
 from validate_blueprint import Node, print_result, validate_blueprint
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -51,11 +52,6 @@ SKILL_PATH = REPO_ROOT / ".claude" / "skills" / "paper-to-blueprint" / "SKILL.md
 SCRATCH_DIR = REPO_ROOT / ".auto-blueprint" / "formalization"
 PUBLISHED_LEAN_NAME = "formalization.lean"
 LEAN_GENERATION_RETRIES = 5
-# Per-label ceilings: a single stuck node must not consume the whole run.
-# When either cap is hit, the node is skipped (reported as unformalized) and
-# the rest of the blueprint continues.
-PER_LABEL_REPAIR_CAP = 3
-PER_LABEL_MODEL_SECONDS_CAP = 1500
 AUTO_CHUNK_SIZE = 0
 DEFAULT_AUTO_CHUNK_LIMIT = 8
 MEDIUM_NODES_PER_CHUNK = 3
@@ -349,22 +345,10 @@ def _decomposition_note(labels: list[str], helpers: list[str] | None = None) -> 
     )
 
 
-def _next_chunk(
-    nodes: dict[str, Node],
-    accepted: set[str],
-    *,
-    chunk_size: int,
-    skipped: set[str] | frozenset[str] = frozenset(),
-) -> list[str]:
-    """Pick a dependency-closed chunk, batching easy nodes and isolating hard ones.
-
-    ``skipped`` labels are unschedulable (given up on); nodes depending on them
-    never become ready, which is intended — they are reported as unformalized.
-    """
+def _next_chunk(nodes: dict[str, Node], accepted: set[str], *, chunk_size: int) -> list[str]:
+    """Pick a dependency-closed chunk, batching easy nodes and isolating hard ones."""
     available = set(accepted) | {label for label, node in nodes.items() if node.mathlibok}
-    remaining = [
-        label for label in _node_order(nodes) if label not in available and label not in skipped
-    ]
+    remaining = [label for label in _node_order(nodes) if label not in available]
     blocks = _node_tex_blocks(nodes)
     difficulties = {
         label: _node_difficulty(label, node, blocks.get(label, ""))
@@ -2348,22 +2332,11 @@ def main(argv: list[str] | None = None) -> int:
     # Import lines discovered to have no compiled .olean locally; fed back into
     # every later generation prompt so the model stops importing them.
     unavailable_imports: set[str] = set()
-    # Per-label accounting so no single node can consume the run (repairs,
-    # model time), plus the set of labels given up on. Skipped labels and
-    # everything depending on them are reported as unformalized at the end.
-    label_repairs: dict[str, int] = {}
-    label_model_seconds: dict[str, float] = {}
+    # Fully autonomous refinement: every node failure is a Lean-or-blueprint
+    # issue the model must fix in-loop (regenerate, repair, escalate,
+    # decompose). The ONLY hard stop is exhausting --max-trials blueprint
+    # repairs; there is never a human-intervention exit.
     decomposition_tried: set[str] = set()
-    skipped_labels: set[str] = set()
-
-    def _skip_labels(labels: list[str], why: str) -> None:
-        skipped_labels.update(labels)
-        print(
-            f"==> Skipping node(s) {', '.join(labels)} ({why}); they will be "
-            "reported as unformalized. The rest of the blueprint continues.",
-            flush=True,
-        )
-        report_lines.append(f"- skipped node(s) ({why}): `{', '.join(labels)}`")
 
     while True:
         print(
@@ -2383,45 +2356,8 @@ def main(argv: list[str] | None = None) -> int:
         blueprint_source = _read_blueprint_source(args.name)
         current_fingerprints = _node_fingerprints(validation.nodes)
         accepted_labels, accepted_imports, accepted_signatures = _accepted_state(accepted_chunks)
-        target_labels = _next_chunk(
-            validation.nodes, accepted_labels, chunk_size=chunk_size, skipped=skipped_labels
-        )
-        over_budget = [
-            label
-            for label in target_labels
-            if label_model_seconds.get(label, 0.0) > PER_LABEL_MODEL_SECONDS_CAP
-        ]
-        if over_budget:
-            _skip_labels(over_budget, f"exceeded {PER_LABEL_MODEL_SECONDS_CAP}s model-time budget")
-            continue
+        target_labels = _next_chunk(validation.nodes, accepted_labels, chunk_size=chunk_size)
         if not target_labels:
-            unfinished = [
-                label
-                for label in _node_order(validation.nodes)
-                if not validation.nodes[label].mathlibok and label not in accepted_labels
-            ]
-            if unfinished:
-                blocked = [label for label in unfinished if label not in skipped_labels]
-                report_lines.append("## Finished with unformalized nodes")
-                report_lines.append(
-                    f"- accepted: `{len(accepted_labels)}` node(s); "
-                    f"skipped: `{len(skipped_labels)}`; blocked by skipped: `{len(blocked)}`"
-                )
-                report_lines.append(f"- skipped node(s): `{', '.join(sorted(skipped_labels)) or '(none)'}`")
-                report_lines.append(f"- blocked node(s): `{', '.join(blocked) or '(none)'}`")
-                report_lines.append(
-                    "These nodes could not be formalized 1-1 as stated; the blueprint "
-                    "statements themselves need revision (see rejection details above)."
-                )
-                report = _write_report(args.name, report_lines)
-                print(
-                    f"==> No schedulable nodes left: {len(accepted_labels)} accepted, "
-                    f"{len(skipped_labels)} skipped, {len(blocked)} blocked by skipped. "
-                    "Partial Lean is in place; skipped nodes are findings about the blueprint.",
-                    flush=True,
-                )
-                print(f"Report written to {report.relative_to(REPO_ROOT)}")
-                return 1
             assembled = _standalone_accepted_code(accepted_chunks)
             final_path = SCRATCH_DIR / args.name / "assembled_formalization.lean"
             final_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2511,18 +2447,26 @@ def main(argv: list[str] | None = None) -> int:
                 report_lines.append(str(exc)[-4000:])
                 report_lines.append("```")
                 report_lines.append("")
-                report_lines.append(
-                    "Stopped because the read-only Lean-generation model call failed before "
-                    "producing a chunk; the blueprint was not changed."
+                if is_environment_error(exc):
+                    # Quota/auth/CLI failures cannot be fixed by refinement; exit
+                    # with resumable state so the run continues once resolved.
+                    report_lines.append(
+                        "Stopped on an environment error (quota/auth/CLI); rerun with "
+                        "--continue once resolved. The blueprint was not changed."
+                    )
+                    report = _write_report(args.name, report_lines)
+                    print(f"Environment error stopped the run: {exc}", flush=True)
+                    print(f"Report written to {report.relative_to(REPO_ROOT)}")
+                    return 1
+                # Anything else (post-retry transient, malformed reply) is
+                # handled in-loop: count it as a failed attempt and continue.
+                print(
+                    f"  model call failed ({str(exc)[:200]}); treating as a failed "
+                    f"attempt and continuing refinement",
+                    flush=True,
                 )
-                report = _write_report(args.name, report_lines)
-                print(f"Lean generation model call failed: {exc}", flush=True)
-                print(f"Report written to {report.relative_to(REPO_ROOT)}")
-                return 1
-            gen_share = lean_result.duration_s / max(1, len(target_labels))
-            for label in target_labels:
-                label_model_seconds[label] = label_model_seconds.get(label, 0.0) + gen_share
-
+                time.sleep(15)
+                continue
             refusal = _parse_decomposition_refusal(lean_result.text)
             if refusal is not None:
                 refused = [refusal["label"]] if refusal["label"] in target_labels else list(target_labels)
@@ -2805,37 +2749,21 @@ def main(argv: list[str] | None = None) -> int:
         if set(target_labels) <= accepted_labels:
             continue
 
-        def _drop_failed_module_and_advance() -> None:
-            failed_path = _chunk_module(args.name, chunk_number)[1]
-            if not any(chunk.path == failed_path for chunk in accepted_chunks):
-                for artifact in (failed_path, failed_path.with_suffix(".olean")):
-                    try:
-                        artifact.unlink()
-                    except FileNotFoundError:
-                        pass
-
         if last_attempt_kind == "lean-generation":
-            # Persistent proof/encoding failure: skip these nodes rather than
-            # ending the run; they are findings about the blueprint.
-            _skip_labels(list(target_labels), "Lean generation retries exhausted")
-            _drop_failed_module_and_advance()
-            chunk_number += 1
-            continue
+            # Persistent proof/encoding failure means the blueprint is steering
+            # the generator into an unprovable or fragile encoding. That is a
+            # blueprint issue: fall through to repair (bounded by --max-trials)
+            # so the model fixes it autonomously.
+            print(
+                "  Lean generation retries exhausted; escalating to blueprint repair "
+                "with the accumulated error output.",
+                flush=True,
+            )
+            report_lines.append("- generation retries exhausted; escalated to blueprint repair")
 
         stuck_labels = sorted(last_rejected_labels or set(target_labels))
-        capped = [l for l in stuck_labels if label_repairs.get(l, 0) >= PER_LABEL_REPAIR_CAP]
-        if capped:
-            _skip_labels(capped, f"per-node repair budget ({PER_LABEL_REPAIR_CAP}) exhausted")
-            _drop_failed_module_and_advance()
-            chunk_number += 1
-            continue
         if repair_trials >= args.max_trials:
-            # Global repair budget gone: no more repairs, but don't end the run —
-            # skip the stuck nodes and let everything else finish.
-            _skip_labels(stuck_labels, "global repair budget exhausted")
-            _drop_failed_module_and_advance()
-            chunk_number += 1
-            continue
+            break
 
         stuck_key = ",".join(stuck_labels)
         escalation_note = ""
@@ -2845,11 +2773,8 @@ def main(argv: list[str] | None = None) -> int:
                 stuck_labels, refusal_payload.get("missing_helpers") or None
             )
             decomposition_tried.add(stuck_key)
-        give_up_on_stuck = False
         while True:
             repair_trials += 1
-            for label in stuck_labels:
-                label_repairs[label] = label_repairs.get(label, 0) + 1
             print(
                 f"==> Blueprint repair {repair_trials}/{args.max_trials} "
                 f"from chunk {chunk_number} Lean/audit output",
@@ -2915,13 +2840,10 @@ def main(argv: list[str] | None = None) -> int:
             changed |= {label for label in repaired_fingerprints if label not in current_fingerprints}
             if changed or repair_trials >= args.max_trials:
                 break
-            if any(label_repairs.get(l, 0) >= PER_LABEL_REPAIR_CAP for l in stuck_labels):
-                give_up_on_stuck = True
-                break
             # No-op repair ladder: plain -> explicit escalation -> forced
-            # decomposition -> give up on the node. A repair that changes zero
-            # nodes guarantees the audit rejects the same content again, so
-            # each rung must materially change strategy, not just repeat.
+            # decomposition -> regenerate with accumulated audit feedback. A
+            # repair that changes zero nodes guarantees the audit rejects the
+            # same content again, so each rung must materially change strategy.
             if not escalation_note:
                 print(
                     "  blueprint repair did not change parsed node text; escalating once "
@@ -2949,15 +2871,17 @@ def main(argv: list[str] | None = None) -> int:
                 report_lines.append("- repair no-op after escalation; forced decomposition mode")
                 escalation_note = _decomposition_note(stuck_labels)
                 continue
-            # Every repair strategy no-oped: stop fighting this node.
-            give_up_on_stuck = True
+            # Every repair strategy no-oped this round. Refinement continues
+            # autonomously: regenerate the chunk with the accumulated audit
+            # feedback (generation is stochastic and the rejection history
+            # grows each round). Only --max-trials can end the run.
+            print(
+                "  repair strategies all no-oped this round; regenerating with "
+                "accumulated audit feedback",
+                flush=True,
+            )
+            report_lines.append("- repairs no-oped; regenerating with accumulated audit feedback")
             break
-
-        if give_up_on_stuck:
-            _skip_labels(stuck_labels, "all repair strategies were no-ops")
-            _drop_failed_module_and_advance()
-            chunk_number += 1
-            continue
 
         invalidated = _dependency_descendants(repaired_validation.nodes, changed) if changed else set()
         before_count = len(accepted_chunks)

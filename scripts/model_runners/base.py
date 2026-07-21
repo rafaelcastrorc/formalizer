@@ -29,6 +29,46 @@ class RunnerError(RuntimeError):
     """Backend failure: auth, CLI missing, network, timeout, or malformed reply."""
 
 
+# Server-side/transient failure signatures: retried automatically even when the
+# caller asked for retries=0, because refinement runs are autonomous and must
+# not die to a blip. Quota/spend/session limits are deliberately NOT here —
+# those cannot be fixed by waiting a minute.
+TRANSIENT_ERROR_MARKERS = (
+    "529",
+    "overloaded",
+    "connection closed",
+    "connection error",
+    "connection reset",
+    "network error",
+    "internal server error",
+    "502",
+    "503",
+    "504",
+)
+
+NON_RETRYABLE_MARKERS = (
+    "session limit",
+    "spend limit",
+    "usage limit",
+    "credit balance",
+    "invalid api key",
+    "not found on path",
+)
+
+
+def is_transient_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    if any(marker in text for marker in NON_RETRYABLE_MARKERS):
+        return False
+    return any(marker in text for marker in TRANSIENT_ERROR_MARKERS)
+
+
+def is_environment_error(exc: Exception) -> bool:
+    """True for failures no amount of refinement can fix (quota, auth, CLI)."""
+    text = str(exc).lower()
+    return any(marker in text for marker in NON_RETRYABLE_MARKERS)
+
+
 @dataclass
 class RunResult:
     text: str
@@ -90,7 +130,9 @@ class ModelRunner(abc.ABC):
         full_system = self.build_system(system)
         cwd_path = Path(cwd) if cwd else None
         last_exc: Exception | None = None
-        for attempt in range(retries + 1):
+        attempt = 0
+        transient_budget = 3  # extra retries for server-side blips, even at retries=0
+        while True:
             # monotonic: wall-clock (time.time) counts machine sleep, which made
             # reported durations disagree with the run log's monotonic stamps.
             start = time.monotonic()
@@ -104,10 +146,23 @@ class ModelRunner(abc.ABC):
             except RunnerError as exc:
                 last_exc = exc
                 if attempt < retries:
-                    wait = 5 * (2**attempt)
+                    attempt += 1
+                    wait = 5 * (2 ** (attempt - 1))
                     print(f"  ! {self.backend_name} failed ({exc}); retrying in {wait}s")
                     time.sleep(wait)
-        raise RunnerError(f"{self.backend_name} failed after {retries + 1} attempts: {last_exc}")
+                    continue
+                if transient_budget > 0 and is_transient_error(exc):
+                    transient_budget -= 1
+                    wait = 30 * (4 - transient_budget)
+                    print(
+                        f"  ! {self.backend_name} transient failure ({str(exc)[:200]}); "
+                        f"retrying in {wait}s ({transient_budget} transient retries left)",
+                        flush=True,
+                    )
+                    time.sleep(wait)
+                    continue
+                break
+        raise RunnerError(f"{self.backend_name} failed after {attempt + 1} attempts: {last_exc}")
 
     @abc.abstractmethod
     def _run_impl(self, prompt: str, system: str, cwd: Path | None) -> RunResult:
