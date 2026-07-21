@@ -2247,6 +2247,53 @@
 
 \chapter{Fine-grained reductions between intermediate problems}
 
+\begin{lemma}[Elementary arithmetic for recursive split indices]
+  \label{lem:split-tree-index-arithmetic}
+  \lean{Nat.succ_pos, Nat.succ_le_of_lt, Nat.lt_of_lt_of_le, Nat.le_sub_of_add_le}
+  \mathlibok
+  This leaf records the elementary natural-number inequalities used when a
+  recursive split node or concrete call record carries an index
+  $k:\operatorname{Fin} n$ with a right child proof $h:k+1<n$. No proof in this
+  blueprint may require importing `Mathlib.Tactic.Omega' or using the `omega'
+  tactic; the local Mathlib build used by the disposable Lean checker does not
+  provide that tactic module.
+
+  The required arithmetic facts are:
+  \[
+  \begin{array}{ll}
+    \operatorname{zeroLtFromTwoLe}:&
+      2\le n \Rightarrow 0<n,\\
+    \operatorname{splitIndexLt}:&
+      k:\operatorname{Fin} n \Rightarrow k<n,\\
+    \operatorname{splitIndexLtSucc}:&
+      k:\operatorname{Fin} n \Rightarrow k<n+1,\\
+    \operatorname{rightChildIndexLtSucc}:&
+      h:k+1<n \Rightarrow k+1<n+1,\\
+    \operatorname{suffixCardinalityGeTwo}:&
+      h:k+1<n \Rightarrow 2\le n-k,\\
+    \operatorname{rightOrigIndexLt}:&
+      j<n-(k+1) \Rightarrow k+1+j<n,\\
+    \operatorname{canonicalOffsetLt}:&
+      k<q<n \Rightarrow q-(k+1)<n-(k+1),\\
+    \operatorname{canonicalOffsetOrig}:&
+      k<q \Rightarrow k+1+(q-(k+1))=q .
+  \end{array}
+  \]
+  In Lean these should be proved with core `Nat' lemmas and the proof fields
+  already stored in the parameter and call records. For example,
+  `zeroLtFromTwoLe' is obtained by `lt_of_lt_of_le zero_lt_two hn';
+  `suffixCardinalityGeTwo' is obtained from
+  `Nat.succ_le_of_lt h : k+2 \le n' followed by `Nat.le_sub_of_add_le`;
+  `rightOrigIndexLt' is obtained from the defining inequality
+  `j.isLt : j < n-(k+1)' by the standard add/sub cancellation lemmas for
+  naturals. These facts must be projected as theorem fields from the split-tree
+  arithmetic package whenever the generated construction uses names such as
+  `splitIndex', `hasRightChild', `canonicalLower', or `canonicalUpper'.
+  A generated proof term `by omega' at any of these obligations is rejected;
+  an implementation must instead expose and use the named arithmetic fields
+  above.
+\end{lemma}
+
 \begin{lemma}[Append-coordinate construction for bichromatic OV]
   \label{lem:ov-bichromatic-append-construction}
   \uses{def:bichromatic-ov, def:ov, def:inner-prod}
@@ -2401,9 +2448,191 @@
   equivalent.
 \end{proof}
 
+\begin{definition}[OV/bichromatic OV reduction regimes]
+  \label{def:ov-bichromatic-regimes}
+  \uses{def:ov, def:bichromatic-ov}
+  This node owns the four regime predicates used by
+  Lemma~\ref{lem:ov-bichromatic-equiv}. They are top-level mathematical
+  definitions with fixed names and fixed bodies, not optional fields of the
+  reduction witness and not proof-only summaries.
+  The declaration audited at this label is a concrete package
+  $\operatorname{OVBichromaticRegimePackage}$, or an equivalent dependent Sigma
+  package, whose own projections include the four predicate-valued fields
+  listed below and the four iff theorem fields stating their bodies. It is not
+  a registry of external names, not a proof-only structure about already
+  declared predicates, and not a package whose only theorem fields are
+  reflexive equalities such as
+  \[
+    \operatorname{OVMonoToBiSrcRegime}
+      =\operatorname{OVMonoToBiSrcRegime}.
+  \]
+  After unfolding the declaration audited at
+  \ref{def:ov-bichromatic-regimes}, the types of the package fields themselves
+  must expose the parameter records and concrete bodies below:
+  \[
+  \begin{array}{ll}
+    R.\operatorname{monoToBiSrcRegime}
+      &: \operatorname{OVParam}\to\mathrm{Prop},\\
+    R.\operatorname{monoToBiSrcRegime\_iff}
+      &: \forall p,\
+        R.\operatorname{monoToBiSrcRegime}(p)
+        \Longleftrightarrow 2\le p.n\wedge1\le p.\ell,\\
+    R.\operatorname{monoToBiTgtRegime}
+      &: \operatorname{BichromaticOVParam}\to\mathrm{Prop},\\
+    R.\operatorname{monoToBiTgtRegime\_iff}
+      &: \forall q,\
+        R.\operatorname{monoToBiTgtRegime}(q)
+        \Longleftrightarrow
+        1\le q.n\wedge1\le q.\ell\wedge
+        \exists p:\operatorname{OVParam},\
+          R.\operatorname{monoToBiSrcRegime}(p)\wedge
+          q.n=p.n\wedge q.\ell=p.\ell,\\
+    R.\operatorname{biToMonoSrcRegime}
+      &: \operatorname{BichromaticOVParam}\to\mathrm{Prop},\\
+    R.\operatorname{biToMonoSrcRegime\_iff}
+      &: \forall p,\
+        R.\operatorname{biToMonoSrcRegime}(p)
+        \Longleftrightarrow 1\le p.n\wedge1\le p.\ell,\\
+    R.\operatorname{biToMonoTgtRegime}
+      &: \operatorname{OVParam}\to\mathrm{Prop},\\
+    R.\operatorname{biToMonoTgtRegime\_iff}
+      &: \forall q,\
+        R.\operatorname{biToMonoTgtRegime}(q)
+        \Longleftrightarrow
+        2\le q.n\wedge3\le q.\ell\wedge
+        \exists p:\operatorname{BichromaticOVParam},\
+          R.\operatorname{biToMonoSrcRegime}(p)\wedge
+          q.n=p.n+p.n\wedge q.\ell=p.\ell+2 .
+  \end{array}
+  \]
+  The public reserved names
+  $\operatorname{OVMonoToBiSrcRegime}$,
+  $\operatorname{OVMonoToBiTgtRegime}$,
+  $\operatorname{OVBiToMonoSrcRegime}$ and
+  $\operatorname{OVBiToMonoTgtRegime}$ must be transparent projections from
+  this package, or transparent aliases to those projections with equations
+  showing, for example,
+  \[
+    \operatorname{OVMonoToBiSrcRegime}(p)
+    =
+    R.\operatorname{monoToBiSrcRegime}(p).
+  \]
+  The accompanying public iff theorems must be obtained by projecting the
+  concrete package fields above. A formalization that defines the public names
+  elsewhere and then audits only a package of identifiers plus `rfl' theorems
+  has not exposed the predicate bodies at this label.
+
+  Let $\operatorname{OVParam}$ be the full parameter record from
+  Definition~\ref{def:ov}, with fields
+  $p.n$, $p.\ell$, $p.\operatorname{hn}:2\le p.n$ and
+  $p.\operatorname{hell}:1\le p.\ell$. Let
+  $\operatorname{BichromaticOVParam}$ be the full parameter record from
+  Definition~\ref{def:bichromatic-ov}, with fields
+  $q.n$, $q.\ell$, $q.\operatorname{hn}:1\le q.n$ and
+  $q.\operatorname{hell}:1\le q.\ell$. The four reserved Lean declarations are
+  predicates with the following exact meanings:
+  \[
+  \begin{array}{ll}
+    \operatorname{OVMonoToBiSrcRegime}(p)
+      &:\Longleftrightarrow
+      2\le p.n\ \wedge\ 1\le p.\ell,\\
+    \operatorname{OVMonoToBiTgtRegime}(q)
+      &:\Longleftrightarrow
+      1\le q.n\ \wedge\ 1\le q.\ell\ \wedge\
+      \exists p:\operatorname{OVParam},\
+        \operatorname{OVMonoToBiSrcRegime}(p)\ \wedge\
+        q.n=p.n\ \wedge\ q.\ell=p.\ell,\\
+    \operatorname{OVBiToMonoSrcRegime}(p)
+      &:\Longleftrightarrow
+      1\le p.n\ \wedge\ 1\le p.\ell,\\
+    \operatorname{OVBiToMonoTgtRegime}(q)
+      &:\Longleftrightarrow
+      2\le q.n\ \wedge\ 3\le q.\ell\ \wedge\
+      \exists p:\operatorname{BichromaticOVParam},\
+        \operatorname{OVBiToMonoSrcRegime}(p)\ \wedge\
+        q.n=p.n+p.n\ \wedge\ q.\ell=p.\ell+2 .
+  \end{array}
+  \]
+  A compliant Lean implementation may write these as transparent `def`s or as
+  reducible abbreviations. In either case, unfolding the declaration with the
+  reserved name must reveal the corresponding conjunction/existential above.
+  The declarations may not be
+  \[
+    \operatorname{OVMonoToBiSrcRegime}(p):=\mathrm{True},
+    \quad
+    \operatorname{OVMonoToBiTgtRegime}(q):=\mathrm{True},
+    \quad
+    \operatorname{OVBiToMonoSrcRegime}(p):=\mathrm{True},
+    \quad
+    \operatorname{OVBiToMonoTgtRegime}(q):=\mathrm{True},
+  \]
+  and may not reduce to `Unit', `Nonempty True', an always-true marker
+  proposition, or a structure whose only field is a trivial proof.
+
+  The same audited declaration must expose the four iff theorems
+  \[
+  \begin{array}{ll}
+    \operatorname{OVMonoToBiSrcRegime\_iff}:&
+      \forall p,\
+      \operatorname{OVMonoToBiSrcRegime}(p)
+      \Longleftrightarrow 2\le p.n\wedge 1\le p.\ell,\\
+    \operatorname{OVMonoToBiTgtRegime\_iff}:&
+      \forall q,\
+      \operatorname{OVMonoToBiTgtRegime}(q)
+      \Longleftrightarrow
+      1\le q.n\wedge1\le q.\ell\wedge
+      \exists p:\operatorname{OVParam},\
+        \operatorname{OVMonoToBiSrcRegime}(p)\wedge
+        q.n=p.n\wedge q.\ell=p.\ell,\\
+    \operatorname{OVBiToMonoSrcRegime\_iff}:&
+      \forall p,\
+      \operatorname{OVBiToMonoSrcRegime}(p)
+      \Longleftrightarrow 1\le p.n\wedge1\le p.\ell,\\
+    \operatorname{OVBiToMonoTgtRegime\_iff}:&
+      \forall q,\
+      \operatorname{OVBiToMonoTgtRegime}(q)
+      \Longleftrightarrow
+      2\le q.n\wedge3\le q.\ell\wedge
+      \exists p:\operatorname{BichromaticOVParam},\
+        \operatorname{OVBiToMonoSrcRegime}(p)\wedge
+        q.n=p.n+p.n\wedge q.\ell=p.\ell+2 .
+  \end{array}
+  \]
+  These are theorem fields or transparent theorems attached to this node. They
+  are not propositions stored as data. In particular, a theorem whose right
+  side is `True' or whose proof is `Iff.rfl' after defining the regime to be
+  `True' fails this node. A theorem whose statement is only an identity
+  between a predicate and itself, or an iff between a predicate and itself,
+  also fails this node: the right-hand side of each iff must be the displayed
+  conjunction/existential body, so that the statement itself rules out an
+  abstract registry implementation.
+
+  The image-membership facts are also part of the definition package. If
+  $\operatorname{OVToBichromaticParam}(p)$ is the identity parameter map with
+  the bichromatic proof fields filled from $p.\operatorname{hn}$ and
+  $p.\operatorname{hell}$, then
+  \[
+    \operatorname{monoToBiTargetInRegime}:
+      \operatorname{OVMonoToBiSrcRegime}(p)\to
+      \operatorname{OVMonoToBiTgtRegime}
+        (\operatorname{OVToBichromaticParam}(p)).
+  \]
+  If $\operatorname{BOVAppendOVParam}(p)$ is the append-coordinate parameter
+  map $(n,\ell)\mapsto(2n,\ell+2)$ with the $\OV$ proof fields filled, then
+  \[
+    \operatorname{biToMonoTargetInRegime}:
+      \operatorname{OVBiToMonoSrcRegime}(p)\to
+      \operatorname{OVBiToMonoTgtRegime}
+        (\operatorname{BOVAppendOVParam}(p)).
+  \]
+  These two fields must be proved from the displayed bodies by giving the
+  required source parameter as the existential witness. They must not be proved
+  by `trivial', because the target predicates are not definitionally true.
+\end{definition}
+
 \begin{lemma}[OV is subquadratic equivalent to bichromatic OV, Lemma A.4]
   \label{lem:ov-bichromatic-equiv}
-  \uses{def:ov, def:bichromatic-ov, lem:ov-bichromatic-append-construction, def:fg-reduction-predicates, def:tsq-alg-exists}
+  \uses{def:ov, def:bichromatic-ov, def:ov-bichromatic-regimes, lem:ov-bichromatic-append-construction, def:fg-reduction-predicates, def:tsq-alg-exists}
   This node asserts a concrete pair of fine-grained reductions, not merely an
   abstract logical equivalence:
   \[
@@ -2464,17 +2693,17 @@
       \Longrightarrow n\ge2,\ \ell\ge1,
     \qquad
     R_{\mathrm{bi}\leftarrow\mathrm{mono}}.\operatorname{SrcRegime}(n,\ell)
-      \Longrightarrow n\ge1,\ \ell\ge0,
+      \Longrightarrow n\ge1,\ \ell\ge1,
   \]
-  and each regime contains all sufficiently large parameter pairs in the
-  displayed slice. In particular, neither source regime may be empty, `False',
-  or a proposition with no inhabitants.
-  The mono-to-bi source-regime projection must contain the dimension lower
-  bound as a named field, for example
+  and each regime is the concrete full-domain regime from
+  Definition~\ref{def:ov-bichromatic-regimes}. In particular, neither source
+  regime may be empty, `False', `True', or a proposition with no parameter
+  constraints.
+  The mono-to-bi source-regime projection must contain exactly the two
+  well-formedness bounds, not an unspecified source-slice predicate:
   \[
     \operatorname{monoToBiSrcRegime\_iff}(n,\ell)
-    \Longleftrightarrow n\ge2\wedge \ell\ge1\wedge
-      \operatorname{SourceSlice}_{\mathrm{mono}}(n,\ell).
+    \Longleftrightarrow n\ge2\wedge \ell\ge1 .
   \]
   The audited witness must also expose the two projections
   \[
@@ -2484,11 +2713,10 @@
   \]
   for every
   $h:R_{\mathrm{mono}\leftarrow\mathrm{bi}}.\operatorname{SrcRegime}(n,\ell)$,
-  and a converse constructor from
-  $n\ge2$, $\ell\ge1$ and
-  $\operatorname{SourceSlice}_{\mathrm{mono}}(n,\ell)$. These projections must
-  be recoverable from the declaration audited at this label, not merely from a
-  comment or an external helper theorem.
+  and a converse constructor from $n\ge2$ and $\ell\ge1$. These projections
+  must be recoverable from the declaration audited at this label, not merely
+  from a comment or an external helper theorem. The bi-to-mono source-regime
+  projection analogously unfolds to $n\ge1\wedge\ell\ge1$.
   A source regime saying only $n\ge2$, or only eventual nonemptiness, is not the
   regime used in this lemma: the reduction calls the bichromatic problem in the
   same dimension $\ell$, so the target instance is only one of the concrete
@@ -2497,6 +2725,61 @@
   `fun p => 2 <= p.n' is explicitly rejected as the mono-to-bi source regime:
   it drops the dimension condition and does not provide the required
   `monoToBiSrcRegime_iff' equivalence.
+
+  The four generated Lean names used for the directional reduction regimes are
+  reserved at this label and must have the concrete meanings below. They are
+  predicates on the corresponding full parameter records; none of them may be
+  definitionally `True', `Unit', `Nonempty True', or a proposition whose only
+  field is `trivial'.
+  \[
+  \begin{array}{ll}
+    \operatorname{OVMonoToBiSrcRegime}(p):&
+      2\le p.n\ \wedge\ 1\le p.\ell,\\
+    \operatorname{OVMonoToBiTgtRegime}(q):&
+      1\le q.n\ \wedge\ 1\le q.\ell\ \wedge\
+      \exists p:\operatorname{OVParam},\
+        \operatorname{OVMonoToBiSrcRegime}(p)
+        \wedge q.n=p.n\wedge q.\ell=p.\ell,\\
+    \operatorname{OVBiToMonoSrcRegime}(p):&
+      1\le p.n\ \wedge\ 1\le p.\ell,\\
+    \operatorname{OVBiToMonoTgtRegime}(q):&
+      2\le q.n\ \wedge\ 3\le q.\ell\ \wedge\
+      \exists p:\operatorname{BichromaticOVParam},\
+        \operatorname{OVBiToMonoSrcRegime}(p)
+        \wedge q.n=p.n+p.n\wedge q.\ell=p.\ell+2 .
+  \end{array}
+  \]
+  These are the definitions from
+  Definition~\ref{def:ov-bichromatic-regimes}; the equivalence witness must
+  import those exact predicates instead of redeclaring local all-true regimes.
+  The audited witness must expose theorem fields
+  `OVMonoToBiSrcRegime_iff', `OVMonoToBiTgtRegime_iff',
+  `OVBiToMonoSrcRegime_iff', and `OVBiToMonoTgtRegime_iff' proving the four
+  displayed equivalences. It must also expose image-membership fields
+  \[
+  \begin{array}{ll}
+    \operatorname{monoToBiTargetInRegime}:&
+      \operatorname{OVMonoToBiSrcRegime}(p)\to
+      \operatorname{OVMonoToBiTgtRegime}
+        (\operatorname{OVToBichromaticParam}(p)),\\
+    \operatorname{biToMonoTargetInRegime}:&
+      \operatorname{OVBiToMonoSrcRegime}(p)\to
+      \operatorname{OVBiToMonoTgtRegime}
+        (\operatorname{BOVAppendOVParam}(p)).
+  \end{array}
+  \]
+  These fields are part of the reduction witness because the target oracle is
+  only called on parameters lying in its target regime. The mono-to-bi target
+  regime is therefore the image of the identity parameter map into the
+  bichromatic family, with the required positivity proofs; the bi-to-mono target
+  regime is the image of the append-coordinate parameter map
+  $(n,\ell)\mapsto(2n,\ell+2)$. A generated definition such as
+  `def OVMonoToBiTgtRegime := True' or
+  `def OVBiToMonoSrcRegime := True' is explicitly rejected even if the
+  surrounding reduction package separately constructs well-formed parameters.
+  A target regime saying only `True' erases the parameter transformation and
+  makes the runtime and oracle-call obligations independent of the concrete
+  target family, so it is not the regime used in Lemma A.4.
 
   The mono-to-bi subpackage has concrete fields:
   \[
@@ -2734,12 +3017,12 @@
 
 \begin{lemma}[Min-IP is at least as hard as OV]
   \label{lem:minip-harder-ov}
-  \uses{def:minip, def:gamma-minip, def:ov, def:fg-reduction-predicates, def:no-tsq-alg}
+  \uses{def:minip, def:gamma-minip, def:ov, def:fg-reduction-predicates, def:no-tsq-alg, conjecture:ovc, def:log-parameter-regimes}
   For any $\gamma \ge 1$,
   $\AtLeastHard{\MinIP_{n,\ell}}{\OV_{n,\ell}}$ and
   $\AtLeastHard{\gamma\text{-}\MinIP_{n,\ell}}{\OV_{n,\ell}}$. Consequently,
   assuming OVC, for any $\eps>0$ there is $c>0$ such that
-  $\NoTSQAlg{\MinIP_{n,c\log n}}$.
+  $\NoTSQAlg{\MinIP_{n,\logDim(c,n)}}$.
 
   The declaration audited at this label must be the concrete reduction witness
   package $\operatorname{OVToMinIPWitness}$, not only abstract
@@ -2758,6 +3041,56 @@
   zero-correctness theorems and runtime bounds listed below. A generated Lean
   declaration in which `exactReduction' or `gammaReduction' is an abstract
   reduction witness is rejected.
+
+  Trial-3 failure-specific refinement: `exactReduction' and `gammaReduction'
+  are not allowed to be assigned opaque helper values such as
+  `OVToMinIPExactReduction.mk' or `OVToGammaMinIPReduction.mk' when the audited
+  declaration $\operatorname{OVToMinIPWitness}$ does not itself project the
+  fields of those helpers. If helper structures are used, they must be
+  transparent at this label and the parent witness must re-export all of their
+  mathematical fields with named projections. After unfolding only
+  $\operatorname{OVToMinIPWitness}$, then the projections
+  `exactReduction' and `gammaReduction', the following names, or transparent
+  equivalents, must be available:
+  \[
+  \begin{array}{ll}
+    \operatorname{exactTargetFamily}:&
+      \text{the concrete }\MinIP\text{ family from Definition~\ref{def:minip}},\\
+    \operatorname{gammaTargetFamily}:&
+      \text{the concrete }\gamma\text{-}\MinIP\text{ family from
+      Definition~\ref{def:gamma-minip}},\\
+    \operatorname{exactToMinIP}:&
+      \operatorname{OVInst}(n,\ell)\to
+      \operatorname{MinIPInst}(n,\ell),\\
+    \operatorname{gammaToMinIP}:&
+      \operatorname{OVInst}(n,\ell)\to
+      \operatorname{GammaMinIPInst}(n,\ell,\gamma),\\
+    \operatorname{exactToMinIP\_eq}:&
+      \forall V,\ \operatorname{exactToMinIP}(V)=V,\\
+    \operatorname{gammaToMinIP\_eq}:&
+      \forall V,\ \operatorname{gammaToMinIP}(V)=V,\\
+    \operatorname{exactAnswer}:&
+      V\mapsto o\mapsto
+      \left(\inner{v_{o.1}}{v_{o.2}}=0\right),\\
+    \operatorname{gammaAnswer}:&
+      V\mapsto o\mapsto
+      \left(\inner{v_{o.1}}{v_{o.2}}=0\right),\\
+    \operatorname{exactMinInner}:&
+      V\mapsto\min_{p\ne q}\inner{v_p}{v_q},\\
+    \operatorname{gammaMinInner}:&
+      V\mapsto\min_{p\ne q}\inner{v_p}{v_q}.
+  \end{array}
+  \]
+  The target-family fields above must reduce to the concrete search families
+  whose `Inst', `Out' and `ValidOut' relations are specified in
+  Definitions~\ref{def:minip} and~\ref{def:gamma-minip}. They must not be
+  `def_minip.placeholder', `def_gamma_minip.placeholder',
+  `def_parameter_sensitive_placeholder', an opaque family tag, `Unit', or a
+  `ConcreteProblemFamily' value whose validity relation is hidden behind an
+  uninterpreted predicate. In particular, an implementation where
+  `exactReduction.targetFamily = def_minip.placeholder' or
+  `gammaReduction.targetFamily = def_gamma_minip.placeholder' fails this node
+  even if the parent record separately contains a lower-bound proposition.
 
   For every
   $\OV_{n,\ell}$ instance $V=(v_1,\ldots,v_n)$ both subwitnesses use the
@@ -2792,6 +3125,31 @@
   \]
   is a required field or transparent local definition of the witness package,
   not an opaque symbol.
+  The exact subwitness must expose the proof-valued fields
+  \[
+  \begin{array}{ll}
+    \operatorname{exactMinInner\_eq}:&
+      \operatorname{exactMinInner}(V)=
+        \min_{p\ne q}\inner{v_p}{v_q},\\
+    \operatorname{exactMinInnerZeroIffOVYes}:&
+      \operatorname{exactMinInner}(V)=0
+      \Longleftrightarrow \operatorname{OVYes}(V),\\
+    \operatorname{exactReturnedZeroIffOVYes}:&
+      \operatorname{MinIPValidOut}
+        (\operatorname{exactToMinIP}(V),o)
+      \to
+      \left(
+        \inner{v_{o.1}}{v_{o.2}}=0
+        \Longleftrightarrow \operatorname{OVYes}(V)\right),\\
+    \operatorname{exactRunCorrect}:&
+      \operatorname{exactAnswer}(V,o)=\mathrm{true}
+      \Longleftrightarrow \operatorname{OVYes}(V)
+      \quad\text{under the same }\operatorname{MinIPValidOut}\text{ proof}.
+  \end{array}
+  \]
+  These are theorem fields. They may not be fields of type `Prop' containing
+  the displayed statements as data, and they may not be consequences proved
+  only by an opaque $\operatorname{FGReduction}$ object.
   The approximate subwitness has the additional zero-approximation field
   \[
     \operatorname{ValidOut}_{\gamma\text{-}\MinIP}(V,(i,j))
@@ -2802,7 +3160,44 @@
   \]
   which is proved from
   $0\le\operatorname{MinInner}(V)\le\inner{v_i}{v_j}\le
-  \gamma\operatorname{MinInner}(V)$. Both subwitnesses include the runtime
+  \gamma\operatorname{MinInner}(V)$.
+  The approximate subwitness must expose the analogous proof-valued fields
+  \[
+  \begin{array}{ll}
+    \operatorname{gammaMinInner\_eq}:&
+      \operatorname{gammaMinInner}(V)=
+        \min_{p\ne q}\inner{v_p}{v_q},\\
+    \operatorname{gammaApproxZero}:&
+      \operatorname{GammaMinIPValidOut}
+        (n,\ell,\gamma,\operatorname{gammaToMinIP}(V),o)
+      \to \gamma\ge1\to
+      \left(
+        \operatorname{gammaMinInner}(V)=0
+        \Longleftrightarrow
+        \inner{v_{o.1}}{v_{o.2}}=0\right),\\
+    \operatorname{gammaReturnedZeroIffOVYes}:&
+      \operatorname{GammaMinIPValidOut}
+        (n,\ell,\gamma,\operatorname{gammaToMinIP}(V),o)
+      \to \gamma\ge1\to
+      \left(
+        \inner{v_{o.1}}{v_{o.2}}=0
+        \Longleftrightarrow \operatorname{OVYes}(V)\right),\\
+    \operatorname{gammaRunCorrect}:&
+      \operatorname{gammaAnswer}(V,o)=\mathrm{true}
+      \Longleftrightarrow \operatorname{OVYes}(V)
+      \quad\text{under the same valid-output and }\gamma\ge1\text{ proofs}.
+  \end{array}
+  \]
+  The proof of `gammaApproxZero' must unfold the concrete
+  $\gamma$-Min-IP validity relation from
+  Definition~\ref{def:gamma-minip}: if
+  $m=\operatorname{gammaMinInner}(V)$ and the returned score is $s^*$, then
+  $0\le m\le s^*\le\gamma m$. It then proves
+  $m=0\Longleftrightarrow s^*=0$. A theorem whose assumptions and conclusion
+  are both `GammaMinIPValidOut ...', or a theorem that ignores the returned
+  oracle pair $o$, is rejected.
+
+  Both subwitnesses include the runtime
   field
   \[
     T_{\OV\leftarrow\MinIP}(n,\ell)
@@ -2879,6 +3274,71 @@
   it should not satisfy the node by choosing the constructed runtime to be
   exactly the final big-$O$ upper-bound expression.
 
+  The lower-bound consequence is also a required projection of the audited
+  witness, and its target is Min-IP, not OV. These projections are
+  proof-valued theorem fields, not fields storing propositions to be proved
+  elsewhere. Concretely, projecting
+  `exactMinIPLowerBoundFromOVC' from
+  $\operatorname{OVToMinIPWitness}$ must immediately give a term whose type is
+  \[
+    \forall \eps>0,\ \exists c>0,\
+      \NoTSQAlg{\MinIP_{n,\logDim(c,n)}},
+  \]
+  and projecting `gammaMinIPLowerBoundFromOVC' must immediately give a term
+  whose type is
+  \[
+    \forall \eps>0,\ \exists c>0,\ \forall\gamma\ge1,\
+      \NoTSQAlg{\gamma\text{-}\MinIP_{n,\logDim(c,n)}}.
+  \]
+  These field types are the transferred lower-bound statements themselves. The
+  witness may not instead contain fields such as
+  `exactMinIPLowerBoundFromOVC : Prop',
+  `gammaMinIPLowerBoundFromOVC : Prop', or `lowerBoundStatement : Prop',
+  together with equality fields saying that those propositions are intended to
+  mean the displayed formulas. Such fields store statement labels as data; they
+  do not prove the lower-bound consequence required by this lemma.
+  Since OVC already supplies
+  \[
+    \forall \eps>0,\ \exists c>0,\ 
+      \NoTSQAlg{\OV_{n,\logDim(c,n)}},
+  \]
+  the reduction witness must export the transferred conclusions
+  \[
+  \begin{array}{ll}
+    \operatorname{exactMinIPLowerBoundFromOVC}:&
+      \forall \eps>0,\ \exists c>0,\ 
+        \NoTSQAlg{\MinIP_{n,\logDim(c,n)}},\\
+    \operatorname{gammaMinIPLowerBoundFromOVC}:&
+      \forall \eps>0,\ \exists c>0,\ \forall\gamma\ge1,\
+        \NoTSQAlg{\gamma\text{-}\MinIP_{n,\logDim(c,n)}}.
+  \end{array}
+  \]
+  These fields are derived by contradiction: a truly subquadratic algorithm for
+  the displayed Min-IP family, together with the corresponding exact or
+  approximate reduction subwitness above, constructs a truly subquadratic
+  algorithm for $\OV_{n,\logDim(c,n)}$, contradicting the OVC instance for the
+  same logarithmic slice. The family occurring in the conclusion must be the
+  concrete Min-IP family instantiated at $(n,\logDim(c,n))$, and in the
+  approximate case at $(n,\logDim(c,n),\gamma)$.
+  A field whose conclusion is instead
+  $\NoTSQAlg{\OV_{n,\logDim(c,n)}}$, or whose Lean target is an
+  `OVLogProblemFamily' or any other original-OV family, merely restates the
+  hypothesis and is rejected. The transferred lower-bound field must mention
+  the exact family projection of Definition~\ref{def:minip}, respectively
+  Definition~\ref{def:gamma-minip}, and the proof must invoke
+  `exactReduction' or `gammaReduction' to turn a hypothetical Min-IP algorithm
+  into an OV algorithm before applying OVC.
+  If a convenience field named `lowerBoundStatement' is present, it must also
+  be a theorem field whose type is the conjunction of the two transferred
+  lower bounds above, or a reducible pair of the two theorem fields
+  `exactMinIPLowerBoundFromOVC' and `gammaMinIPLowerBoundFromOVC'. It is
+  rejected if it is merely a proposition-valued field, a string/tag for the
+  statement, a `Nonempty' wrapper around a proposition, or a field accompanied
+  only by equations identifying the proposition it stores. The proof term for
+  any accepted `lowerBoundStatement' must reduce to the contradiction argument
+  using OVC and the exact/gamma reduction witnesses; it may not be supplied as
+  independent unproved data.
+
   These runtime projections are mandatory fields of the subwitnesses
   themselves. In particular, unfolding
   $\operatorname{exactReduction}$ must expose fields literally named, or
@@ -2924,9 +3384,2173 @@
   which is impossible under OVC (Conjecture~\ref{conjecture:ovc}).
 \end{proof}
 
+\begin{lemma}[Canonical split-call score transport for Min-IP]
+  \label{lem:minip-canonical-cross-score-transport}
+  \uses{def:minip, def:bichromatic-minip, def:inner-prod, lem:split-tree-index-arithmetic}
+  Let $X$ be a concrete $\MinIP_{n,\ell}$ instance and let
+  $o=(i,j)$ be a distinct output pair. Write
+  \[
+    i_-=\min(i,j),\qquad i_+=\max(i,j),
+  \]
+  and let $\operatorname{canonicalCall}(o)$ be the split-tree call whose left
+  child contains exactly the row $i_-$ and whose right child contains the
+  consecutive rows strictly after $i_-$. Let
+  $\operatorname{canonicalRightIndex}(o)$ be the index of $i_+$ inside this
+  right child. This node records the concrete row transport that is needed
+  before comparing scores:
+  \[
+  \begin{array}{ll}
+    \operatorname{canonicalLeftOrig}(o):&
+      \operatorname{callLeftOrig}(\operatorname{canonicalCall}(o),0)=i_-,\\
+    \operatorname{canonicalRightOrig}(o):&
+      \operatorname{callRightOrig}
+        (\operatorname{canonicalCall}(o),
+         \operatorname{canonicalRightIndex}(o))=i_+,\\
+    \operatorname{canonicalLeftRow}(X,o):&
+      \forall r,\ 
+      \operatorname{leftRow}
+        (\operatorname{crossInst}(X,\operatorname{canonicalCall}(o)),0)[r]
+      =X_{i_-}[r],\\
+    \operatorname{canonicalRightRow}(X,o):&
+      \forall r,\ 
+      \operatorname{rightRow}
+        (\operatorname{crossInst}(X,\operatorname{canonicalCall}(o)),
+         \operatorname{canonicalRightIndex}(o))[r]
+      =X_{i_+}[r].
+  \end{array}
+  \]
+  Consequently, for the canonical cross-pair
+  $(0,\operatorname{canonicalRightIndex}(o))$,
+  \[
+    \operatorname{BMinIPScore}
+      (\operatorname{crossInst}(X,\operatorname{canonicalCall}(o)),
+       (0,\operatorname{canonicalRightIndex}(o)))
+    =
+    \inner{X_{i_-}}{X_{i_+}}.
+  \]
+  Combining this with commutativity of the finite-sum inner product gives the
+  orientation-independent score transport
+  \[
+    \operatorname{BMinIPScore}
+      (\operatorname{crossInst}(X,\operatorname{canonicalCall}(o)),
+       (0,\operatorname{canonicalRightIndex}(o)))
+    =
+    \operatorname{MinIPPairScore}(X,o).
+  \]
+
+  The generated Lean names for these fields are reserved at this label. If the
+  implementation uses the names
+  `MinIPSplitCanonical_leftOrig',
+  `MinIPSplitCanonical_rightOrig',
+  `MinIPSplitCanonical_leftRow',
+  `MinIPSplitCanonical_rightRow', and
+  `MinIPSplitCanonicalScore_eq', then their normalized statements must be the
+  four origin/row equations and the final score equality above. The row
+  equations are proof-valued theorem fields, not propositions stored as data.
+  Trial-14 failure-specific refinement: the score equality is about the score
+  of the canonical split-tree call itself.  The declaration audited at this
+  label must not introduce a separate one-row bichromatic instance, such as
+  `canonicalBichromaticPairInst X o', and then prove a score equation for that
+  separate instance at output pair $(0,0)$.  The normalized left-hand side of
+  `MinIPSplitCanonicalScore_eq' must be exactly
+  \[
+    \operatorname{BMinIPScore}
+      (\operatorname{crossInst}(X,\operatorname{canonicalCall}(o)),
+       (0,\operatorname{canonicalRightIndex}(o))),
+  \]
+  or the same expression with transparent aliases unfolded.  The audited
+  package must also expose a theorem field
+  \[
+  \begin{array}{ll}
+    \operatorname{MinIPSplitCanonicalScore\_toPairScore}:&
+    \operatorname{BMinIPScore}
+      (\operatorname{crossInst}(X,\operatorname{canonicalCall}(o)),
+       (0,\operatorname{canonicalRightIndex}(o)))
+    =
+    \operatorname{MinIPPairScore}(X,o).
+  \end{array}
+  \]
+  This second equality is orientation-independent: it must handle both
+  $o=(i_-,i_+)$ and $o=(i_+,i_-)$, using commutativity of the finite-sum inner
+  product only after the canonical split-call row equations have rewritten the
+  left and right rows to $X_{i_-}$ and $X_{i_+}$.  A theorem whose conclusion is
+  \[
+    \operatorname{BMinIPScore}
+      (\operatorname{canonicalBichromaticPairInst}(X,o),(0,0))
+    =
+    \operatorname{MinIPPairScore}(X,o)
+  \]
+  is rejected even if `canonicalBichromaticPairInst' happens to contain the two
+  same vectors, because it does not state that the pair's score occurs in the
+  actual recursive oracle call
+  $\operatorname{crossInst}(X,\operatorname{canonicalCall}(o))$ at index
+  $(0,\operatorname{canonicalRightIndex}(o))$.  Likewise, proving only the two
+  row-origin equations for `crossInst' and a separate score theorem for the
+  one-row instance fails this node; the score theorem itself must mention the
+  canonical split call and canonical right index.
+  Trial-15 failure-specific refinement: the audited package must expose the
+  canonical split-call score theorem as one theorem with the split-call
+  left-hand side and the original-pair right-hand side, not as two disconnected
+  facts.  The required theorem field is
+  \[
+  \begin{array}{ll}
+    \operatorname{canonicalSplitCallPairScore}:&
+    \forall X,o,\ 
+    \operatorname{BMinIPScore}
+      \bigl(\operatorname{crossInst}
+        (X,\operatorname{canonicalCall}(o)),
+        (0,\operatorname{canonicalRightIndex}(o))\bigr)
+    =
+    \operatorname{MinIPPairScore}(X,o).
+  \end{array}
+  \]
+  Its proof may use an intermediate theorem
+  \[
+    \operatorname{BMinIPScore}
+      (\operatorname{crossInst}(X,\operatorname{canonicalCall}(o)),
+       (0,\operatorname{canonicalRightIndex}(o)))
+    =
+    \inner{X_{i_-}}{X_{i_+}},
+  \]
+  but the exported theorem above must remain about the same
+  $\operatorname{crossInst}(X,\operatorname{canonicalCall}(o))$.  A theorem for
+  any object whose type is
+  $\operatorname{BMinIPInst}(1,1,\ell)$, a theorem at index $(0,0)$, or a
+  theorem whose left-hand side contains a name other than
+  `crossInst X (canonicalCall o)' is not accepted unless a separate projection
+  first proves that this object is definitionally the canonical split call and
+  that $(0,0)$ is definitionally
+  $(0,\operatorname{canonicalRightIndex}(o))$.  In the ordinary case
+  $\operatorname{canonicalRightIndex}(o)$ is not a constant zero index; it is
+  the index of $i_+$ in the right suffix of the split call, and that index must
+  occur syntactically in the score statement.
+  In particular, `MinIPSplitCanonical_rightRow' must state the coordinatewise
+  equality
+  \[
+    \forall r,\ 
+    X.V\!\left(
+      \operatorname{MinIPCallRightOrig}
+        (\operatorname{MinIPSplitCanonicalCall}(o))
+        (\operatorname{MinIPSplitCanonicalRightIndex}(o))
+    \right)(r)
+    =
+    X.V(\operatorname{MinIPSplitPairHigh}(o))(r),
+  \]
+  or the equivalent vector equality obtained from
+  `MinIPSplitCanonical_rightOrig' by congruence. The proof of
+  `MinIPSplitCanonicalScore_eq' must use these row equations explicitly before
+  simplifying the finite sum. It is rejected if it tries to prove
+  \[
+    \inner{X_{i_-}}{
+      X_{\operatorname{callRightOrig}
+        (\operatorname{canonicalCall}(o),\operatorname{canonicalRightIndex}(o))}}
+    =
+    \inner{X_{i_-}}{X_{i_+}}
+  \]
+  only by a broad `simp' call while the right argument remains under a lambda.
+  The intended formal proof is: prove the origin equalities as `Fin' equalities,
+  derive row equalities by applying congruence to $X.V$, rewrite the
+  cross-score definition using those row equalities, and only then handle the
+  possible orientation of the original pair using inner-product commutativity.
+  All bounds needed to construct the canonical right index are part of
+  Lemma~\ref{lem:split-tree-index-arithmetic}. In particular, from
+  $\operatorname{canonicalLower}(o)<\operatorname{canonicalUpper}(o)<n$ the
+  generated proof must first derive
+  \[
+    \operatorname{canonicalUpper}(o)
+      -(\operatorname{canonicalLower}(o)+1)
+      < n-(\operatorname{canonicalLower}(o)+1)
+  \]
+  and then
+  \[
+    \operatorname{canonicalLower}(o)+1+
+    \bigl(\operatorname{canonicalUpper}(o)
+      -(\operatorname{canonicalLower}(o)+1)\bigr)
+    =
+    \operatorname{canonicalUpper}(o).
+  \]
+  These are projected arithmetic facts, not tactic guesses. A proof of
+  `MinIPSplitCanonical_rightOrig' or
+  `MinIPSplitCanonicalScore_eq' that imports `Mathlib.Tactic.Omega' or closes
+  the finite-index goals by `omega' does not satisfy this node.
+\end{lemma}
+\begin{proof}
+  \uses{def:minip, def:bichromatic-minip, def:inner-prod, lem:split-tree-index-arithmetic}
+  The left origin equation is immediate from the definition of the canonical
+  call. For the right origin equation, the right child consists exactly of the
+  rows whose original indices are strictly larger than $i_-$. Since $o$ is a
+  distinct pair, $i_+>i_-$, and the canonical right index is defined as the
+  offset $i_+-(i_-+1)$ in this suffix. Thus converting the right-child index
+  back to an original index gives $i_+$.
+
+  Applying the row map $X.V$ to the two origin equalities gives equality of the
+  actual vectors, and hence coordinatewise equality for every coordinate $r$.
+  Expanding the cross-score of the canonical call gives the finite-sum inner
+  product of these two transported rows, so the row equalities rewrite it to
+  $\inner{X_{i_-}}{X_{i_+}}$. If the original output pair was already ordered
+  as $(i_-,i_+)$ this is exactly $\operatorname{MinIPPairScore}(X,o)$; otherwise
+  the same score is obtained by commutativity of the finite-sum inner product.
+\end{proof}
+
+\begin{lemma}[Pair coverage in the Min-IP recursive split tree]
+  \label{lem:minip-split-tree-pair-coverage}
+  \uses{def:minip, def:bichromatic-minip, lem:minip-canonical-cross-score-transport, lem:split-tree-index-arithmetic}
+  Let $V=(v_1,\ldots,v_n)$ be a monochromatic $\MinIP_{n,\ell}$ instance, and
+  let $\operatorname{callTree}(V)$ be the finite binary tree obtained by
+  recursively splitting every node $U$ with $|U|\ge2$ into two ordered children
+  $U_L,U_R$ and stopping only at leaves of size $0$ or $1$. This node records
+  the missing global combinatorial invariant behind Lemma~\ref{lem:minip-bichromatic-reduction}.
+
+  The declaration audited at this label must expose a package
+  $\operatorname{MinIPSplitTreePairCoverage}$ with the following projections.
+  First, the tree is a real finite rooted tree, not a per-node helper:
+  \[
+  \begin{array}{ll}
+    \operatorname{root}:& V,\\
+    \operatorname{children}(U):& (U_L,U_R)\text{ for every internal node }U,\\
+    \operatorname{leaf\_iff}:&
+      U\text{ is a leaf}\Longleftrightarrow |U|<2,\\
+    \operatorname{internalNodes}:&
+      \text{the finite set of non-leaf nodes of }\operatorname{callTree}(V),\\
+    \operatorname{allCalls}:&
+      \{\,\operatorname{crossInst}(U)=(U_L,U_R):
+         U\in\operatorname{internalNodes}\,\}.
+  \end{array}
+  \]
+  The field `allCalls' is a finite family of concrete bichromatic Min-IP target
+  instances with their child sizes and vector lists; it is not just the set of
+  internal node identifiers.
+  The field `internalNodes' is not the set of all sublists, finsets, or subsets
+  of $V$ with cardinality at least $2$. It is the image of the actual
+  root-to-descendant reachability relation in $\operatorname{callTree}(V)$.
+  Trial-14 failure-specific refinement: the audited declaration fails this node
+  if, after unfolding the fields of
+  $\operatorname{MinIPSplitTreePairCoverage}$, the implementation has
+  \[
+    \operatorname{MinIPInternalNodes}(V)
+      =
+      \{U:\operatorname{Finset}\operatorname{Row}(V):
+        |U|\ge2\}
+  \]
+  or any variant filtering all finsets, sublists, subsets, masks, or node
+  facades by the predicate ``cardinality at least two''.  The accepted
+  `MinIPInternalNodes' field is instead the finite set generated by the
+  inductive reachability constructors
+  `root', `left' and `right', and the package must project the recursive
+  leaf/internal equations below.  Similarly,
+  \[
+    \operatorname{MinIPAllCalls}(V)
+      =\operatorname{MinIPInternalNodes}(V)
+  \]
+  or any definition whose elements are node identifiers, subproblems, finsets,
+  masks, or proofs of internality is rejected.  `MinIPAllCalls(V)' is a finite
+  set of concrete dependent target-call records.  Each element $c$ must expose
+  `callLeftSize', `callRightSize', `callDim' and
+  `callInst(c):\operatorname{BMinIPInst}
+  (\operatorname{callLeftSize}(c),\operatorname{callRightSize}(c),
+  \operatorname{callDim}(c))', and the membership theorem must recover a
+  reachable internal node $U$ with
+  \[
+    c=\operatorname{nodeCall}(U),\quad
+    \operatorname{callInst}(c)=\operatorname{crossInst}(U),\quad
+    \operatorname{crossInst}(U)=(U_L,U_R).
+  \]
+  A package that contains row-origin equations for some calls but omits
+  path-carrying reachability, the recursive finite-set equations, parent
+  uniqueness, unique cross-call coverage, cross-pair-to-original-pair
+  transport, the score-set identity, the optimum identity, or the threshold
+  identity is incomplete.  These are required projections of the audited
+  declaration itself, not optional external lemmas.
+  Trial-15 failure-specific refinement: the package must make the tree,
+  concrete call set, and pair-coverage theorem mutually linked by projection
+  equations.  The following normalized field shapes are mandatory:
+  \[
+  \begin{array}{ll}
+    \operatorname{reachableInternalNodes\_eq}:&
+      \operatorname{MinIPInternalNodes}(V)=
+      \{\,U:\operatorname{ReachableNode}_V(U)\wedge |U|\ge2\,\},\\
+    \operatorname{recursiveAllCalls\_eq}:&
+      \operatorname{MinIPAllCalls}(V)=
+      \{\,\operatorname{nodeCall}(U):
+          U\in\operatorname{MinIPInternalNodes}(V)\,\},\\
+    \operatorname{nodeCall\_inst\_eq}:&
+      \operatorname{callInst}(\operatorname{nodeCall}(U))
+      =\operatorname{crossInst}(U),\\
+    \operatorname{crossInst\_eq\_children}:&
+      \operatorname{crossInst}(U)=(U_L,U_R),\\
+    \operatorname{uniqueCrossCall\_iff}:&
+      \forall W\in\operatorname{MinIPInternalNodes}(V),\
+      \operatorname{MinIPCrossPair}(\operatorname{nodeCall}(W),p,q)
+      \Longleftrightarrow W=\operatorname{splitNode}(p,q),\\
+    \operatorname{crossPairOrigTransport}:&
+      \operatorname{MinIPCrossPair}(\operatorname{nodeCall}(U),p,q)
+      \to
+      (p,q)\in\operatorname{OrigPair}(V)\ \wedge\
+      \operatorname{BMinIPScore}(\operatorname{callInst}(\operatorname{nodeCall}(U)),(p,q))
+      =
+      \operatorname{origScore}_V(p,q).
+  \end{array}
+  \]
+  These theorem fields are rejected if any right-hand side is a cardinality
+  filter over all subobjects, if `MinIPAllCalls' is definitionally the same
+  finite set as `MinIPInternalNodes', if `nodeCall' stores only a node id, or
+  if `MinIPCrossPair' is a predicate over original pairs that does not mention
+  the concrete child-sized call record and its child-sized instance.  The
+  score-set, optimum and threshold
+  consequences below must be derived from `uniqueCrossCall_iff' and
+  `crossPairOrigTransport'; they must not be reflexive statements and must not
+  be proved by defining the recursive score/threshold objects to be copies of
+  the root original-pair enumeration.
+  The package must expose this by a reachability predicate
+  \[
+    \operatorname{ReachableNode}_V(U)
+  \]
+  and theorem fields
+  \[
+  \begin{array}{ll}
+    \operatorname{internalNodes\_iff}:&
+      U\in\operatorname{MinIPInternalNodes}(V)
+      \Longleftrightarrow
+      \operatorname{ReachableNode}_V(U)\wedge |U|\ge2,\\
+    \operatorname{reachableRoot}:&
+      \operatorname{ReachableNode}_V(V),\\
+    \operatorname{reachableLeft}:&
+      \operatorname{ReachableNode}_V(U)\wedge |U|\ge2
+      \to \operatorname{ReachableNode}_V(U_L),\\
+    \operatorname{reachableRight}:&
+      \operatorname{ReachableNode}_V(U)\wedge |U|\ge2
+      \to \operatorname{ReachableNode}_V(U_R),\\
+    \operatorname{reachableInduction}:&
+      \text{the induction principle generated by root, left-child and
+      right-child reachability.}
+  \end{array}
+  \]
+  The reachability predicate is an inductive closure of the child relation,
+  not a closed-form membership test.  A compliant implementation exposes
+  constructors, or transparent theorem fields equivalent to constructors,
+  with exactly the following content:
+  \[
+  \begin{array}{ll}
+    \operatorname{ReachableNode.root}:&
+      \operatorname{ReachableNode}_V(V),\\
+    \operatorname{ReachableNode.left}:&
+      \operatorname{ReachableNode}_V(U)\to |U|\ge2
+      \to \operatorname{ReachableNode}_V(U_L),\\
+    \operatorname{ReachableNode.right}:&
+      \operatorname{ReachableNode}_V(U)\to |U|\ge2
+      \to \operatorname{ReachableNode}_V(U_R).
+  \end{array}
+  \]
+  Its eliminator has the non-vacuous recursive type
+  \[
+  \begin{array}{l}
+    \operatorname{reachableInduction}(Q):\\
+    \quad Q(V)\to
+    \left(\forall U,\ \operatorname{ReachableNode}_V(U)\to |U|\ge2
+      \to Q(U)\to Q(U_L)\right)\to\\
+    \quad
+    \left(\forall U,\ \operatorname{ReachableNode}_V(U)\to |U|\ge2
+      \to Q(U)\to Q(U_R)\right)\to
+    \forall U,\ \operatorname{ReachableNode}_V(U)\to Q(U).
+  \end{array}
+  \]
+  The induction field must consume the root case and the two child-step
+  hypotheses.  It is explicitly rejected if its type is only
+  \[
+    (\forall U,\ Q(U))\to
+    \forall U,\ \operatorname{ReachableNode}_V(U)\to Q(U),
+  \]
+  or any equivalent principle that assumes the desired property for every node
+  instead of proving it by recursion from the root.  Likewise,
+  $\operatorname{ReachableNode}_V(U)$ may not be defined as
+  $U=V\vee |U|\ge2$, as $U\subseteq V$, as membership in all cardinality-filtered
+  sublists of $V$, or as any closed-form predicate whose proof terms do not
+  record the root-to-$U$ path through left/right child pointers.
+
+  Trial-7 failure-specific refinement: the Lean declaration
+  $\operatorname{MinIPSplitTreePairCoverage}$ must make
+  $\operatorname{ReachableNode}_V$ an actual path-carrying inductive family, or
+  a structure whose constructors and eliminator are definitionally equivalent
+  to that inductive family.  The audited package must project the following
+  proof-valued fields with these reserved names:
+  \[
+  \begin{array}{ll}
+    \operatorname{reachableRoot}:&
+      \operatorname{ReachableNode}_V(V),\\
+    \operatorname{reachableLeft}:&
+      \forall U,\ \operatorname{ReachableNode}_V(U)\to |U|\ge2
+      \to \operatorname{ReachableNode}_V(U_L),\\
+    \operatorname{reachableRight}:&
+      \forall U,\ \operatorname{ReachableNode}_V(U)\to |U|\ge2
+      \to \operatorname{ReachableNode}_V(U_R),\\
+    \operatorname{reachableInduction}:&
+      \forall Q,\ Q(V)\to
+      \left(\forall U,\operatorname{ReachableNode}_V(U)\to |U|\ge2
+        \to Q(U)\to Q(U_L)\right)\to\\
+    &\quad
+      \left(\forall U,\operatorname{ReachableNode}_V(U)\to |U|\ge2
+        \to Q(U)\to Q(U_R)\right)\to
+      \forall U,\operatorname{ReachableNode}_V(U)\to Q(U).
+  \end{array}
+  \]
+  The field `reachableInduction' is rejected if its first premise is
+  $\forall U,\ Q(U)$, if it assumes the conclusion for all nodes, if it has no
+  separate left-child and right-child step hypotheses, or if
+  $\operatorname{ReachableNode}_V(U)$ unfolds to a closed-form predicate such as
+  `U is a subproblem of V', `U has cardinality at least two', `U \subseteq V',
+  or `U \in MinIPInternalNodes(V)'.  A closed-form predicate plus a theorem
+  saying all its members are reachable does not satisfy this node; the
+  reachability proof itself must contain the finite sequence of child choices
+  from the root to $U$ so that induction can be proved by cases on that path.
+
+  Trial-7 arithmetic refinement: all finite-index witnesses created by this
+  node must use the arithmetic package of
+  Lemma~\ref{lem:split-tree-index-arithmetic}; they may not depend on
+  `Mathlib.Tactic.Omega' or on any generated `by omega' proof. The call-record
+  interface must expose proof-valued fields
+  \[
+  \begin{array}{ll}
+    \operatorname{callParentIndexLt}:&
+      \operatorname{splitIndex}(c)<n,\\
+    \operatorname{callParentIndexLtSucc}:&
+      \operatorname{splitIndex}(c)<n+1,\\
+    \operatorname{callRightChildIndexLtSucc}:&
+      \operatorname{splitIndex}(c)+1<n+1,\\
+    \operatorname{callRightSizeGeOne}:&
+      1\le n-(\operatorname{splitIndex}(c)+1),\\
+    \operatorname{callParentCardinalityGeTwo}:&
+      2\le n-\operatorname{splitIndex}(c),\\
+    \operatorname{rightOrigIndexLt}:&
+      \forall j<n-(\operatorname{splitIndex}(c)+1),\
+      \operatorname{splitIndex}(c)+1+j<n .
+  \end{array}
+  \]
+  These fields are derived directly from
+  $\operatorname{hasRightChild}(c):
+  \operatorname{splitIndex}(c)+1<n$ and from the parameter proof
+  $2\le n$. They are not optional helper lemmas: they are part of the audited
+  split-tree package because they justify the `Fin' constructors for the
+  parent suffix node, the right-child suffix node, the canonical right index,
+  and the transported right-origin index. A generated definition such as
+  \[
+    \langle\langle0,\ \texttt{by omega}\rangle,\ \texttt{by omega}\rangle
+  \]
+  for a default call is rejected. If a default call is used at all, its two
+  proof fields must be explicitly derived from the source parameter bound
+  $2\le n$ by `zeroLtFromTwoLe' and the successor inequality fields above; but
+  the preferred compliant construction has no default branch, because
+  `nodeCall' is defined only for reachable internal nodes and therefore already
+  has the split proof needed to construct the call.
+
+  The statement audited at this label must also include a theorem field
+  \[
+    \operatorname{internalSuffixHasRightChild}:
+      U=\operatorname{suffix}(k)\wedge
+      U\in\operatorname{MinIPInternalNodes}(V)
+      \Longrightarrow k+1<n .
+  \]
+  Thus `nodeCall(U)' for an internal suffix node is built from this displayed
+  right-child proof. It is not built by case-splitting on an arbitrary node and
+  falling back to a default `splitIndex = 0' call in impossible branches. The
+  default-branch pattern caused the failed disposable implementation to create
+  finite-index obligations with no visible constraints; the blueprint now
+  requires the constraints to be fields of the construction itself.
+
+  The same Trial-7 interface reserves the finite-set equations as projections
+  of this package, not as external helper facts:
+  \[
+  \begin{array}{ll}
+    \operatorname{MinIPInternalNodes\_leaf}:&
+      \forall U,\ |U|<2\to
+      \operatorname{MinIPInternalNodes}(U)=\varnothing,\\
+    \operatorname{MinIPInternalNodes\_internal}:&
+      \forall U,\ |U|\ge2\to
+      \operatorname{MinIPInternalNodes}(U)=
+      \{U\}\cup\operatorname{MinIPInternalNodes}(U_L)\cup
+      \operatorname{MinIPInternalNodes}(U_R),\\
+    \operatorname{MinIPAllCalls\_leaf}:&
+      \forall U,\ |U|<2\to
+      \operatorname{MinIPAllCalls}(U)=\varnothing,\\
+    \operatorname{MinIPAllCalls\_internal}:&
+      \forall U,\ |U|\ge2\to
+      \operatorname{MinIPAllCalls}(U)=
+      \{\operatorname{nodeCall}(U)\}\cup
+      \operatorname{MinIPAllCalls}(U_L)\cup
+      \operatorname{MinIPAllCalls}(U_R).
+  \end{array}
+  \]
+  These equations must be theorem fields whose right-hand sides syntactically
+  mention the two children $U_L,U_R$ returned by $\operatorname{children}(U)$.
+  The package fails this node if `MinIPInternalNodes' is defined by filtering
+  all sublists/finsets/subsets by cardinality, if the internal-node equation is
+  $\operatorname{MinIPInternalNodes}(U)=\{U\}$, if `MinIPAllCalls' is a
+  singleton root call, or if `MinIPAllCalls' has elements that are node
+  identifiers rather than concrete $\operatorname{nodeCall}$ records.
+
+  Finally, the parent and child-membership interface is mandatory at this
+  label.  The package must contain projections
+  \[
+  \begin{array}{ll}
+    \operatorname{leftInternalNode\_mem}:&
+      \forall U,W,\ W\in\operatorname{MinIPInternalNodes}(U_L)\to
+      W\in\operatorname{MinIPInternalNodes}(U),\\
+    \operatorname{rightInternalNode\_mem}:&
+      \forall U,W,\ W\in\operatorname{MinIPInternalNodes}(U_R)\to
+      W\in\operatorname{MinIPInternalNodes}(U),\\
+    \operatorname{leftCall\_mem}:&
+      \forall U,c,\ c\in\operatorname{MinIPAllCalls}(U_L)\to
+      c\in\operatorname{MinIPAllCalls}(U),\\
+    \operatorname{rightCall\_mem}:&
+      \forall U,c,\ c\in\operatorname{MinIPAllCalls}(U_R)\to
+      c\in\operatorname{MinIPAllCalls}(U),\\
+    \operatorname{parentOfNonRoot}:&
+      U\in\operatorname{MinIPInternalNodes}(V)\to U\ne V\to
+      \exists W\in\operatorname{MinIPInternalNodes}(V),\
+        U=W_L\vee U=W_R,\\
+    \operatorname{parentUnique}:&
+      U\ne V\to
+      (U=W_L\vee U=W_R)\to (U=W'_L\vee U=W'_R)\to W=W'.
+  \end{array}
+  \]
+  These fields must be obtained from the recursive equations and the
+  path-carrying reachability induction.  A declaration where
+  `parentOfNonRoot' is absent, where parent uniqueness is only $W=W$, or where
+  child membership is proved by a broad cardinality-filter inclusion has not
+  provided the global recursive split-tree invariant required for
+  Lemma~\ref{lem:minip-bichromatic-reduction}.
+
+  The same audited package must expose the recursive equations tying
+  reachability to the finite node and call sets:
+  \[
+  \begin{array}{ll}
+    \operatorname{internalNodes\_leaf}:&
+      |U|<2\to \operatorname{MinIPInternalNodes}(U)=\varnothing,\\
+    \operatorname{internalNodes\_internal}:&
+      |U|\ge2\to
+      \operatorname{MinIPInternalNodes}(U)=
+      \{U\}\cup\operatorname{MinIPInternalNodes}(U_L)\cup
+      \operatorname{MinIPInternalNodes}(U_R),\\
+    \operatorname{allCalls\_leaf}:&
+      |U|<2\to \operatorname{MinIPAllCalls}(U)=\varnothing,\\
+    \operatorname{allCalls\_internal}:&
+      |U|\ge2\to
+      \operatorname{MinIPAllCalls}(U)=
+      \{\operatorname{nodeCall}(U)\}\cup
+      \operatorname{MinIPAllCalls}(U_L)\cup
+      \operatorname{MinIPAllCalls}(U_R).
+  \end{array}
+  \]
+  These four fields are required at this label, even if analogous facts are
+  available for a helper tree type.  A declaration whose
+  $\operatorname{MinIPInternalNodes}$ is closed-form and merely proves
+  `internalNodes_iff' from that predicate, without the four recursive
+  leaf/internal equations above, does not satisfy the node.  The recursive
+  equations must mention the actual children returned by
+  $\operatorname{children}(U)$ and, for `allCalls_internal', the concrete
+  $\operatorname{nodeCall}(U)$ record.
+
+  Parent information is also part of the interface, so that internal-node
+  membership cannot be faked by a cardinality filter.  The package has
+  proof-valued projections
+  \[
+  \begin{array}{ll}
+    \operatorname{parentOfNonRoot}:&
+      U\in\operatorname{MinIPInternalNodes}(V)\to U\ne V\to
+      \exists W\in\operatorname{MinIPInternalNodes}(V),\
+        (U=W_L\vee U=W_R),\\
+    \operatorname{parentUnique}:&
+      U\ne V\to
+      (U=W_L\vee U=W_R)\to (U=W'_L\vee U=W'_R)\to
+      W=W',\\
+    \operatorname{leftInternalNode\_mem}:&
+      W\in\operatorname{MinIPInternalNodes}(U_L)\to
+      W\in\operatorname{MinIPInternalNodes}(U),\\
+    \operatorname{rightInternalNode\_mem}:&
+      W\in\operatorname{MinIPInternalNodes}(U_R)\to
+      W\in\operatorname{MinIPInternalNodes}(U),\\
+    \operatorname{leftCall\_mem}:&
+      c\in\operatorname{MinIPAllCalls}(U_L)\to
+      c\in\operatorname{MinIPAllCalls}(U),\\
+    \operatorname{rightCall\_mem}:&
+      c\in\operatorname{MinIPAllCalls}(U_R)\to
+      c\in\operatorname{MinIPAllCalls}(U).
+  \end{array}
+  \]
+  These are theorem fields, not stored propositions.  The
+  `parentOfNonRoot' and `parentUnique' conclusions must mention the immediate
+  children of the candidate parents; a proof that every non-root node has some
+  ancestor, or a uniqueness theorem of the form $W=W$, is not enough.
+  Here $U_L,U_R$ are the children returned by the package's own
+  $\operatorname{children}(U)$ field. A definition such as
+  \[
+    \operatorname{MinIPInternalNodes}(V)
+      :=\{U\subseteq V: |U|\ge2\}
+  \]
+  or, in Lean, a finite set of all finsets of cardinality at least two, fails
+  this node even if it satisfies a cardinality filter: it contains subsets that
+  are not reachable by the recursive halving tree and omits the child-pointer
+  structure needed for the unique-cross-call proof.
+  The package must also expose nontrivial negative/uniqueness information
+  ruling this out, for example
+  \[
+    U\in\operatorname{MinIPInternalNodes}(V)
+    \Longrightarrow
+    U=V\ \vee\
+    \exists W\in\operatorname{MinIPInternalNodes}(V),\
+      U=W_L\ \vee\ U=W_R,
+  \]
+  and the parent in this last display is the unique immediate parent of $U$
+  unless $U=V$. These fields force membership to arise by recursion from the
+  root, not merely by satisfying $|U|\ge2$.
+  The concrete call object associated to a reachable internal node is likewise
+  fixed. The package must define
+  \[
+    \operatorname{crossInst}(U)
+      =
+      (U_L,U_R)
+      :\operatorname{BMinIPInst}(|U_L|,|U_R|,\ell),
+  \]
+  with projection equations
+  \[
+  \begin{array}{ll}
+    \operatorname{crossInst\_leftRows}(U):&
+      \operatorname{leftRows}(\operatorname{crossInst}(U))=U_L,\\
+    \operatorname{crossInst\_rightRows}(U):&
+      \operatorname{rightRows}(\operatorname{crossInst}(U))=U_R,\\
+    \operatorname{crossInst\_leftSize}(U):&
+      \operatorname{leftSize}(\operatorname{crossInst}(U))=|U_L|,\\
+    \operatorname{crossInst\_rightSize}(U):&
+      \operatorname{rightSize}(\operatorname{crossInst}(U))=|U_R|,\\
+    \operatorname{crossInst\_score}(U,p,q):&
+      \operatorname{BMinIPScore}(\operatorname{crossInst}(U),p,q)
+      =
+      \inner{(U_L)_p}{(U_R)_q}.
+  \end{array}
+  \]
+  Therefore `crossInst' must depend on the particular split node $U$ through
+  its own children. A definition
+  \[
+    \operatorname{crossInst}(U):=(V,V)
+  \]
+  or any definition whose left and right rows are the full root instance
+  independently of $U$ is explicitly rejected. For every non-root reachable
+  internal node $U$, the package must prove at least one of
+  $\operatorname{leftRows}(\operatorname{crossInst}(U))\ne V$ or
+  $\operatorname{rightRows}(\operatorname{crossInst}(U))\ne V$ unless the
+  corresponding child is genuinely the whole root by the child equations,
+  which cannot occur in a strict recursive split.
+  Finally, `allCalls' is the finite set of these dependent call records:
+  \[
+    \operatorname{MinIPAllCalls}(V)
+      =
+      \left\{
+        (|U_L|,|U_R|,\ell,\operatorname{crossInst}(U)):
+        U\in\operatorname{MinIPInternalNodes}(V)
+      \right\}.
+  \]
+  The package must expose both directions of membership:
+  \[
+  \begin{array}{ll}
+    \operatorname{allCalls\_mem\_iff}:&
+      c\in\operatorname{MinIPAllCalls}(V)
+      \Longleftrightarrow
+      \exists U\in\operatorname{MinIPInternalNodes}(V),\
+      c=(|U_L|,|U_R|,\ell,\operatorname{crossInst}(U)),\\
+    \operatorname{allCalls\_call\_mem}:&
+      U\in\operatorname{MinIPInternalNodes}(V)\to
+      (|U_L|,|U_R|,\ell,\operatorname{crossInst}(U))
+      \in\operatorname{MinIPAllCalls}(V).
+  \end{array}
+  \]
+  A field whose type is only a set of node identifiers, or a set of pairs
+  $(U,\operatorname{internalProof})$, is not `allCalls' for this node. Every
+  element of `allCalls' must be directly callable by the bichromatic Min-IP
+  algorithm through the concrete target family of
+  Definition~\ref{def:bichromatic-minip}.
+  The declaration audited at this label must therefore include the concrete
+  call-record type used by `allCalls'.  A call record has projections
+  \[
+  \begin{array}{ll}
+    \operatorname{callNode}(c) &: \operatorname{MinIPInternalNodes}(V),\\
+    \operatorname{callLeftSize}(c) &: \N,\\
+    \operatorname{callRightSize}(c) &: \N,\\
+    \operatorname{callDim}(c) &: \N,\\
+    \operatorname{callInst}(c) &: 
+      \operatorname{BMinIPInst}
+        (\operatorname{callLeftSize}(c),
+         \operatorname{callRightSize}(c),
+         \operatorname{callDim}(c)).
+  \end{array}
+  \]
+  For the call generated by a reachable internal node $U$, the package must
+  expose the defining equations
+  \[
+  \begin{array}{ll}
+    \operatorname{callNode\_eq}(U):&
+      \operatorname{callNode}(\operatorname{nodeCall}(U))=U,\\
+    \operatorname{callLeftSize\_eq}(U):&
+      \operatorname{callLeftSize}(\operatorname{nodeCall}(U))=|U_L|,\\
+    \operatorname{callRightSize\_eq}(U):&
+      \operatorname{callRightSize}(\operatorname{nodeCall}(U))=|U_R|,\\
+    \operatorname{callDim\_eq}(U):&
+      \operatorname{callDim}(\operatorname{nodeCall}(U))=\ell,\\
+    \operatorname{callInst\_eq}(U):&
+      \operatorname{callInst}(\operatorname{nodeCall}(U))
+      =\operatorname{crossInst}(U).
+  \end{array}
+  \]
+  The finite set `MinIPAllCalls(V)' is a set of these call records, not a set
+  of nodes, and
+  \[
+    c\in\operatorname{MinIPAllCalls}(V)
+    \Longleftrightarrow
+    \exists U\in\operatorname{MinIPInternalNodes}(V),\
+      c=\operatorname{nodeCall}(U).
+  \]
+  This makes the target oracle call recoverable from every member of
+  `allCalls' without consulting an external helper. A Lean implementation whose
+  `MinIPAllCalls' has element type `MinIPNode', `Finset MinIPNode',
+  `Subtype MinIPInternalNodes', or any other node-identifier type does not
+  satisfy the declaration, even if a later function maps such identifiers to
+  target instances.
+  The package must also prove that the call instance varies with the split
+  node:
+  \[
+  \begin{array}{ll}
+    \operatorname{nodeCall\_leftRows}(U):&
+      \operatorname{leftRows}(\operatorname{callInst}(\operatorname{nodeCall}(U)))
+      =U_L,\\
+    \operatorname{nodeCall\_rightRows}(U):&
+      \operatorname{rightRows}(\operatorname{callInst}(\operatorname{nodeCall}(U)))
+      =U_R.
+  \end{array}
+  \]
+  These equations are required for arbitrary reachable internal $U$, not only
+  for the root. If the generated `crossInst' or `nodeCall' ignores $U$, or if
+  `crossInst U' is definitionally the root call $(V,V)$, then the equations for
+  non-root internal nodes are false and the statement audit must reject the
+  implementation.
+  More explicitly, `internalNodes' and `allCalls' are global tree-level
+  projections. They must be defined by recursion over the whole tree:
+  \[
+    \operatorname{internalNodes}(V)
+      =
+      \{V\}\cup\operatorname{internalNodes}(V_L)\cup
+      \operatorname{internalNodes}(V_R)
+      \quad\text{when }|V|\ge2,
+  \]
+  and
+  \[
+    \operatorname{allCalls}(V)
+      =
+      \{\operatorname{nodeCall}(V)\}\cup
+      \operatorname{allCalls}(V_L)\cup
+      \operatorname{allCalls}(V_R)
+      \quad\text{when }|V|\ge2,
+  \]
+  with both sets empty at leaves. The package must expose these equations as
+  theorem fields, for example `internalNodes_leaf',
+  `internalNodes_internal', `allCalls_leaf', and `allCalls_internal'. A
+  declaration such as
+  \[
+    \operatorname{MinIPInternalNodes}(V)=
+      \begin{cases}
+        \{V\} & |V|\ge2,\\
+        \varnothing & |V|<2
+      \end{cases}
+  \]
+  is root-only and is rejected. Likewise,
+  `allCalls V = \{\operatorname{nodeCall}(V)\}' for an internal root omits all
+  recursive cross calls and is not the field required by this node. Every
+  non-root internal node reached by recursively following left or right child
+  pointers must occur in `internalNodes', and its concrete cross instance
+  $(U_L,U_R)$ with child sizes must occur in `allCalls'.
+  The reserved Lean names used for these projections have fixed types. The
+  package must expose
+  \[
+  \begin{array}{ll}
+    \operatorname{MinIPInternalNodes\_leaf}(U):&
+      |U|<2\to \operatorname{MinIPInternalNodes}(U)=\varnothing,\\
+    \operatorname{MinIPInternalNodes\_internal}(U):&
+      |U|\ge2\to
+      \operatorname{MinIPInternalNodes}(U)=
+      \{U\}\cup
+      \operatorname{MinIPInternalNodes}(U_L)\cup
+      \operatorname{MinIPInternalNodes}(U_R),\\
+    \operatorname{MinIPAllCalls\_leaf}(U):&
+      |U|<2\to \operatorname{MinIPAllCalls}(U)=\varnothing,\\
+    \operatorname{MinIPAllCalls\_internal}(U):&
+      |U|\ge2\to
+      \operatorname{MinIPAllCalls}(U)=
+      \{\operatorname{nodeCall}(U)\}\cup
+      \operatorname{MinIPAllCalls}(U_L)\cup
+      \operatorname{MinIPAllCalls}(U_R).
+  \end{array}
+  \]
+  Here $U_L,U_R$ are the actual children returned by
+  $\operatorname{children}(U)$, and $\operatorname{nodeCall}(U)$ is the call
+  record whose $\operatorname{callInst}$ is the concrete bichromatic instance
+  $\operatorname{crossInst}(U)=(U_L,U_R)$ with its child cardinalities and
+  rows. A theorem named `MinIPInternalNodes_internal' whose right-hand side is
+  just $\{U\}$, or a theorem named `MinIPAllCalls_internal' whose right-hand
+  side is just $\{\operatorname{nodeCall}(U)\}$, is not a weakened version of
+  this node; it is a different root-only construction. The audited declaration
+  must also contain membership introduction fields
+  \[
+  \begin{array}{ll}
+    \operatorname{leftInternalNode\_mem}:&
+      W\in\operatorname{MinIPInternalNodes}(U_L)\to
+      W\in\operatorname{MinIPInternalNodes}(U),\\
+    \operatorname{rightInternalNode\_mem}:&
+      W\in\operatorname{MinIPInternalNodes}(U_R)\to
+      W\in\operatorname{MinIPInternalNodes}(U),\\
+    \operatorname{leftCall\_mem}:&
+      c\in\operatorname{MinIPAllCalls}(U_L)\to
+      c\in\operatorname{MinIPAllCalls}(U),\\
+    \operatorname{rightCall\_mem}:&
+      c\in\operatorname{MinIPAllCalls}(U_R)\to
+      c\in\operatorname{MinIPAllCalls}(U).
+  \end{array}
+  \]
+  These fields rule out a singleton-root definition even when the recursive
+  equations are hidden behind helper names.
+  To rule out cardinality-filtered substitutes, the recursive equations are not
+  optional documentation: they are the definitional interface for the finite
+  sets. In particular, the theorem
+  `MinIPInternalNodes_internal(U)' must name the two children returned by
+  `children(U)' on its right-hand side, and the theorem
+  `MinIPAllCalls_internal(U)' must name
+  `nodeCall(U)', `MinIPAllCalls(U_L)', and `MinIPAllCalls(U_R)' on its
+  right-hand side. A proof that every member merely has cardinality at least
+  $2$, or a definition by filtering all finsets of rows of $V$ by cardinality,
+  cannot be coerced into this interface. The package also has exclusion fields
+  \[
+  \begin{array}{ll}
+    \operatorname{internalNodes\_reachableOnly}:&
+      U\in\operatorname{MinIPInternalNodes}(V)\to
+      \operatorname{ReachableNode}_V(U),\\
+    \operatorname{allCalls\_concreteOnly}:&
+      c\in\operatorname{MinIPAllCalls}(V)\to
+      \exists U\in\operatorname{MinIPInternalNodes}(V),\
+        c=\operatorname{nodeCall}(U)\wedge
+        \operatorname{callInst}(c)=\operatorname{crossInst}(U).
+  \end{array}
+  \]
+  The first field rules out the set of all cardinality-$\ge2$ finsets; the
+  second rules out call collections made only of node identifiers.
+
+  Trial-8 failure-specific refinement: the audited declaration must reject the
+  exact weakened package shape in which `internalNodes' is just a
+  leaf/cardinality filter and `allCalls' is a universe of predeclared calls.
+  The following normalized definitions are not acceptable, even if they are
+  wrapped in a structure named `MinIPSplitTreePairCoverage':
+  \[
+  \begin{array}{l}
+    \operatorname{MinIPInternalNodes}(V)
+      :=\{U:\ |U|\ge2\}
+      \quad\text{or}\quad
+      \{U:\operatorname{Leaf}(U)=\mathrm{false}\wedge |U|\ge2\},\\
+    \operatorname{MinIPAllCalls}(V):=\mathrm{Finset.univ}
+      \text{ over a type such as }\operatorname{MinIPSplitAllCalls}(V),\\
+    c\in\operatorname{MinIPAllCalls}(V)
+      \Longleftrightarrow c\in\operatorname{MinIPAllCalls}(V),\\
+    c\in\operatorname{MinIPAllCalls}(V)
+      \Longleftrightarrow c\in\mathrm{Finset.univ}.
+  \end{array}
+  \]
+  In particular, a membership theorem named `allCalls_mem_iff' or
+  `MinIPSplitAllCalls_mem_iff' must not be a tautology and must not reduce to
+  membership in `Finset.univ'. Its required type is the concrete
+  reconstruction theorem
+  \[
+    c\in\operatorname{MinIPAllCalls}(V)
+    \Longleftrightarrow
+    \exists U,\ 
+      U\in\operatorname{MinIPInternalNodes}(V)\ \wedge\
+      c=\operatorname{nodeCall}(U)\ \wedge\
+      \operatorname{callInst}(c)=\operatorname{crossInst}(U)\ \wedge\
+      \operatorname{callLeftSize}(c)=|U_L|\ \wedge\
+      \operatorname{callRightSize}(c)=|U_R|\ \wedge\
+      \operatorname{callDim}(c)=\ell .
+  \]
+  The existential witness $U$ must be a reachable internal node of the actual
+  recursive tree, and the call instance must be the child-sized bichromatic
+  instance $(U_L,U_R)$. A finite call type whose inhabitants are generated
+  independently of the tree, such as a global inductive or enum named
+  `MinIPSplitAllCalls', is permitted only if every inhabitant carries these
+  projections and the displayed iff recovers a reachable internal node and its
+  concrete child-sized call. Otherwise `Finset.univ' supplies all calls by type
+  inhabitance rather than by recursive reachability, which is exactly the
+  skipped argument this node is meant to prevent.
+
+  For each original distinct pair $(p,q)$ in $V$, the package contains its
+  lowest split node:
+  \[
+    \operatorname{splitNode}(p,q)\in\operatorname{internalNodes}
+  \]
+  The value of `splitNode' is not allowed to be constantly the root. It is the
+  lowest common ancestor of the two singleton leaves containing $p$ and $q$ in
+  the recursive tree, equivalently the unique internal node $U$ such that $p$
+  and $q$ both lie in $U$, but they lie in different children $U_L$ and $U_R$.
+  The witness therefore contains path and lowest-split projections
+  \[
+  \begin{array}{ll}
+    \operatorname{leafOfIndex}(p):&
+      \text{the unique leaf containing the original row }p,\\
+    \operatorname{pathToLeaf}(p):&
+      \text{the root-to-}\operatorname{leafOfIndex}(p)\text{ path},\\
+    \operatorname{splitNode\_contains}(p,q):&
+      p,q\in\operatorname{splitNode}(p,q),\\
+    \operatorname{splitNode\_cross}(p,q):&
+      (p\in U_L\wedge q\in U_R)\vee
+      (p\in U_R\wedge q\in U_L)
+      \quad\text{for }U=\operatorname{splitNode}(p,q),\\
+    \operatorname{splitNode\_lowest}(p,q):&
+      \text{every strict descendant of }U
+      \text{ contains at most one of }p,q.
+  \end{array}
+  \]
+  These are proof-valued fields about the recursively defined tree. A
+  definition `splitNode p q := root' fails this node unless it also proves that
+  the root is the lowest split node for the particular pair, which is false for
+  pairs separated only in a lower recursive subproblem.
+  It also contains a proof-valued field
+  \[
+    \operatorname{pairAppearsInUniqueCrossCall}(p,q):
+    p\ne q\Longrightarrow
+    \begin{cases}
+      p\in U_L,\ q\in U_R\ \text{or}\ p\in U_R,\ q\in U_L,\\
+      U=\operatorname{splitNode}(p,q),\\
+      \text{no other internal node has }(p,q)\text{ as a cross pair.}
+    \end{cases}
+  \]
+  This field has a non-tautological dependent type. After unfolding, its
+  conclusion must mention the concrete node
+  $U=\operatorname{splitNode}(p,q)$, the concrete children $U_L,U_R$, the
+  membership of $p$ and $q$ in opposite children, and a uniqueness statement
+  over all $W\in\operatorname{internalNodes}(V)$:
+  \[
+    \operatorname{CrossPair}_W(p,q)
+    \Longleftrightarrow W=\operatorname{splitNode}(p,q).
+  \]
+  A field that stores only the original-pair fact $p\ne q$, or proves only a
+  uniqueness condition of the form $W=W$, does not assert that the pair appears
+  in a cross oracle call and is rejected.
+  More concretely, the field named `pairAppearsInUniqueCrossCall' has a
+  dependent conclusion whose projections are proof fields
+  \[
+  \begin{array}{ll}
+    \operatorname{pairSplitNodeMem}:&
+      \operatorname{splitNode}(p,q)\in
+      \operatorname{MinIPInternalNodes}(V),\\
+    \operatorname{pairOppositeChildren}:&
+      \operatorname{CrossPair}_{\operatorname{splitNode}(p,q)}(p,q),\\
+    \operatorname{pairCrossIff}:&
+      \forall W\in\operatorname{MinIPInternalNodes}(V),\
+      \operatorname{CrossPair}_{W}(p,q)
+      \Longleftrightarrow W=\operatorname{splitNode}(p,q),\\
+    \operatorname{pairCallMem}:&
+      \operatorname{crossInst}(\operatorname{splitNode}(p,q))
+      \in\operatorname{MinIPAllCalls}(V).
+  \end{array}
+  \]
+  The implication direction
+  $\operatorname{CrossPair}_{W}(p,q)\Rightarrow
+  W=\operatorname{splitNode}(p,q)$ must be proved from the tree paths and the
+  lowest-split theorem, not assumed as a hypothesis of the same shape. A proof
+  package whose uniqueness component has type
+  $W=\operatorname{splitNode}(p,q)\to
+  W=\operatorname{splitNode}(p,q)$, or whose only nontrivial content is
+  `pairSplitNodeMem', fails this node. The constant definition
+  `splitNode p q := root' can satisfy `pairCrossIff' only for pairs separated
+  at the root; since the field is required for every original distinct pair, it
+  is rejected unless it proves the displayed lowest-split facts for that pair.
+  Conversely every cross pair in every call is an original distinct pair:
+  \[
+    \operatorname{crossPair\_to\_origPair}(U,p,q):
+    p\in U_L\wedge q\in U_R
+    \Longrightarrow (p,q)\in\operatorname{OrigPair}(V).
+  \]
+  This theorem must return the concrete original-pair data:
+  both endpoints are original indices of the root instance $V$, the two root
+  rows are distinct, and the transported score is the same root score:
+  \[
+  \begin{array}{l}
+    p,q\in\operatorname{Rows}(V),\qquad p\ne q,\\
+    \operatorname{origScore}_V(p,q)
+      =
+      \inner{\operatorname{row}_U(p)}{\operatorname{row}_U(q)}.
+  \end{array}
+  \]
+  Returning only the fact that $U$ is internal, or only that the cross instance
+  is well-formed, is not enough; it does not connect a cross oracle pair to the
+  original Min-IP search space.
+  The reserved field `crossPair_to_origPair' must return a structure, or an
+  equivalent dependent tuple, with projections
+  \[
+  \begin{array}{ll}
+    \operatorname{origLeftIndex}:&
+      p\in\operatorname{Rows}(V),\\
+    \operatorname{origRightIndex}:&
+      q\in\operatorname{Rows}(V),\\
+    \operatorname{origDistinct}:&
+      p\ne q,\\
+    \operatorname{origPairMem}:&
+      (p,q)\in\operatorname{OrigPair}(V),\\
+    \operatorname{origScoreTransport}:&
+      \operatorname{origScore}_V(p,q)=
+      \inner{\operatorname{row}_{U}(p)}
+             {\operatorname{row}_{U}(q)}.
+  \end{array}
+  \]
+  The hypothesis must identify $U$ as a member of
+  $\operatorname{MinIPInternalNodes}(V)$ and $(p,q)$ as a concrete cross pair
+  of the split $U_L,U_R$. A field returning only
+  $U\in\operatorname{MinIPInternalNodes}(V)$, or only a proof that $U$ is
+  internal, has none of the original-pair data needed for the reduction.
+  These two fields give the disjoint-union equation
+  \[
+    \operatorname{OrigPair}(V)
+    =
+    \bigsqcup_{U\in\operatorname{internalNodes}}
+      \operatorname{CrossPair}(U).
+  \]
+  A statement that only says every node can be split, or only defines
+  `CrossPair' locally, does not satisfy this node.
+
+  The package then derives the score-set identity for the original root:
+  \[
+    \{\inner{v_p}{v_q}:p\ne q\}
+    =
+    \bigcup_{U\in\operatorname{internalNodes}}
+      \{\inner{x}{y}:x\in U_L,\ y\in U_R\},
+  \]
+  as a theorem field named, or transparently equivalent to, `scoreSetIdentity'.
+  Its left-hand side must be the set of scores of original distinct pairs at the
+  root; its right-hand side must be the union over
+  `internalNodes (callTree V)' of scores of the concrete cross instances in
+  `allCalls'. It is rejected if both sides unfold to the same helper expression,
+  if the right-hand side ranges only over the root call, or if the theorem is
+  proved by reflexivity after defining the left-hand side to be the right-hand
+  side. The proof must use `pairAppearsInUniqueCrossCall' for the forward
+  inclusion and `crossPair_to_origPair' for the reverse inclusion.
+  To make this syntactic, the package must define two separate expressions
+  \[
+    \operatorname{RootScoreSet}(V)
+      :=
+      \{\operatorname{origScore}_V(p,q):(p,q)\in\operatorname{OrigPair}(V)\}
+  \]
+  and
+  \[
+    \operatorname{RecursiveCrossScoreSet}(V)
+      :=
+      \bigcup_{U\in\operatorname{MinIPInternalNodes}(V)}
+      \{\operatorname{crossScore}_{U}(p,q):
+        \operatorname{CrossPair}_{U}(p,q)\}.
+  \]
+  The theorem field has the exact shape
+  \[
+    \operatorname{scoreSetIdentity}(V):
+      \operatorname{RootScoreSet}(V)=
+      \operatorname{RecursiveCrossScoreSet}(V).
+  \]
+  The two definitions above are not allowed to be aliases for each other.
+  `RootScoreSet' must unfold to the original distinct-pair scores of
+  Definition~\ref{def:minip}; `RecursiveCrossScoreSet' must unfold to the
+  finite union over all recursive cross calls. If either side is defined by
+  copying the other side, then a reflexive proof of `scoreSetIdentity' is
+  rejected. The witness should instead expose proof fields
+  `scoreSetIdentity_forward' and `scoreSetIdentity_reverse' using respectively
+  `pairAppearsInUniqueCrossCall' and `crossPair_to_origPair'.
+  The package also exposes the corresponding minimum and threshold consequences:
+  \[
+    \operatorname{origOpt}(V)
+    =
+    \min_{U\in\operatorname{internalNodes}}m_{\mathrm{cross}}(U),
+  \]
+  \[
+    \operatorname{origThresholdYes}(V,t)
+    \Longleftrightarrow
+    \exists U\in\operatorname{internalNodes},\
+      \operatorname{CrossYes}_t(U).
+  \]
+  The fields for these consequences, for example `optimumIdentity' and
+  `thresholdIdentity', must be derived from `scoreSetIdentity' and the
+  disjoint-union coverage. `thresholdIdentity' has the displayed type with
+  `origThresholdYes(V,t)' on the left and a real existential over recursive
+  cross calls on the right. It is explicitly rejected if its type normalizes to
+  `origThresholdYes(V,t) \Longleftrightarrow origThresholdYes(V,t)', to
+  `CrossYes_t(root) \Longleftrightarrow CrossYes_t(root)', or to an iff between
+  two names that were both defined as the same disjunction over cross calls.
+  Similarly, `scoreSetIdentity' may not be
+  `scoreSetIdentity : S = S', and the optimum consequence may not be
+  `origOpt(V)=origOpt(V)'. The left-hand objects must unfold to the original
+  Min-IP semantics from Definition~\ref{def:minip}, while the right-hand
+  objects unfold to the finite union/minimum/existential over the recursive
+  cross-call family.
+  These are theorem fields about the original Min-IP semantics of
+  Definition~\ref{def:minip}. They may not be proved by defining
+  $\operatorname{origOpt}$ or $\operatorname{origThresholdYes}$ to be the right
+  hand side. This is the argument that the recursive oracle calls cover all and
+  only the pairs of the original instance.
+  The threshold field has a similarly fixed non-reflexive form. The package
+  defines
+  \[
+    \operatorname{RootThresholdYes}(V,t)
+      :=
+      \exists (p,q)\in\operatorname{OrigPair}(V),\
+        \operatorname{origScore}_V(p,q)\le t
+  \]
+  and
+  \[
+    \operatorname{RecursiveCrossThresholdYes}(V,t)
+      :=
+      \exists U\in\operatorname{MinIPInternalNodes}(V),\
+        \exists (p,q),\
+          \operatorname{CrossPair}_{U}(p,q)\wedge
+          \operatorname{crossScore}_{U}(p,q)\le t.
+  \]
+  The theorem field is
+  \[
+    \operatorname{thresholdIdentity}(V,t):
+      \operatorname{RootThresholdYes}(V,t)
+      \Longleftrightarrow
+      \operatorname{RecursiveCrossThresholdYes}(V,t).
+  \]
+  `RootThresholdYes' must unfold to the original existential over distinct
+  root pairs, while `RecursiveCrossThresholdYes' must unfold to the existential
+  over $\operatorname{MinIPInternalNodes}(V)$ and concrete cross pairs. They
+  may not both be abbreviations for the same disjunction. The accepted proof of
+  `thresholdIdentity' maps an original witness $(p,q)$ to the cross call at
+  $\operatorname{splitNode}(p,q)$ using
+  `pairAppearsInUniqueCrossCall', and maps a recursive cross witness back to an
+  original pair using `crossPair_to_origPair'. A theorem of type
+  $P\Longleftrightarrow P$, even when $P$ is a helper predicate whose name
+  mentions thresholds, does not satisfy this field.
+
+  Trial-7/13 failure-specific refinement: the following Lean names, used by the
+  disposable implementations, have reserved meanings at this label. If present,
+  `MinIPInternalNodes' must be the complete recursive finite set described by
+  `internalNodes_leaf', `internalNodes_internal', and
+  `internalNodes_iff', not a root-only set and not the cardinality-filtered set
+  of all finsets or sublists of $V$ with size at least two.
+  `allCalls' must be the complete recursive finite set of concrete
+  $\operatorname{BMinIP}$ calls described by `allCalls_leaf' and
+  `allCalls_internal' and by the membership equivalence
+  `allCalls_mem_iff'; it is not a singleton root call and not a set of node
+  identifiers. `crossInst' must unfold to the child instance $(U_L,U_R)$ of the
+  particular split node $U$, with the left/right row, size and score equations
+  `crossInst_leftRows', `crossInst_rightRows',
+  `crossInst_leftSize', `crossInst_rightSize', and `crossInst_score'. A
+  `crossInst' that ignores $U$ and uses the full root instance $V$ on both
+  sides fails the statement audit. `splitNode' must be the
+  lowest split node of the pair and must satisfy `splitNode_cross' and
+  `splitNode_lowest'. `pairAppearsInUniqueCrossCall' must have a conclusion
+  containing opposite-child membership and
+  $\operatorname{CrossPair}_W(p,q)\Longleftrightarrow
+  W=\operatorname{splitNode}(p,q)$. `crossPair_to_origPair' must output a
+  concrete member of $\operatorname{OrigPair}(V)$, including $p\ne q$, not
+  merely an internal-node proof. `scoreSetIdentity' and `thresholdIdentity'
+  must be the non-reflexive root-versus-recursive-call statements displayed
+  above. Any implementation in which these names unfold to root-only
+  definitions, constant root `splitNode', tautological uniqueness, an
+  internal-node-only conclusion, or reflexive equalities/iff statements fails
+  this blueprint node even if other abstract reduction fields are present.
+  Trial-2 failure-specific refinement: a Lean declaration satisfying only a
+  weakened interface named `MinIPSplitTreePairCoverage' is not enough. The
+  audited structure must have projections with the exact mathematical roles
+  listed in this node:
+  \[
+  \begin{array}{ll}
+    \operatorname{ReachableNode}:&
+      \text{inductive root/left/right reachability in }\operatorname{callTree}(V),\\
+    \operatorname{MinIPInternalNodes}:&
+      \{U:\operatorname{ReachableNode}_V(U)\wedge |U|\ge2\},\\
+    \operatorname{nodeCall}:&
+      U\mapsto (|U_L|,|U_R|,\ell,\operatorname{crossInst}(U)),\\
+    \operatorname{MinIPAllCalls}:&
+      \{\operatorname{nodeCall}(U):U\in\operatorname{MinIPInternalNodes}(V)\},\\
+    \operatorname{crossInst}:&
+      U\mapsto(U_L,U_R)
+        :\operatorname{BMinIPInst}(|U_L|,|U_R|,\ell),\\
+    \operatorname{splitNode}:&
+      (p,q)\mapsto\text{the lowest reachable internal node whose children
+      separate }p\text{ and }q,\\
+    \operatorname{pairAppearsInUniqueCrossCall}:&
+      \text{opposite-child membership at }\operatorname{splitNode}(p,q)
+      \text{ and uniqueness among all reachable internal nodes},\\
+    \operatorname{crossPair\_to\_origPair}:&
+      \text{a concrete original distinct pair with score transport},\\
+    \operatorname{scoreSetIdentity}:&
+      \operatorname{RootScoreSet}(V)=
+      \operatorname{RecursiveCrossScoreSet}(V),\\
+    \operatorname{optimumIdentity}:&
+      \operatorname{origOpt}(V)=
+      \min_{U\in\operatorname{MinIPInternalNodes}(V)}m_{\mathrm{cross}}(U),\\
+    \operatorname{thresholdIdentity}:&
+      \operatorname{RootThresholdYes}(V,t)\Longleftrightarrow
+      \operatorname{RecursiveCrossThresholdYes}(V,t).
+  \end{array}
+  \]
+  Each line is a projection or theorem field of the audited declaration itself.
+  It is not acceptable to provide a structure with unrelated fields whose names
+  suggest these concepts while their normalized types are cardinality filters,
+  node-id sets, root calls, or tautologies. The following normalized shapes are
+  specifically rejected:
+  \[
+  \begin{array}{l}
+    \operatorname{MinIPInternalNodes}(V)
+      =\{U:\operatorname{Rows}(U)\subseteq\operatorname{Rows}(V)
+          \wedge |U|\ge2\},\\
+    \operatorname{MinIPAllCalls}(V)
+      =\operatorname{MinIPInternalNodes}(V),\\
+    \operatorname{crossInst}(U)
+      =(\operatorname{Rows}(V),\operatorname{Rows}(V)),\\
+    \operatorname{crossInst\_score}(U,p,q)
+      =\inner{v_p}{v_q}
+      \text{ with }p,q\text{ indexing the root rows rather than }U_L,U_R,\\
+    \operatorname{pairAppearsInUniqueCrossCall}(p,q)
+      \text{ lacking }\operatorname{pairOppositeChildren}
+      \text{ or }\operatorname{pairCallMem},\\
+    \operatorname{crossPair\_to\_origPair}(U,p,q)
+      \text{ lacking }\operatorname{origDistinct}
+      \text{ or }\operatorname{origScoreTransport},\\
+    \operatorname{scoreSetIdentity}:S=S,\quad
+    \operatorname{optimumIdentity}:m=m,\quad
+    \operatorname{thresholdIdentity}:P\Longleftrightarrow P .
+  \end{array}
+  \]
+  The generator must therefore construct the reachable recursive tree first,
+  then derive calls and pair coverage from that tree. It cannot satisfy this
+  node by selecting all sufficiently large finsets of rows, by using the full
+  root instance as every cross call, or by replacing the score/optimum/threshold
+  consequences with reflexive statements.
+  In particular, the rejected trial shapes are:
+  \[
+  \begin{array}{l}
+    \operatorname{MinIPInternalNodes}(V)=\{V\}
+      \text{ for every internal root }V,\\
+    \operatorname{MinIPInternalNodes}(V)=
+      \{U\subseteq V: |U|\ge2\}
+      \text{ or any cardinality-only filter over all finsets/sublists},\\
+    \operatorname{MinIPAllCallsRoot}(V)=
+      \{\operatorname{crossInst}(V)\}
+      \text{ with no recursive child calls},\\
+    \operatorname{MinIPAllCalls}(V)=
+      \operatorname{MinIPInternalNodes}(V)
+      \text{ or any set whose elements are node identifiers rather than }
+      (|U_L|,|U_R|,\ell,\operatorname{crossInst}(U))
+      \text{ target calls},\\
+    \operatorname{crossInst}(U)=(V,V)
+      \text{ or any target instance independent of }U
+      \text{ and its children }U_L,U_R,\\
+    \operatorname{splitNode}(p,q)=\operatorname{MinIPRootSplitNode}(V)
+      \text{ for every }p\ne q,\\
+    \operatorname{pairAppearsInUniqueCrossCall}
+      \text{ proving only }
+      N=\operatorname{splitNode}(p,q)\to
+      N=\operatorname{splitNode}(p,q),\\
+    \operatorname{crossPair\_to\_origPair}
+      \text{ returning only }N.\operatorname{internal},\\
+    \operatorname{scoreSetIdentity}:
+      \operatorname{RootScoreSet}(V)=\operatorname{RootScoreSet}(V),\\
+    \operatorname{thresholdIdentity}:
+      \operatorname{RootThresholdYes}(V,t)\Longleftrightarrow
+      \operatorname{RootThresholdYes}(V,t).
+  \end{array}
+  \]
+  Any future implementation with these normalized types fails the statement
+  audit, regardless of surrounding comments or separately asserted abstract
+  reduction fields.
+
+  Trial-3 failure-specific refinement: the declaration named
+  $\operatorname{MinIPSplitTreePairCoverage}$ must not satisfy this node by
+  presenting a split tree facade while encoding the oracle calls at the root
+  size with masks. The target call associated to an internal node $U$ is the
+  actual child-sized bichromatic instance
+  \[
+    \operatorname{nodeCall}(U)
+      =
+      (|U_L|,\ |U_R|,\ \ell,\ \operatorname{crossInst}(U)),
+    \qquad
+    \operatorname{crossInst}(U)=(U_L,U_R).
+  \]
+  Its instance type is
+  $\operatorname{BMinIPInst}(|U_L|,|U_R|,\ell)$, or the equivalent dependent
+  target-call type used by Definition~\ref{def:bichromatic-minip}. It is not
+  an instance of $\operatorname{BMinIPInst}(n,n,\ell)$ whose rows are the root
+  rows together with Boolean masks, inactive dummy rows, sentinel values, or
+  predicates selecting the active children. If a formalization uses padding to
+  fit an equal-size target family, the padding must be an explicit separate
+  construction with row equations, dummy-row score bounds, and a theorem that
+  the padded optimum/threshold is identical to the child-sized cross problem.
+  Without that padding theorem, a root-sized masked call is rejected.
+
+  Consequently, `allCalls' has element type a concrete target-call record, not
+  a subtype of internal nodes and not a record whose only payload is a node id.
+  Trial-3 failure-specific refinement, sharpened: if the Lean implementation
+  uses a structure named `MinIPCallRecord', then that structure itself must
+  carry the target-call payload. Its non-proof projections must include
+  \[
+  \begin{array}{ll}
+    \operatorname{callNode}(c) &: \operatorname{MinIPInternalNodes}(V),\\
+    \operatorname{callLeftSize}(c) &: \N,\\
+    \operatorname{callRightSize}(c) &: \N,\\
+    \operatorname{callDim}(c) &: \N,\\
+    \operatorname{callInst}(c) &: 
+      \operatorname{BMinIPInst}
+        (\operatorname{callLeftSize}(c),
+         \operatorname{callRightSize}(c),
+         \operatorname{callDim}(c)).
+  \end{array}
+  \]
+  The declaration is rejected if `MinIPCallRecord' stores only `callNode',
+  even if later external functions can compute sizes or an instance from that
+  node. Pattern matching on a call record, or unfolding its transparent Sigma
+  representation, must expose the child-sized target parameter and the
+  concrete target instance as data of that same element. The canonical element
+  has the definitional tuple shape
+  \[
+    \operatorname{nodeCall}(U)
+      =
+      \left\langle
+        U,\ |U_L|,\ |U_R|,\ \ell,\ \operatorname{crossInst}(U),
+        \operatorname{nodeCall\_inst}(U)
+      \right\rangle,
+  \]
+  where $\operatorname{crossInst}(U):\operatorname{BMinIPInst}(|U_L|,|U_R|,\ell)$
+  is the concrete instance $(U_L,U_R)$. A record whose only data field is
+  `callNode' and whose remaining fields are propositions, theorem fields, or
+  opaque computed projections is not a concrete oracle-call record for this
+  node.
+  Projecting an element $c\in\operatorname{MinIPAllCalls}(V)$ must immediately
+  recover
+  \[
+    \operatorname{callLeftSize}(c),\quad
+    \operatorname{callRightSize}(c),\quad
+    \operatorname{callDim}(c),\quad
+    \operatorname{callInst}(c),
+  \]
+  with a proof
+  \[
+    \exists U\in\operatorname{MinIPInternalNodes}(V),\quad
+      c=\operatorname{nodeCall}(U)
+      \wedge
+      \operatorname{callInst}(c)=\operatorname{crossInst}(U)
+      \wedge
+      \operatorname{callLeftSize}(c)=|U_L|
+      \wedge
+      \operatorname{callRightSize}(c)=|U_R|.
+  \]
+  A later map from a node record to a call is insufficient: the finite oracle
+  call set itself must be directly consumable by the bichromatic Min-IP
+  algorithm. In particular, implementations where `allCalls' is a subtype such
+  as
+  \[
+    \{U // U\in\operatorname{MinIPInternalNodes}(V)\}
+  \]
+  or a structure containing only `callNode' plus proof fields fail this node
+  unless the same element also stores the child-sized target parameter and
+  target instance as projections satisfying the equations above.
+  The membership theorem must also recover those projections:
+  \[
+  \begin{array}{l}
+    c\in\operatorname{MinIPAllCalls}(V)
+    \Longleftrightarrow
+    \exists U\in\operatorname{MinIPInternalNodes}(V),\\
+    \qquad
+      c=\operatorname{nodeCall}(U)\ \wedge\
+      \operatorname{callLeftSize}(c)=|U_L|\ \wedge\
+      \operatorname{callRightSize}(c)=|U_R|\ \wedge\
+      \operatorname{callDim}(c)=\ell\ \wedge\
+      \operatorname{callInst}(c)=\operatorname{crossInst}(U).
+  \end{array}
+  \]
+  A theorem of the weaker form
+  $c\in\operatorname{MinIPAllCalls}(V)\Longleftrightarrow
+  \exists U,\ c.\operatorname{callNode}=U$ is rejected, because it proves only
+  that calls are node wrappers and does not expose a target oracle instance.
+
+  The uniqueness theorem is likewise about cross-pair membership across all
+  recursive calls, not about uniqueness of a synthetically chosen call value.
+  For every original pair $o=(p,q)$ with $p\ne q$, the required field
+  `unique\_cross\_call' or `pairAppearsInUniqueCrossCall' has the non-tautological
+  form
+  \[
+    \exists! c\in\operatorname{MinIPAllCalls}(V),\
+      \operatorname{CrossPair}_{\operatorname{callInst}(c)}(p,q),
+  \]
+  together with the equation identifying this unique call with
+  $\operatorname{nodeCall}(\operatorname{splitNode}(p,q))$. The predicate
+  $\operatorname{CrossPair}_{\operatorname{callInst}(c)}(p,q)$ must unfold to
+  the assertion that the original endpoints $p,q$ occur in opposite child lists
+  of the concrete call instance $\operatorname{callInst}(c)$, after transporting
+  them along the row-origin maps of that call. The rejected type
+  \[
+    \exists! c,\ c=\operatorname{lowestSplitCall}(o)
+  \]
+  proves only uniqueness of equality to a chosen value and says nothing about
+  whether $o$ appears as a cross pair in any oracle call. Such a theorem fails
+  even if the chosen value is later called `lowestSplitCall'.
+  If the implementation uses a predicate named `MinIPCrossPair', its definition
+  must be independent of $\operatorname{splitNode}$. For a concrete call record
+  $c$ and original endpoints $p,q$, the accepted definition is
+  \[
+  \begin{array}{l}
+    \operatorname{MinIPCrossPair}(c,p,q)
+    \Longleftrightarrow
+    \exists i:\operatorname{Fin}(\operatorname{callLeftSize}(c)),\
+    \exists j:\operatorname{Fin}(\operatorname{callRightSize}(c)),\\
+    \qquad
+      \Bigl(
+        \operatorname{callLeftOrig}(c,i)=p\ \wedge\
+        \operatorname{callRightOrig}(c,j)=q
+      \Bigr)
+      \vee
+      \Bigl(
+        \operatorname{callLeftOrig}(c,i)=q\ \wedge\
+        \operatorname{callRightOrig}(c,j)=p
+      \Bigr).
+  \end{array}
+  \]
+  Equivalently, it may use row-origin maps for
+  $\operatorname{callInst}(c)$, but it must mention the concrete call record
+  $c$, the left and right call indices, and the two origin equations. It must
+  not unfold to
+  $c=\operatorname{nodeCall}(\operatorname{splitNode}(p,q))$, to
+  $U=\operatorname{splitNode}(p,q)$, to
+  $\operatorname{canonicalCall}(p,q)=c$, or to any predicate over the original
+  pair alone. The theorem `uniqueCrossCall_iff' must then have the audited
+  shape
+  \[
+    \forall c\in\operatorname{MinIPAllCalls}(V),\quad
+      \operatorname{MinIPCrossPair}(c,p,q)
+      \Longleftrightarrow
+      c=\operatorname{nodeCall}(\operatorname{splitNode}(p,q)),
+  \]
+  where the left-hand side is the concrete cross-pair membership predicate just
+  described. A theorem whose left-hand side is already
+  $c=\operatorname{nodeCall}(\operatorname{splitNode}(p,q))$, or whose proof is
+  an iff between two equalities to the chosen call, is tautological and fails
+  this node.
+
+  The score and threshold objects must be built from the recursive call set,
+  not from a second copy of the original pair enumeration. The package must
+  expose the definitions
+  \[
+  \begin{array}{ll}
+    \operatorname{RecursiveCrossScoreSet}(V)
+      &=
+      \displaystyle
+      \bigcup_{c\in\operatorname{MinIPAllCalls}(V)}
+      \{\operatorname{BMinIPScore}(\operatorname{callInst}(c),o):
+        \operatorname{CrossOut}(\operatorname{callInst}(c),o)\},\\[2mm]
+    \operatorname{RecursiveCrossThresholdYes}(V,t)
+      &\Longleftrightarrow
+      \displaystyle
+      \exists c\in\operatorname{MinIPAllCalls}(V),\
+      \exists o:\operatorname{CrossOut}(\operatorname{callInst}(c)),\
+        \operatorname{BMinIPScore}(\operatorname{callInst}(c),o)\le t.
+  \end{array}
+  \]
+  These right-hand sides must mention `MinIPAllCalls', `callInst', and the
+  concrete bichromatic score of the call. They may not be aliases for canonical
+  original-pair sets such as
+  $\{\operatorname{origScore}_V(p,q):(p,q)\in\operatorname{OrigPair}(V)\}$, and
+  they may not be defined by transporting every original pair through a
+  canonical map before the pair-coverage theorem is proved. The theorem
+  `scoreSetIdentity' is exactly the proof that this recursive-call score set
+  equals the root score set; `thresholdIdentity' is exactly the proof that the
+  recursive-call threshold existential equals the original threshold
+  existential. If either side of those theorems unfolds to the same canonical
+  original-pair expression, the implementation has assumed the desired pair
+  coverage instead of proving it and fails this node.
+  The normalized definitions are required to have membership/iff theorems
+  \[
+  \begin{array}{l}
+    s\in\operatorname{RecursiveCrossScoreSet}(V)
+    \Longleftrightarrow
+    \exists c\in\operatorname{MinIPAllCalls}(V),\
+    \exists o:\operatorname{BMinIPOut}(\operatorname{callInst}(c)),\
+      s=\operatorname{BMinIPScore}(\operatorname{callInst}(c),o),\\[1mm]
+    \operatorname{RecursiveCrossThresholdYes}(V,t)
+    \Longleftrightarrow
+    \exists c\in\operatorname{MinIPAllCalls}(V),\
+    \exists o:\operatorname{BMinIPOut}(\operatorname{callInst}(c)),\
+      \operatorname{BMinIPScore}(\operatorname{callInst}(c),o)\le t .
+  \end{array}
+  \]
+  These statements are rejected if the right-hand side contains
+  $\operatorname{OrigPair}(V)$, $\operatorname{canonicalCall}(o)$,
+  $\operatorname{canonicalRightIndex}(o)$,
+  $\operatorname{MinIPSplitCanonicalCall}$, or
+  $\operatorname{MinIPPairScore}(V,o)$ in place of a quantified concrete call
+  $c\in\operatorname{MinIPAllCalls}(V)$ and a concrete bichromatic output
+  $o:\operatorname{BMinIPOut}(\operatorname{callInst}(c))$. The canonical
+  split-call transport from Lemma~\ref{lem:minip-canonical-cross-score-transport}
+  is allowed only inside the proof of the forward inclusion of
+  `scoreSetIdentity'; it is not allowed in the definition of
+  $\operatorname{RecursiveCrossScoreSet}$ or
+  $\operatorname{RecursiveCrossThresholdYes}$.
+  In particular, the following normalized shapes fail this node:
+  \[
+  \begin{array}{l}
+    \operatorname{RecursiveCrossScoreSet}(V)
+      =
+      \{\operatorname{BMinIPScore}
+        (\operatorname{crossInst}(V,\operatorname{canonicalCall}(o)),
+         (0,\operatorname{canonicalRightIndex}(o))):
+        o\in\operatorname{OrigPair}(V)\},\\
+    \operatorname{RecursiveCrossThresholdYes}(V,t)
+      \Longleftrightarrow
+      \exists o\in\operatorname{OrigPair}(V),\
+        \operatorname{BMinIPScore}
+          (\operatorname{crossInst}(V,\operatorname{canonicalCall}(o)),
+           (0,\operatorname{canonicalRightIndex}(o)))\le t .
+  \end{array}
+  \]
+  These formulas enumerate original pairs with a canonical call per pair; they
+  do not range over the finite recursive oracle-call set and therefore assume
+  the coverage theorem that this node is supposed to prove.
+
+  In short, the accepted implementation order is:
+  build reachable nodes; build child-sized concrete calls from reachable
+  internal nodes; prove every original pair appears in the unique concrete
+  cross call determined by its lowest split node; prove every concrete cross
+  call output transports back to an original distinct pair; only then derive
+  `scoreSetIdentity', `optimumIdentity', and `thresholdIdentity'. Any
+  implementation that replaces this order by root-size masks, node-subtype
+  call sets, tautological uniqueness, or canonical original-pair definitions of
+  the recursive score/threshold objects does not satisfy
+  Lemma~\ref{lem:minip-split-tree-pair-coverage}.
+
+  Trial-4 failure-specific refinement: the audited Lean declaration must make
+  the recursive call interface itself impossible to satisfy with root-sized
+  masked calls or node-only records. The package
+  $\operatorname{MinIPSplitTreePairCoverage}$ has a dependent call-record
+  projection, or an equivalent Sigma type, with exactly the semantic shape
+  \[
+    \operatorname{ConcreteBMinIPCall}_V :=
+    \sum_{U:\operatorname{MinIPInternalNodes}(V)}
+    \sum_{n_L,n_R:\N}
+    \sum_{\ell':\N}
+      \operatorname{BMinIPInst}(n_L,n_R,\ell').
+  \]
+  For the canonical call generated by an internal node $U$, the projection
+  equations are theorem fields of this same package:
+  \[
+  \begin{array}{ll}
+    \operatorname{nodeCall\_node}(U) &: \operatorname{callNode}(\operatorname{nodeCall}(U))=U,\\
+    \operatorname{nodeCall\_leftSize}(U) &: \operatorname{callLeftSize}(\operatorname{nodeCall}(U))=|U_L|,\\
+    \operatorname{nodeCall\_rightSize}(U) &: \operatorname{callRightSize}(\operatorname{nodeCall}(U))=|U_R|,\\
+    \operatorname{nodeCall\_dim}(U) &: \operatorname{callDim}(\operatorname{nodeCall}(U))=\ell,\\
+    \operatorname{nodeCall\_inst}(U) &: \operatorname{callInst}(\operatorname{nodeCall}(U))
+      =\operatorname{crossInst}(U),\\
+    \operatorname{crossInst\_type}(U) &: \operatorname{crossInst}(U):
+      \operatorname{BMinIPInst}(|U_L|,|U_R|,\ell),\\
+    \operatorname{crossInst\_rows}(U) &: \operatorname{crossInst}(U)=(U_L,U_R).
+  \end{array}
+  \]
+  Thus the type of $\operatorname{callInst}(c)$ must depend on
+  $\operatorname{callLeftSize}(c)$ and $\operatorname{callRightSize}(c)$.
+  A structure whose call instance always has type
+  $\operatorname{BMinIPInst}(n,n,\ell)$, even if it stores masks, active-row
+  predicates, row-origin functions, or dummy-row promises, is a different
+  construction. It may appear only after an additional padding node proves that
+  the padded root-sized instance has the same cross optimum and threshold
+  predicate as the child-sized instance; absent that proof, it fails this node.
+  In particular, the normalized field type
+  \[
+    \operatorname{allCalls} :
+      \operatorname{Finset}\{U // U\in\operatorname{MinIPInternalNodes}(V)\}
+  \]
+  or any node-subtype variant is rejected. The accepted field is
+  \[
+    \operatorname{allCalls} :
+      \operatorname{Finset}(\operatorname{ConcreteBMinIPCall}_V)
+  \]
+  with membership theorem
+  \[
+    c\in\operatorname{allCalls}(V)
+    \Longleftrightarrow
+    \exists U\in\operatorname{MinIPInternalNodes}(V),\
+      c=\operatorname{nodeCall}(U).
+  \]
+
+  The field named `unique\_cross\_call' is reserved for uniqueness among
+  concrete recursive oracle calls. Its accepted dependent type is
+  \[
+  \begin{array}{l}
+    \operatorname{unique\_cross\_call}(p,q,h_{pq}):\\
+    \qquad
+    \exists! c:\operatorname{ConcreteBMinIPCall}_V,\
+      c\in\operatorname{allCalls}(V)\ \wedge\
+      \operatorname{CrossPairInCall}(c,p,q),
+  \end{array}
+  \]
+  together with projection fields
+  \[
+  \begin{array}{ll}
+    \operatorname{uniqueCrossCall\_eq}:&
+      c=\operatorname{nodeCall}(\operatorname{splitNode}(p,q)),\\
+    \operatorname{uniqueCrossCall\_cross}:&
+      \operatorname{CrossPairInCall}
+        (\operatorname{nodeCall}(\operatorname{splitNode}(p,q)),p,q),\\
+    \operatorname{uniqueCrossCall\_unique}:&
+      \forall c\in\operatorname{allCalls}(V),\
+      \operatorname{CrossPairInCall}(c,p,q)
+      \Longleftrightarrow
+      c=\operatorname{nodeCall}(\operatorname{splitNode}(p,q)).
+  \end{array}
+  \]
+  Here $\operatorname{CrossPairInCall}(c,p,q)$ unfolds to the assertion that
+  the original endpoints $p$ and $q$ are transported by the row-origin maps of
+  $\operatorname{callInst}(c)$ to one row of its left child list and one row of
+  its right child list, in either order. The rejected theorem
+  \[
+    \exists! c,\ c=\operatorname{lowestSplitCall}(p,q)
+  \]
+  or $\exists! c,\ c=\operatorname{lowestSplitCall}(o)$ has no cross-pair
+  predicate and is not a weakening of the desired statement; it says only that
+  equality to a chosen term is unique.
+
+  Finally, the score and threshold fields must be definitionally recursive-call
+  objects. The accepted definitions are
+  \[
+    \operatorname{RecursiveCrossScoreSet}(V)
+    =
+    \bigcup_{c\in\operatorname{allCalls}(V)}
+      \{\operatorname{BMinIPScore}(\operatorname{callInst}(c),o):
+        o\in\operatorname{BMinIPOut}(\operatorname{callInst}(c))\},
+  \]
+  and
+  \[
+    \operatorname{RecursiveCrossThresholdYes}(V,t)
+    \Longleftrightarrow
+    \exists c\in\operatorname{allCalls}(V),\
+    \exists o\in\operatorname{BMinIPOut}(\operatorname{callInst}(c)),\
+      \operatorname{BMinIPScore}(\operatorname{callInst}(c),o)\le t .
+  \]
+  The names `scoreSet', `scoreSetIdentity', `thresholdYes', and
+  `thresholdIdentity', if used, must point to these recursive-call definitions
+  and to the non-reflexive theorems comparing them with the original root
+  semantics. They may not define `scoreSet' by enumerating canonical original
+  pairs, may not define `thresholdYes' by the original existential over
+  $\operatorname{OrigPair}(V)$, and may not prove
+  `scoreSetIdentity' or `thresholdIdentity' by reflexivity after both sides
+  unfold to canonical original-pair expressions. The original-pair enumeration
+  belongs only on the left-hand side
+  $\operatorname{RootScoreSet}(V)$ or
+  $\operatorname{RootThresholdYes}(V,t)$; the right-hand side must traverse
+  $\operatorname{allCalls}(V)$, $\operatorname{callInst}(c)$, and concrete
+  bichromatic oracle outputs.
+
+  Trial-4 audit repair: the accepted call-record interface is now part of the
+  mathematical statement of this node, not an implementation hint.  The
+  declaration audited as $\operatorname{MinIPSplitTreePairCoverage}$ must expose
+  a type family
+  \[
+    \operatorname{ConcreteBMinIPCall}_V
+      =
+      \sum_{U:\operatorname{ReachableInternalNode}(V)}
+      \sum_{n_L,n_R,\ell':\N}
+        \operatorname{BMinIPInst}(n_L,n_R,\ell')
+  \]
+  or an isomorphic transparent record.  Every value
+  $c:\operatorname{ConcreteBMinIPCall}_V$ has data projections
+  \[
+    \operatorname{callNode}(c),\quad
+    \operatorname{callLeftSize}(c),\quad
+    \operatorname{callRightSize}(c),\quad
+    \operatorname{callDim}(c),\quad
+    \operatorname{callInst}(c),
+  \]
+  where
+  \[
+    \operatorname{callInst}(c):
+      \operatorname{BMinIPInst}
+        (\operatorname{callLeftSize}(c),
+         \operatorname{callRightSize}(c),
+         \operatorname{callDim}(c)).
+  \]
+  These five projections must be stored data or transparent Sigma projections of
+  the call value.  It is not sufficient for `MinIPCallRecord' to store only
+  `callNode' and define the sizes and target instance later by functions of that
+  node; such a record is a node wrapper, not an oracle call.  If a helper name
+  `MinIPCallRecord' is used, then after unfolding that helper the normalized
+  record type must still contain the four size/dimension/instance projections
+  above as fields of the same call element.
+
+  The finite oracle-call set has the exact element type
+  $\operatorname{ConcreteBMinIPCall}_V$:
+  \[
+    \operatorname{MinIPAllCalls}(V):
+      \operatorname{Finset}(\operatorname{ConcreteBMinIPCall}_V).
+  \]
+  Its membership theorem is the non-tautological reconstruction statement
+  \[
+  \begin{array}{l}
+    c\in\operatorname{MinIPAllCalls}(V)
+    \Longleftrightarrow
+    \exists U:\operatorname{ReachableInternalNode}(V),\\
+    \qquad
+      c=\operatorname{nodeCall}(U)\ \wedge\
+      \operatorname{callLeftSize}(c)=|U_L|\ \wedge\
+      \operatorname{callRightSize}(c)=|U_R|\ \wedge\
+      \operatorname{callDim}(c)=\ell\ \wedge\
+      \operatorname{callInst}(c)=\operatorname{crossInst}(U).
+  \end{array}
+  \]
+  For the canonical call generated by $U$,
+  \[
+    \operatorname{nodeCall}(U)
+      =
+      \langle U,|U_L|,|U_R|,\ell,\operatorname{crossInst}(U)\rangle,
+    \qquad
+    \operatorname{crossInst}(U)=(U_L,U_R).
+  \]
+  Thus the call set is rejected if its element type is a subtype of
+  $\operatorname{MinIPInternalNodes}(V)$, a set of node identifiers, a set of
+  masks, a set of canonical original pairs, or a set of records whose only
+  non-proof payload is `callNode'.  The membership theorem is also rejected if
+  it normalizes to membership in `Finset.univ', to
+  $c\in\operatorname{MinIPAllCalls}(V)\Longleftrightarrow
+  c\in\operatorname{MinIPAllCalls}(V)$, or to
+  $\exists U,\operatorname{callNode}(c)=U$ without the displayed
+  child-sized target-instance equations.
+
+  Trial-5 failure-specific refinement: the accepted call set is the recursive
+  image of reachable internal split nodes, not a universe of canonical suffix
+  calls.  In particular, the declaration audited at this label is rejected if
+  the concrete call type normalizes to
+  \[
+    \{\,i:\operatorname{Fin}(n): i.\operatorname{val}+1<n\,\},
+  \]
+  to any lower-index/suffix-call type, or to any type whose inhabitants are
+  original row indices rather than child-sized bichromatic oracle-call records.
+  The generated name `MinIPConcreteAllCalls', if present, must satisfy the
+  non-tautological membership theorem
+  \[
+  \begin{array}{l}
+    c\in\operatorname{MinIPConcreteAllCalls}(V)
+    \Longleftrightarrow
+    \exists U:\operatorname{ReachableInternalNode}(V),\\
+    \qquad
+      c=\operatorname{nodeCall}(U)\ \wedge\
+      \operatorname{callLeftSize}(c)=|U_L|\ \wedge\
+      \operatorname{callRightSize}(c)=|U_R|\ \wedge\
+      \operatorname{callDim}(c)=\ell\ \wedge\
+      \operatorname{callInst}(c)=\operatorname{crossInst}(U).
+  \end{array}
+  \]
+  Therefore
+  \[
+    \operatorname{MinIPConcreteAllCalls}(V)=\operatorname{Finset.univ}
+  \]
+  is acceptable only in the degenerate implementation style where the ambient
+  finite type itself is definitionally the subtype of records
+  $\{\operatorname{nodeCall}(U):U\in\operatorname{ReachableInternalNode}(V),
+  |U|\ge2\}$ and every inhabitant stores
+  `callLeftSize', `callRightSize', `callDim' and `callInst' as data.  It is
+  explicitly rejected when the ambient type is
+  $\{i:\operatorname{Fin}(n):i.\operatorname{val}+1<n\}$, a suffix-call index,
+  a canonical-pair index, a row-index subtype, a mask id, or any record from
+  which the child-sized target instance is computed only by external functions.
+  A suffix call such as the one determined by a lower index $i$ and the right
+  suffix $\{i+1,\ldots,n-1\}$ is not a node of the recursive halving tree unless
+  the package proves a reachable internal node $U$ whose actual children are
+  exactly the singleton row $i$ and that suffix.  Since the halving tree's
+  children are fixed by recursive bisection, such a proof is generally false;
+  the blueprint requires the recursive tree call set, not the collection of all
+  lower-index suffix comparisons.
+
+  Trial-6 rejection-specific refinement: the exact failed normalized interface
+  is forbidden.  A declaration does \emph{not} satisfy this node if the concrete
+  call type, `MinIPConcreteCall', `MinIPConcreteAllCalls', or any transparently
+  equivalent field unfolds to
+  \[
+    \{\,i:\operatorname{Fin}(p.n)\ //\ i.\operatorname{val}+1<p.n\,\},
+  \]
+  with
+  \[
+    \operatorname{MinIPConcreteAllCalls}(X)=\operatorname{Finset.univ}.
+  \]
+  This remains rejected even if each such index $i$ is later interpreted by a
+  helper as the call comparing row $i$ against the suffix
+  $\{i+1,\ldots,p.n-1\}$, and even if separate theorems prove that the suffix
+  score equals the score of a canonical original pair.  The type above is a
+  lower-index suffix-call universe; it is not the recursive split-tree call
+  family of Lemma~\ref{lem:minip-bichromatic-reduction}.
+
+  The accepted replacement is a positive dependent record type, projected from
+  this node, whose inhabitants are already oracle calls:
+  \[
+  \begin{array}{ll}
+    \operatorname{MinIPRecursiveCall}(V) &: \mathrm{Type},\\
+    \operatorname{callNode}(c) &: \operatorname{ReachableInternalNode}(V),\\
+    \operatorname{callLeftSize}(c) &: \N,\\
+    \operatorname{callRightSize}(c) &: \N,\\
+    \operatorname{callDim}(c) &: \N,\\
+    \operatorname{callInst}(c) &:
+      \operatorname{BMinIPInst}
+        (\operatorname{callLeftSize}(c),
+         \operatorname{callRightSize}(c),
+         \operatorname{callDim}(c)).
+  \end{array}
+  \]
+  The concrete all-call set has type
+  \[
+    \operatorname{MinIPConcreteAllCalls}(V):
+      \operatorname{Finset}(\operatorname{MinIPRecursiveCall}(V)),
+  \]
+  and its membership theorem must be exactly an image-of-reachable-nodes theorem:
+  \[
+  \begin{array}{l}
+    c\in\operatorname{MinIPConcreteAllCalls}(V)
+    \Longleftrightarrow
+    \exists U:\operatorname{ReachableInternalNode}(V),\\
+    \qquad
+      c=\operatorname{nodeCall}(U)\ \wedge\
+      \operatorname{callNode}(c)=U\ \wedge\
+      \operatorname{callLeftSize}(c)=|U_L|\ \wedge\
+      \operatorname{callRightSize}(c)=|U_R|\ \wedge\
+      \operatorname{callDim}(c)=\ell\ \wedge\
+      \operatorname{callInst}(c)=\operatorname{crossInst}(U)\ \wedge\
+      \operatorname{crossInst}(U)=(U_L,U_R).
+  \end{array}
+  \]
+  Thus `Finset.univ' is acceptable only if the ambient type is definitionally
+  this dependent image type of reachable internal nodes with the five call
+  projections above.  It is not acceptable when the ambient type is any subtype
+  of `Fin p.n', any subtype of original row indices, any suffix descriptor, any
+  canonical-pair descriptor, or any type whose only non-proof data is an index
+  and whose target instance is recovered by an external function.
+
+  The exported unique-call and score/threshold fields must also quantify over
+  this positive call-record type.  Their statements must contain the subterms
+  \[
+    c\in\operatorname{MinIPConcreteAllCalls}(V),\qquad
+    \operatorname{callInst}(c),\qquad
+    \operatorname{BMinIPScore}(\operatorname{callInst}(c),o)
+  \]
+  before any row-origin or score transport is applied.  A theorem that ranges
+  over a suffix index $i$, constructs the suffix call for
+  $\min(p,q)$, or proves uniqueness of the canonical lower-index call is not
+  the required `unique\_cross\_call'.  The canonical transport lemma
+  \ref{lem:minip-canonical-cross-score-transport} may only be used as a proof
+  tool after a prior field has identified the relevant concrete call as
+  $\operatorname{nodeCall}(\operatorname{splitNode}(p,q))$; it may not define
+  the call set, recursive score set, recursive threshold predicate, optimum
+  identity, or unique-call predicate.
+
+  The score, optimum and threshold objects must quantify over
+  $\operatorname{MinIPConcreteAllCalls}(V)$ only through this membership
+  theorem.  They are rejected if their definitions enumerate original pairs
+  $o=(i,j)$, construct the lower-index suffix call associated to
+  $\min(i,j)$, and then use the canonical right-suffix index of $\max(i,j)$.
+  That canonical suffix construction is exactly the auxiliary transport of
+  Lemma~\ref{lem:minip-canonical-cross-score-transport}; it may appear inside a
+  proof after showing the same pair occurs in the unique recursive call
+  $\operatorname{nodeCall}(\operatorname{splitNode}(i,j))$, but it may not be
+  the definition of `MinIPConcreteAllCalls',
+  `RecursiveCrossScoreSet', `RecursiveCrossThresholdYes', `unique_cross_call',
+  `scoreSetIdentity', `optimumIdentity', or `thresholdIdentity'.  The exported
+  uniqueness theorem must range over concrete call records
+  $c\in\operatorname{MinIPConcreteAllCalls}(V)$ and prove
+  \[
+    \operatorname{CrossPairInCall}(c,p,q)
+    \Longleftrightarrow
+    c=\operatorname{nodeCall}(\operatorname{splitNode}(p,q)),
+  \]
+  with the left-hand side unfolding through `callInst(c)' and local left/right
+  indices.  A proof that every pair has exactly one lower-index suffix call, or
+  a proof that a canonical suffix-call score equals
+  $\operatorname{MinIPPairScore}(V,o)$, does not establish pair coverage for the
+  recursive split tree and fails this node.
+
+  Cross-pair membership is a relation between an original pair and a concrete
+  oracle call.  If the implementation uses the name `MinIPCrossPair' or
+  `CrossPairInCall', its unfolded definition must have the form
+  \[
+  \begin{array}{l}
+    \operatorname{CrossPairInCall}(c,p,q)
+    \Longleftrightarrow
+    \exists i:\operatorname{Fin}(\operatorname{callLeftSize}(c)),\
+    \exists j:\operatorname{Fin}(\operatorname{callRightSize}(c)),\\
+    \qquad
+    \bigl(\operatorname{callLeftOrig}(c,i)=p\wedge
+          \operatorname{callRightOrig}(c,j)=q\bigr)
+    \vee
+    \bigl(\operatorname{callLeftOrig}(c,i)=q\wedge
+          \operatorname{callRightOrig}(c,j)=p\bigr).
+  \end{array}
+  \]
+  Here `callLeftOrig' and `callRightOrig' are the row-origin maps attached to
+  $\operatorname{callInst}(c)$, so the predicate mentions the concrete call
+  instance, its local left and right indices, and the transport of those local
+  indices back to original row indices.  It must not unfold to
+  $c=\operatorname{nodeCall}(\operatorname{splitNode}(p,q))$,
+  $U=\operatorname{splitNode}(p,q)$, a predicate over the canonical original
+  pair alone, or an equality to `canonicalCall'.  The uniqueness field is
+  therefore
+  \[
+  \begin{array}{l}
+    \operatorname{uniqueCrossCall\_iff}(p,q,h_{pq}):\\
+    \qquad
+    \forall c\in\operatorname{MinIPAllCalls}(V),\
+      \operatorname{CrossPairInCall}(c,p,q)
+      \Longleftrightarrow
+      c=\operatorname{nodeCall}(\operatorname{splitNode}(p,q)).
+  \end{array}
+  \]
+  This theorem is rejected if the left-hand side is already the equality on the
+  right, if its proof is only uniqueness of equality to a chosen
+  `lowestSplitCall', or if it never mentions the local indices of
+  $\operatorname{callInst}(c)$.
+
+  The recursive score and threshold objects are likewise required to range over
+  the concrete call set and concrete target outputs.  The package must expose
+  the two definitional membership theorems
+  \[
+  \begin{array}{l}
+    s\in\operatorname{RecursiveCrossScoreSet}(V)
+    \Longleftrightarrow
+    \exists c\in\operatorname{MinIPAllCalls}(V),\
+    \exists o:\operatorname{BMinIPOut}(\operatorname{callInst}(c)),\
+      s=\operatorname{BMinIPScore}(\operatorname{callInst}(c),o),\\[1mm]
+    \operatorname{RecursiveCrossThresholdYes}(V,t)
+    \Longleftrightarrow
+    \exists c\in\operatorname{MinIPAllCalls}(V),\
+    \exists o:\operatorname{BMinIPOut}(\operatorname{callInst}(c)),\
+      \operatorname{BMinIPScore}(\operatorname{callInst}(c),o)\le t .
+  \end{array}
+  \]
+  The right-hand sides of these theorem fields must contain the quantified call
+  $c$, the hypothesis $c\in\operatorname{MinIPAllCalls}(V)$, the target output
+  $o$ for $\operatorname{callInst}(c)$, and the score
+  $\operatorname{BMinIPScore}(\operatorname{callInst}(c),o)$.  They are rejected
+  if they contain $\operatorname{OrigPair}(V)$,
+  $\operatorname{canonicalCall}(o)$,
+  $\operatorname{canonicalRightIndex}(o)$, or
+  $\operatorname{MinIPPairScore}(V,o)$ in place of the quantified concrete
+  call and its target output.  Canonical-call transport may appear only in the
+  proof of the forward direction of `scoreSetIdentity', where an original pair
+  is first sent to the unique concrete call supplied by
+  `uniqueCrossCall_iff'.  It may not appear in the definitions of
+  $\operatorname{RecursiveCrossScoreSet}$ or
+  $\operatorname{RecursiveCrossThresholdYes}$.
+
+  Finally, the derived fields must make the direction of reasoning explicit:
+  `scoreSetIdentity_forward' maps a root pair
+  $(p,q)\in\operatorname{OrigPair}(V)$ to the call
+  $\operatorname{nodeCall}(\operatorname{splitNode}(p,q))$, proves this call is
+  in $\operatorname{MinIPAllCalls}(V)$, constructs the corresponding local
+  bichromatic output $o$, and rewrites its
+  $\operatorname{BMinIPScore}$ to $\operatorname{origScore}_V(p,q)$ by row-origin
+  transport.  `scoreSetIdentity_reverse' starts from a quantified
+  $c\in\operatorname{MinIPAllCalls}(V)$ and
+  $o:\operatorname{BMinIPOut}(\operatorname{callInst}(c))$, uses the membership
+  theorem to recover the reachable internal node and child-sized
+  $\operatorname{crossInst}(U)$, then uses `crossPair_to_origPair' to produce
+  the original distinct pair and score equality.  The threshold and optimum
+  identities must be derived from these two directions.  A proof by reflexivity
+  after defining both sides from canonical original pairs, or any definition in
+  which the recursive side is already a copy of the root original-pair
+  enumeration, is not this node.
+
+  Trial-8 rejection-specific refinement: the audited Lean declaration must rule
+  out the suffix-index facade identified by the statement audit. The names
+  `MinIPTreeInternalNodes', `MinIPTreeAllCalls',
+  `MinIPTreeRecursiveScoreSet', `unique_cross_call',
+  `scoreSetIdentity_forward', `scoreSetIdentity_reverse',
+  `optimumIdentity', and `thresholdIdentity', if present, have the fixed
+  meanings below. They are rejected if they are implemented only for a type of
+  suffix indices, lower indices, or nodes of the form
+  \[
+    \{\,i:\operatorname{Fin}(n)\ //\ i.\operatorname{val}+1<n\,\},
+  \]
+  with
+  \[
+    \operatorname{MinIPTreeInternalNodes}(V)=\operatorname{Finset.univ}
+  \]
+  or with `allCalls' equal to the image of this universe. Such a type records
+  possible suffix comparisons, not the reachable nodes of the recursively
+  halved call tree. It is not enough for a suffix-index node to carry a proof
+  that the corresponding suffix call is well formed; every internal node must
+  instead carry a root-to-node path built from the root, left-child and
+  right-child constructors of $\operatorname{ReachableNode}_V$.
+
+  A compliant package therefore contains a positive path-carrying internal-node
+  type, or an isomorphic transparent Sigma type,
+  \[
+    \operatorname{ReachableInternalNode}(V)
+      :=
+      \{U:\operatorname{Node}(V) //
+        \operatorname{ReachableNode}_V(U)\wedge |U|\ge2\},
+  \]
+  and the field
+  \[
+    \operatorname{MinIPTreeInternalNodes}(V):
+      \operatorname{Finset}(\operatorname{ReachableInternalNode}(V)).
+  \]
+  Its membership theorem must recover the path proof:
+  \[
+    U\in\operatorname{MinIPTreeInternalNodes}(V)
+    \Longleftrightarrow
+    \operatorname{ReachableNode}_V(U.\operatorname{node})\wedge
+    |U.\operatorname{node}|\ge2.
+  \]
+  The right-hand side may not be merely
+  $U.\operatorname{index}+1<n$, $|U|\ge2$, `True', or membership in
+  `Finset.univ'. The same package must project `reachableRoot',
+  `reachableLeft', `reachableRight' and the non-vacuous
+  `reachableInduction' eliminator displayed earlier in this node. If
+  `ReachableNode' is absent, if it unfolds to suffix-index well-formedness, or
+  if its eliminator assumes $\forall U,Q(U)$ instead of using the root and two
+  child steps, then the package does not satisfy this lemma.
+
+  The call set must be a finite set of child-sized oracle-call records obtained
+  from these reachable internal nodes:
+  \[
+  \begin{array}{l}
+    c\in\operatorname{MinIPTreeAllCalls}(V)
+    \Longleftrightarrow
+    \exists U\in\operatorname{MinIPTreeInternalNodes}(V),\\
+    \qquad
+      c=\operatorname{nodeCall}(U)\ \wedge\
+      \operatorname{callNode}(c)=U\ \wedge\
+      \operatorname{callLeftSize}(c)=|U_L|\ \wedge\
+      \operatorname{callRightSize}(c)=|U_R|\ \wedge\
+      \operatorname{callDim}(c)=\ell\ \wedge\
+      \operatorname{callInst}(c)=\operatorname{crossInst}(U)\ \wedge\
+      \operatorname{crossInst}(U)=(U_L,U_R).
+  \end{array}
+  \]
+  This is the required normalized type of `MinIPTreeAllCalls_mem_iff' or
+  `allCalls_mem_iff'. A theorem whose right-hand side is
+  $c\in\operatorname{Finset.univ}$, $c\in\operatorname{MinIPTreeAllCalls}(V)$,
+  $c=\operatorname{nodeCall}(i)$ for a suffix index $i$, or
+  $\exists i,\ c=\operatorname{suffixCall}(i)$ is rejected. The element $c$
+  itself must expose `callInst(c)' as data with type
+  $\operatorname{BMinIPInst}(\operatorname{callLeftSize}(c),
+  \operatorname{callRightSize}(c),\operatorname{callDim}(c))$; a call record
+  whose payload is only a suffix index or node index is not a target oracle
+  call.
+
+  The uniqueness field is also about these concrete calls. The field named
+  `unique_cross_call' must have, after unfolding aliases, the form
+  \[
+  \begin{array}{l}
+    \operatorname{unique\_cross\_call}(p,q,h_{pq}):\\
+    \qquad
+    \exists! c,\ 
+      c\in\operatorname{MinIPTreeAllCalls}(V)\ \wedge\
+      \operatorname{CrossPairInCall}(c,p,q),
+  \end{array}
+  \]
+  together with the theorem
+  \[
+    \forall c\in\operatorname{MinIPTreeAllCalls}(V),\
+      \operatorname{CrossPairInCall}(c,p,q)
+      \Longleftrightarrow
+      c=\operatorname{nodeCall}(\operatorname{splitNode}(p,q)).
+  \]
+  Here `CrossPairInCall(c,p,q)' must mention `callInst(c)', local left and
+  right output indices for that instance, and the origin maps carrying those
+  local indices back to the original endpoints $p$ and $q$. A uniqueness theorem
+  over internal-node indices,
+  \[
+    \exists! U,\ U=\operatorname{splitNode}(p,q),
+  \]
+  or over suffix indices, or a theorem whose cross-pair predicate is already
+  the equality $c=\operatorname{nodeCall}(\operatorname{splitNode}(p,q))$, is
+  tautological and is not this field.
+
+  The recursive score set must be the scores of all concrete target outputs of
+  the concrete call set:
+  \[
+    s\in\operatorname{MinIPTreeRecursiveScoreSet}(V)
+    \Longleftrightarrow
+    \exists c\in\operatorname{MinIPTreeAllCalls}(V),\
+    \exists o:\operatorname{BMinIPOut}(\operatorname{callInst}(c)),\
+      s=\operatorname{BMinIPScore}(\operatorname{callInst}(c),o).
+  \]
+  This definition may not be replaced by the set of original pair scores, by a
+  set of canonical suffix-call scores, or by a set whose membership theorem
+  proves only that every original pair score is a member. The package must
+  expose both directions as theorem fields:
+  \[
+  \begin{array}{ll}
+    \operatorname{scoreSetIdentity\_forward}:&
+      s\in\operatorname{RootScoreSet}(V)\to
+      s\in\operatorname{MinIPTreeRecursiveScoreSet}(V),\\
+    \operatorname{scoreSetIdentity\_reverse}:&
+      s\in\operatorname{MinIPTreeRecursiveScoreSet}(V)\to
+      s\in\operatorname{RootScoreSet}(V),\\
+    \operatorname{scoreSetIdentity}:&
+      \operatorname{RootScoreSet}(V)=
+      \operatorname{MinIPTreeRecursiveScoreSet}(V).
+  \end{array}
+  \]
+  The reverse field is mandatory: it must start from a concrete call
+  $c\in\operatorname{MinIPTreeAllCalls}(V)$ and a concrete target output
+  $o:\operatorname{BMinIPOut}(\operatorname{callInst}(c))$, recover the
+  reachable internal node through `allCalls_mem_iff', use
+  `crossPair_to_origPair' to produce an original distinct pair, and transport
+  the score back to $\operatorname{RootScoreSet}(V)$. A package proving only
+  the forward membership of original pair scores in a recursive score set, or
+  whose `scoreSetIdentity' is not exported as equality of the two sets above,
+  formalizes a weaker invariant and is rejected.
+
+  The optimum and threshold consequences are not optional corollaries outside
+  the audited declaration. The same package must project
+  \[
+  \begin{array}{ll}
+    \operatorname{optimumIdentity}:&
+      \operatorname{RootMinIPOpt}(V)=
+      \min\{\,m_{\mathrm{cross}}(c):
+        c\in\operatorname{MinIPTreeAllCalls}(V)\,\},\\
+    \operatorname{thresholdIdentity}:&
+      \operatorname{RootThresholdYes}(V,t)
+      \Longleftrightarrow
+      \exists c\in\operatorname{MinIPTreeAllCalls}(V),\
+      \exists o:\operatorname{BMinIPOut}(\operatorname{callInst}(c)),\
+        \operatorname{BMinIPScore}(\operatorname{callInst}(c),o)\le t.
+  \end{array}
+  \]
+  The left-hand objects must unfold to the original Min-IP optimum and original
+  threshold existential over distinct root pairs from Definition~\ref{def:minip};
+  the right-hand objects must unfold to minima and existential quantification
+  over the concrete recursive call set above. These fields are rejected if
+  their types normalize to membership implications only, to `True', to
+  $\operatorname{RootMinIPOpt}(V)=\operatorname{RootMinIPOpt}(V)$, to
+  $\operatorname{RootThresholdYes}(V,t)\Longleftrightarrow
+  \operatorname{RootThresholdYes}(V,t)$, or to statements over suffix indices
+  that never mention `callInst(c)'.
+\end{lemma}
+\begin{proof}
+  \uses{def:minip, def:bichromatic-minip}
+  For two distinct leaves of the recursion tree containing original indices
+  $p$ and $q$, follow their root-to-leaf paths. Since the root contains both
+  indices and singleton leaves separate them, there is a unique first node at
+  which the two paths go to different children. That node is internal and its
+  cross bichromatic call contains exactly this pair. Uniqueness follows because
+  below this node the two indices lie in different subtrees and are never again
+  in the same recursive subproblem, while above it they lie in the same child
+  of every split.
+
+  The converse is immediate: every cross pair of a split node consists of two
+  original rows from disjoint children of one node, so the two original indices
+  are distinct. Thus original distinct pairs are in bijection with the disjoint
+  union of cross pairs over all internal nodes. Taking inner-product scores
+  across this bijection gives the score-set identity; taking minima gives the
+  global-optimum equation, and existentially testing whether some score is at
+  most $t$ gives the threshold equivalence.
+\end{proof}
+
 \begin{lemma}[Bichromatic Min-IP reduction, Lemma A.8]
   \label{lem:minip-bichromatic-reduction}
-  \uses{def:minip, def:gamma-minip, def:minip-dec, def:bichromatic-minip, def:tsq-alg-exists}
+  \uses{def:minip, def:gamma-minip, def:minip-dec, def:bichromatic-minip, def:tsq-alg-exists, lem:minip-split-tree-pair-coverage}
   If $\TSQAlg{\text{bichromatic }\MinIP_{n,\ell}}$ exists with polynomial factors
   in $\ell$, then $\TSQAlg{\MinIP_{n,\ell}}$ exists with polynomial factors in
   $\ell$ (possibly with a different positive exponent). The same implication
@@ -3261,9 +5885,606 @@
   `GammaMinIPValidOut X -> GammaMinIPValidOut X', or
   `MinIPDecYes p X ↔ MinIPDecYes p X' fails this node, even if other abstract
   transfer fields are present.
+
+  Trial-9 alignment requirement: the names used by the generated Lean attempt
+  are reserved with the following concrete types. If the witness contains fields
+  named `exactSearchCorrectness', `gammaApproxCorrectness', or
+  `thresholdDecisionCorrectness', those fields must be theorem fields with the
+  meanings below; they may not be alternative weaker summaries.
+
+  First, the recursion may not assign the numeric value $0$ to leaves merely to
+  make minima easy. A leaf $U$ with $|U|<2$ has no distinct-pair output, no
+  exact candidate, and no finite optimum used in the reconstructed candidate
+  set. Formally the witness must expose one of the following equivalent
+  encodings:
+  \[
+    \operatorname{leafCandidate}(U)=\operatorname{none}
+    \quad\text{for } |U|<2,
+  \]
+  or an extended-real neutral value
+  $m_U=+\infty$ for leaves with no distinct pair. It must also contain
+  \[
+    \operatorname{leafNoCandidate}(U):
+      |U|<2\Rightarrow
+      \neg\exists o,\ \operatorname{MinIPOut}(U,o).
+  \]
+  The declaration is rejected if it defines a projection such as
+  `MinIPNodeLeafValue := 0' and then uses that value as $m_L(U)$ or $m_R(U)$
+  in an internal-node minimum. For an internal node, the left and right values
+  are the true recursive optima of the concrete subinstances $U_L$ and $U_R$
+  when those subinstances contain a distinct pair, and are the explicit
+  no-candidate neutral values otherwise.
+
+  The field `exactSearchCorrectness' has the dependent type
+  \[
+  \begin{array}{l}
+    \operatorname{exactSearchCorrectness}(V,\operatorname{answers}):\\
+    \qquad
+    \left(\forall U\in
+      \operatorname{internalNodes}(\operatorname{callTree}(V)),\
+      \operatorname{BMinIPValidOut}
+        (\operatorname{crossInst}(U),
+         o_{\mathrm{cross}}(U))\right)
+    \to\\
+    \qquad
+    \operatorname{MinIPValidOut}
+      (V,\operatorname{reconstructExact}(V,\operatorname{answers}))
+    \ \wedge\
+    s_V(\operatorname{reconstructExact}(V,\operatorname{answers}))=m_V .
+  \end{array}
+  \]
+  Its proof must proceed through the internal-node theorem
+  \[
+    m_U=\min(m_{\mathrm{cross}}(U),\min(m_L(U),m_R(U)))
+  \]
+  with $m_{\mathrm{cross}}(U)$, $m_L(U)$ and $m_R(U)$ defined by the projection
+  equations `crossOpt_eq', `leftOpt_eq' and `rightOpt_eq' above. The selected
+  candidate is
+  \[
+    \operatorname{reconstructExact}(U,\operatorname{answers})
+    \in
+    \arg\min\{s_U(o_{\mathrm{cross}}(U)),
+              s_U(o_L(U)),
+              s_U(o_R(U))\},
+  \]
+  after omitting child candidates that are absent at leaves. A field proving
+  only
+  \[
+    \operatorname{MinIPNodeReconstructedValue}(U)
+      =
+      \min(m_{\mathrm{cross}}(U),
+           \min(\operatorname{MinIPNodeLeafValue},
+                \operatorname{MinIPNodeLeafValue}))
+  \]
+  is explicitly rejected, even if the field is named
+  `exactSearchCorrectness'. That statement contains neither the true global
+  minimum over pairs in $U$ nor a proof that the reconstructed root output is a
+  valid $\MinIP$ output.
+
+  The field `gammaApproxCorrectness' has the dependent type
+  \[
+  \begin{array}{l}
+    \operatorname{gammaApproxCorrectness}
+      (U,\operatorname{answers}):\\
+    \qquad
+    \left(\forall W\text{ below }U,\
+      \operatorname{cross/recursive candidates at }W
+      \text{ satisfy their concrete }
+      \gamma\text{-approximate validity relations}\right)
+    \to\\
+    \qquad
+    m_U\le
+      s_U(\operatorname{reconstructGamma}(U,\operatorname{answers}))
+    \ \wedge\
+    s_U(\operatorname{reconstructGamma}(U,\operatorname{answers}))
+      \le \gamma m_U .
+  \end{array}
+  \]
+  The conclusion must mention the reconstructed candidate and the true optimum
+  $m_U$ of the concrete node $U$. Its proof must use the three inequalities for
+  the cross candidate, the left recursive candidate and the right recursive
+  candidate, together with the equality
+  $m_U=\min(m_{\mathrm{cross}}(U),\min(m_L(U),m_R(U)))$. It is rejected if its
+  normalized type is an identity implication
+  \[
+    \operatorname{GammaMinIPValidOut}(\cdots)
+      \to \operatorname{GammaMinIPValidOut}(\cdots),
+  \]
+  or any implication whose conclusion is exactly one of its assumptions.
+
+  The field `thresholdDecisionCorrectness' has the dependent type
+  \[
+  \begin{array}{l}
+    \operatorname{thresholdDecisionCorrectness}(U,t):\\
+    \qquad
+    \bigl(\exists p,q\in U,\ p\ne q\ \wedge\ \inner{p}{q}\le t\bigr)
+    \Longleftrightarrow\\
+    \qquad
+    \operatorname{CrossYes}_t(U)\vee
+    \operatorname{LeftYes}_t(U)\vee
+    \operatorname{RightYes}_t(U).
+  \end{array}
+  \]
+  The left-hand side is the concrete yes predicate of
+  $\MinIP_{|U|,\ell,t}$ on the node $U$; it is not a newly defined predicate
+  whose body is the right-hand disjunction. The proof must split an arbitrary
+  distinct pair in $U$ into the three cases ``one endpoint in $U_L$ and one in
+  $U_R$'', ``both endpoints in $U_L$'', and ``both endpoints in $U_R$'', and
+  conversely inject any witness from a right-hand disjunct into $U$. A field
+  proving only
+  \[
+    (\operatorname{CrossYes}_t(U)\vee
+     \operatorname{LeftYes}_t(U)\vee
+     \operatorname{RightYes}_t(U))
+    \Longleftrightarrow
+    (\operatorname{CrossYes}_t(U)\vee
+     \operatorname{LeftYes}_t(U)\vee
+     \operatorname{RightYes}_t(U))
+  \]
+  is explicitly rejected, even if it is named
+  `thresholdDecisionCorrectness'.
+
+  Trial-10 failure-specific refinement: the audited declaration must not use a
+  recursively defined helper predicate or helper value as a substitute for the
+  original Min-IP semantics. The witness therefore exposes the original
+  node-level objects as separate projections:
+  \[
+  \begin{array}{ll}
+    \operatorname{OrigPair}(U) &:=
+      \{(p,q):p,q\in U,\ p\ne q\},\\
+    \operatorname{origScore}_U(p,q) &:=
+      \inner{p}{q},\\
+    \operatorname{origOpt}(U) &:=
+      \min_{(p,q)\in\operatorname{OrigPair}(U)}
+        \operatorname{origScore}_U(p,q),\\
+    \operatorname{origThresholdYes}(U,t) &:=
+      \exists (p,q)\in\operatorname{OrigPair}(U),\
+        \operatorname{origScore}_U(p,q)\le t .
+  \end{array}
+  \]
+  For $|U|<2$, $\operatorname{OrigPair}(U)$ is empty and the exact/gamma
+  reconstruction returns no candidate from $U$; the witness must not assign a
+  real optimum $0$ to this empty search space. For $|U|\ge2$, the projection
+  \[
+    \operatorname{origOpt\_eq\_MinIPOpt}(U):
+      \operatorname{origOpt}(U)=\operatorname{MinIPOpt}(U)
+  \]
+  ties the node optimum to the concrete family from Definition~\ref{def:minip}.
+  The accepted exact correctness theorem is rooted at the original root
+  instance:
+  \[
+  \begin{array}{l}
+    \operatorname{exactSearchCorrectness}(V,\operatorname{answers}):\\
+    \qquad
+    \left(\forall U\in
+      \operatorname{internalNodes}(\operatorname{callTree}(V)),\
+      \operatorname{BMinIPValidOut}
+        (\operatorname{crossInst}(U),o_{\mathrm{cross}}(U))\right)
+    \to\\
+    \qquad
+    \exists i,j,\ i\ne j\ \wedge\
+      \operatorname{reconstructExact}(V,\operatorname{answers})=(i,j)
+      \ \wedge\
+      \inner{v_i}{v_j}
+        = \min_{p\ne q}\inner{v_p}{v_q}.
+  \end{array}
+  \]
+  Equivalently it may conclude
+  $\operatorname{MinIPValidOut}
+  (V,\operatorname{reconstructExact}(V,\operatorname{answers}))$, but only
+  together with the score equality above or the projection
+  $\operatorname{origOpt\_eq\_MinIPOpt}(V)$ used in the proof. A theorem about
+  `MinIPNodeReconstructedValue', `MinIPNodeLeafValue', or any recursively
+  defined value is not accepted unless it also has this root-level existential
+  pair conclusion.
+
+  The witness must also expose the trichotomy that makes the split recurrence
+  non-tautological:
+  \[
+    \operatorname{pairSplitTrichotomy}(U,p,q):
+    (p,q)\in\operatorname{OrigPair}(U)
+    \Longleftrightarrow
+    \operatorname{CrossPair}_U(p,q)\vee
+    \operatorname{LeftPair}_U(p,q)\vee
+    \operatorname{RightPair}_U(p,q).
+  \]
+  Here `CrossPair', `LeftPair' and `RightPair' are defined by membership of the
+  two endpoints in $U_L\times U_R$, $U_L\times U_L$, and
+  $U_R\times U_R$, respectively, with distinctness retained in the same-side
+  cases. The proof of `exactNodeCorrectness',
+  `gammaApproxCorrectness' and `thresholdDecisionCorrectness' must use this
+  trichotomy. A recurrence obtained by defining the left-hand predicate or value
+  to be the right-hand disjunction/minimum is rejected.
+
+  The exact decomposition theorem must be a theorem about the original optimum,
+  not the definition of a helper value. If the generated Lean introduces names
+  such as `MinIPNodeGlobalValue', `MinIPNodeExactDecomposition',
+  `MinIPNodeExactDecomposition_correct', or
+  `reconstructedPairRealizesGlobalMinimum', those names have the reserved
+  meanings below. The helper `MinIPNodeGlobalValue U', if present, must unfold
+  to the original finite minimum over $\operatorname{OrigPair}(U)$:
+  \[
+    \operatorname{MinIPNodeGlobalValue}(U)
+    =
+    \min_{(p,q)\in\operatorname{OrigPair}(U)}
+      \operatorname{origScore}_U(p,q).
+  \]
+  It is explicitly not allowed to define
+  \[
+    \operatorname{MinIPNodeGlobalValue}(U)
+      :=
+      \min(m_{\mathrm{cross}}(U),\min(m_L(U),m_R(U))).
+  \]
+  The witness must expose this by a projection
+  \[
+    \operatorname{MinIPNodeGlobalValue\_eq\_origOpt}(U):
+    \operatorname{MinIPNodeGlobalValue}(U)=\operatorname{origOpt}(U),
+  \]
+  or by making `MinIPNodeGlobalValue' definitionally equal to
+  $\operatorname{origOpt}(U)$.
+
+  Consequently the decomposition field has the non-definitional type
+  \[
+  \begin{array}{l}
+    \operatorname{MinIPNodeExactDecomposition\_correct}(U):\\
+    \qquad
+    \operatorname{origOpt}(U)
+    =
+    \min(m_{\mathrm{cross}}(U),\min(m_L(U),m_R(U))),
+  \end{array}
+  \]
+  for internal nodes $U$ with the no-candidate leaf convention applied to
+  absent children. The proof of this field must use
+  $\operatorname{pairSplitTrichotomy}$ to show both inequalities between the
+  original minimum over $\operatorname{OrigPair}(U)$ and the three branch
+  optima. A proof by `rfl' is accepted only if the left-hand side still unfolds
+  to the original finite minimum over $\operatorname{OrigPair}(U)$ and the
+  right-hand side is definitionally that same finite minimum for reasons
+  independent of the branch definitions. In particular, the trial failure shape
+  \[
+    \operatorname{MinIPNodeExactDecomposition\_correct}(U) := rfl
+  \]
+  after defining `MinIPNodeGlobalValue' to be
+  $\min(m_{\mathrm{cross}}(U),\min(m_L(U),m_R(U)))$ is rejected. Such a theorem
+  proves only consistency of a renamed split value and never proves the paper's
+  recurrence for the concrete Min-IP optimum.
+
+  The field `reconstructedPairRealizesGlobalMinimum' must then target the
+  original optimum:
+  \[
+  \begin{array}{l}
+    \operatorname{reconstructedPairRealizesGlobalMinimum}
+      (V,\operatorname{answers}):\\
+    \qquad
+    \operatorname{origScore}_V
+      (\operatorname{reconstructExact}(V,\operatorname{answers}))
+    =
+    \operatorname{origOpt}(V),
+  \end{array}
+  \]
+  together with the proof that
+  $\operatorname{reconstructExact}(V,\operatorname{answers})
+  \in\operatorname{OrigPair}(V)$. It is not enough to prove equality to
+  `MinIPNodeGlobalValue V' unless the same witness also exposes
+  `MinIPNodeGlobalValue_eq_origOpt V'. The gamma approximation theorem is
+  subject to the same restriction: its lower and upper bounds are with respect
+  to $\operatorname{origOpt}(U)$, not with respect to a recursively defined
+  `MinIPNodeGlobalValue' unless that value is proved equal to
+  $\operatorname{origOpt}(U)$ as above.
+
+  The approximate theorem has the same original-semantics requirement. It must
+  define
+  \[
+    s^*_U =
+      \operatorname{origScore}_U
+        (\operatorname{reconstructGamma}(U,\operatorname{answers}))
+  \]
+  for the actual returned pair, and its conclusion is exactly
+  \[
+    \operatorname{origOpt}(U)\le s^*_U
+    \ \wedge\ 
+    s^*_U\le \gamma\,\operatorname{origOpt}(U).
+  \]
+  The assumptions are validity proofs for the concrete cross oracle answers and
+  the recursively reconstructed child candidates; the conclusion may not be one
+  of those assumptions repeated verbatim. If the generated field named
+  `gammaApproxCorrectness' has type
+  $\operatorname{CandidateValid}(U,o)\to
+  \operatorname{CandidateValid}(U,o)$, or any normalized form in which the
+  consequent is syntactically one premise, it fails this node even if helper
+  definitions named `origOpt' exist elsewhere.
+
+  The threshold theorem also must use the original threshold predicate:
+  \[
+  \begin{array}{l}
+    \operatorname{thresholdDecisionCorrectness}(U,t):\\
+    \qquad
+    \operatorname{origThresholdYes}(U,t)
+    \Longleftrightarrow
+    \operatorname{CrossYes}_t(U)\vee
+    \operatorname{LeftYes}_t(U)\vee
+    \operatorname{RightYes}_t(U),
+  \end{array}
+  \]
+  together with projection equations
+  \[
+  \begin{array}{ll}
+    \operatorname{origThresholdYes\_eq}(U,t):&
+      \operatorname{origThresholdYes}(U,t)
+      \Longleftrightarrow
+      \exists p,q\in U,\ p\ne q\ \wedge\ \inner{p}{q}\le t,\\
+    \operatorname{crossThresholdYes\_eq}(U,t):&
+      \operatorname{CrossYes}_t(U)
+      \Longleftrightarrow
+      \exists p\in U_L,\exists q\in U_R,\ \inner{p}{q}\le t,\\
+    \operatorname{leftThresholdYes\_eq}(U,t):&
+      \operatorname{LeftYes}_t(U)
+      \Longleftrightarrow
+      \exists p,q\in U_L,\ p\ne q\ \wedge\ \inner{p}{q}\le t,\\
+    \operatorname{rightThresholdYes\_eq}(U,t):&
+      \operatorname{RightYes}_t(U)
+      \Longleftrightarrow
+      \exists p,q\in U_R,\ p\ne q\ \wedge\ \inner{p}{q}\le t.
+  \end{array}
+  \]
+  Thus a field whose left-hand side is itself defined to be
+  `CrossYes_t U or LeftYes_t U or RightYes_t U' is explicitly not the threshold
+  correctness theorem. The left-hand side must unfold to the original
+  existential over distinct pairs in $U$, and the proof must map witnesses
+  through `pairSplitTrichotomy' in both directions.
+
+  Trial-11 failure-specific refinement: the audited declaration must expose the
+  recursive algorithm transfer itself, not only local decomposition lemmas. The
+  witness therefore has three algorithm-construction projections
+  \[
+  \begin{array}{ll}
+    \operatorname{mkExactMinIPFromBichromatic}:&
+      \operatorname{def\_tsq\_alg\_exists}
+        (\operatorname{BMinIPExact})
+      \to
+      \operatorname{def\_tsq\_alg\_exists}(\MinIP),\\
+    \operatorname{mkGammaMinIPFromBichromatic}:&
+      \operatorname{def\_tsq\_alg\_exists}
+        (\operatorname{BMinIPApprox})
+      \to
+      \operatorname{def\_tsq\_alg\_exists}(\gamma\text{-}\MinIP),\\
+    \operatorname{mkThresholdMinIPFromBichromatic}:&
+      \operatorname{def\_tsq\_alg\_exists}
+        (\operatorname{BMinIPThreshold})
+      \to
+      \operatorname{def\_tsq\_alg\_exists}(\MinIP_t).
+  \end{array}
+  \]
+  These are transparent constructors whose `run', `correct', `T' and
+  truly-subquadratic proof projections reduce to the split-tree reconstruction
+  and runtime objects specified in this node. In particular, for each target
+  runtime $T_{\mathrm{bi}}$ the source runtime projection is exactly the named
+  value
+  \[
+    \operatorname{splitTreeRuntime}(T_{\mathrm{bi}},V),
+  \]
+  with defining equation
+  \[
+    \operatorname{splitTreeRuntimeDef}:
+    \operatorname{splitTreeRuntime}(T_{\mathrm{bi}},V)
+    =
+    c_{\mathrm{split}}n\ell+
+    c_{\mathrm{calls}}
+    \sum_{U\in\operatorname{internalNodes}(\operatorname{callTree}(V))}
+      T_{\mathrm{bi}}(|U_L|,|U_R|,\ell)
+    +c_{\mathrm{recon}}|\operatorname{callTree}(V)|\ell,
+  \]
+  and the projection
+  \[
+    \operatorname{runtimeRecurrence}
+  \]
+  is a theorem whose left-hand side is this same
+  $\operatorname{splitTreeRuntime}(T_{\mathrm{bi}},V)$ and whose right-hand side
+  is the level-by-level recursive runtime sum over the child-sized
+  bichromatic calls. The witness also contains an exponent-transfer projection
+  \[
+    \operatorname{splitTreeRuntimeTSQ}:
+    \forall \eps>0,\ \exists \eps'>0,\quad
+    T_{\mathrm{bi}}(a,b,\ell)=
+      O((a+b)^{2-\eps}\operatorname{poly}(\ell))
+    \Rightarrow
+    \operatorname{splitTreeRuntime}(T_{\mathrm{bi}},V)
+      =O(n^{2-\eps'}\operatorname{poly}(\ell)).
+  \]
+  A generated `MinIPBichromaticRecursiveWitness' with no projections literally
+  named, or transparently equivalent to, `splitTreeRuntime',
+  `splitTreeRuntimeDef', `runtimeRecurrence', and
+  `splitTreeRuntimeTSQ' fails this lemma, even if it proves some local
+  correctness statement. Likewise, proving only
+  $\TSQAlg{\mathrm{BMinIP}}\to\TSQAlg{\MinIP}$ as an opaque implication is
+  insufficient; the constructed algorithm's run, correctness and runtime must
+  be obtained from these projections.
+
+  The exact correctness package must derive an optimum equation, not only a
+  score-set identity. If a helper theorem named
+  `MinIPNodeScoreSetDecomposition' is present, it is allowed only as an
+  intermediate lemma with the explicit derived projection
+  \[
+  \begin{array}{l}
+    \operatorname{scoreSetDecomposition\_to\_exactNodeCorrectness}(U):\\
+    \qquad
+    \operatorname{MinIPNodeScoreSetDecomposition}(U)
+    \to
+    m_U=\min(m_{\mathrm{cross}}(U),\min(m_L(U),m_R(U))).
+  \end{array}
+  \]
+  The audited field `exactNodeCorrectness' itself must have the displayed
+  minimum equation as its type and must mention the separately projected optima
+  $m_{\mathrm{cross}}(U)$, $m_L(U)$ and $m_R(U)$. A field whose only exact-search
+  theorem is `MinIPNodeScoreSetDecomposition U hU' is rejected because a union
+  equality of score sets does not by itself construct the recursive output,
+  prove it is valid, or provide the optimum equation required by the reduction.
+
+  The reconstruction functions are constrained by the oracle answers. The exact
+  run at a node has projections
+  \[
+  \begin{array}{ll}
+    \operatorname{crossExactAnswer}(U,\operatorname{answers}) &:=
+      \operatorname{answers}(\operatorname{crossInst}(U)),\\
+    \operatorname{leftExactAnswer}(U,\operatorname{answers}) &:=
+      \operatorname{reconstructExact}(U_L,\operatorname{answers}),\\
+    \operatorname{rightExactAnswer}(U,\operatorname{answers}) &:=
+      \operatorname{reconstructExact}(U_R,\operatorname{answers}),\\
+    \operatorname{exactCandidateSet}(U,\operatorname{answers}) &:=
+      \{\,\operatorname{crossExactAnswer},
+          \operatorname{leftExactAnswer},
+          \operatorname{rightExactAnswer}\,\}
+      \text{ after omitting absent leaf candidates},\\
+    \operatorname{reconstructExact\_eq\_argmin}:&
+      \operatorname{reconstructExact}(U,\operatorname{answers})
+      \in\arg\min_{o\in
+        \operatorname{exactCandidateSet}(U,\operatorname{answers})}
+        \operatorname{origScore}_U(o).
+  \end{array}
+  \]
+  Thus `reconstructExact' is a function of the oracle-answer assignment and the
+  recursive child reconstructions. A helper named `MinIPReconstructPair' may be
+  used only if the audited witness proves
+  \[
+    \operatorname{MinIPReconstructPair}(U,\operatorname{answers})
+    =
+    \operatorname{reconstructExact}(U,\operatorname{answers})
+  \]
+  and the right-hand side satisfies `reconstructExact_eq_argmin' above. A
+  definition that chooses `MinIPNodeGlobalPair U' by classical choice from the
+  original instance, independent of the cross oracle answer and independent of
+  the recursive left and right answers, bypasses the reduction and is rejected.
+
+  The $\gamma$-approximation package has the same dependency requirement. The
+  oracle-answer assumptions are only:
+  a concrete $\gamma$-valid cross answer for each
+  $\operatorname{crossInst}(U)$ and recursively produced $\gamma$-valid
+  candidates for $U_L$ and $U_R$. They do not include the final reconstructed
+  candidate or its approximation guarantee. In particular, a structure named
+  `MinIPNodeGammaOracleAnswers' must have fields for
+  `crossGammaAnswer', `crossGammaValid', `leftGammaAnswer',
+  `leftGammaValid', `rightGammaAnswer', and `rightGammaValid' (with absent
+  leaves handled by the no-candidate convention), but it must not contain a
+  field named `reconstructedApprox', `reconstructedApproxValid',
+  `bestApprox', or any proposition equivalent to
+  \[
+    \operatorname{origOpt}(U)\le
+    \operatorname{origScore}_U
+      (\operatorname{reconstructGamma}(U,\operatorname{answers}))
+    \le \gamma\,\operatorname{origOpt}(U).
+  \]
+  The projection `gammaApproxCorrectness' must prove that displayed
+  two-sided inequality from the three candidate-validity fields, the candidate
+  selection equation for `reconstructGamma', and
+  `MinIPNodeExactDecomposition_correct'. A theorem such as
+  `MinIPNodeGammaApprox_best' is accepted only if its hypotheses are exactly
+  these oracle and recursive candidate-validity fields and its conclusion is
+  the two-sided bound for
+  $\operatorname{reconstructGamma}(U,\operatorname{answers})$. If it merely
+  returns a stored field `reconstructedApprox' from
+  `MinIPNodeGammaOracleAnswers', it assumes the conclusion and fails this node.
+
+  Trial-12 failure-specific refinement: a witness with only per-node split and
+  cross-call functions is incomplete. The audited
+  $\operatorname{MinIPBichromaticRecursiveWitness}$ must contain a whole-tree
+  algorithm layer whose projections are visible at this label:
+  \[
+  \begin{array}{ll}
+    \operatorname{wholeCallTree}(V)&=\operatorname{callTree}(V),\\
+    \operatorname{wholeCallSet}(V)&=
+      \{\,\operatorname{crossInst}(U):
+        U\in\operatorname{internalNodes}(\operatorname{callTree}(V))\,\},\\
+    \operatorname{wholeAnswerAssignment}_{\mathcal A}(V)&:
+      \prod_{c\in\operatorname{wholeCallSet}(V)}
+        \operatorname{AlgOut}_{\operatorname{BMinIP}}(c),\\
+    \operatorname{wholeAnswersCorrect}_{\mathcal A}(V)&:
+      \forall c\in\operatorname{wholeCallSet}(V),\
+        \operatorname{AlgCorrect}_{\operatorname{BMinIP}}
+          (c,\operatorname{wholeAnswerAssignment}_{\mathcal A}(V,c)).
+  \end{array}
+  \]
+  The root exact run is not an arbitrary pair and is not a locally chosen
+  `MinIPNodeGlobalPair'. It is definitionally
+  \[
+    \operatorname{exactRun}_{\mathcal A}(V)
+    =
+    \operatorname{reconstructExact}
+      (V,\operatorname{wholeAnswerAssignment}_{\mathcal A}(V)),
+  \]
+  and the root correctness field has the concrete type
+  \[
+  \begin{array}{l}
+    \operatorname{exactRunCorrect}_{\mathcal A}(V):\\
+    \qquad
+    \operatorname{MinIPValidOut}
+      \left(V,\operatorname{exactRun}_{\mathcal A}(V)\right)
+    \ \wedge\
+    \operatorname{origScore}_V
+      \left(\operatorname{exactRun}_{\mathcal A}(V)\right)
+      =
+      \operatorname{origOpt}(V).
+  \end{array}
+  \]
+  Its proof must invoke Lemma~\ref{lem:minip-split-tree-pair-coverage}, the
+  validity of every answer in `wholeAnswerAssignment', and the
+  `reconstructExact_eq_argmin' projection. A field whose proof only unfolds
+  `MinIPNodeExactDecomposition' to the definition of
+  `MinIPNodeReconstructedValue' as
+  $\min(m_{\mathrm{cross}},\min(m_L,m_R))$ is rejected, because it never
+  connects the reconstructed root pair to the minimum over original distinct
+  pairs.
+
+  The gamma algorithm layer is likewise whole-tree. Its run is
+  \[
+    \operatorname{gammaRun}_{\mathcal A}(V)
+    =
+    \operatorname{reconstructGamma}
+      (V,\operatorname{wholeGammaAnswerAssignment}_{\mathcal A}(V)),
+  \]
+  where the answer assignment contains only concrete $\gamma$-valid oracle
+  answers for all cross calls and recursive child candidates obtained by the
+  same reconstruction. The required correctness theorem is
+  \[
+    \operatorname{origOpt}(V)\le
+    \operatorname{origScore}_V(\operatorname{gammaRun}_{\mathcal A}(V))
+    \ \wedge\
+    \operatorname{origScore}_V(\operatorname{gammaRun}_{\mathcal A}(V))
+      \le \gamma\,\operatorname{origOpt}(V).
+  \]
+  This theorem may not have type
+  `MinIPNodeGammaApproxPredicate ... -> MinIPNodeGammaApproxPredicate ...',
+  may not assume validity of the final reconstructed candidate, and may not
+  conclude one of its hypotheses verbatim. It must derive the displayed
+  root-level inequalities from all cross-call oracle validities, recursive
+  child validities, candidate selection, and
+  Lemma~\ref{lem:minip-split-tree-pair-coverage}.
+
+  The threshold algorithm layer must also use the original root predicate. It
+  defines
+  \[
+    \operatorname{thresholdRun}_{\mathcal A}(V,t)=\mathrm{true}
+    \Longleftrightarrow
+    \exists U\in\operatorname{internalNodes}(\operatorname{callTree}(V)),\
+      \operatorname{crossThresholdOracleRun}_{\mathcal A}(U,t)=\mathrm{true},
+  \]
+  where the oracle run is on the concrete call
+  $\operatorname{crossInst}(U)=(U_L,U_R)$. Its correctness field is
+  \[
+    \operatorname{thresholdRun}_{\mathcal A}(V,t)=\mathrm{true}
+    \Longleftrightarrow
+    \operatorname{origThresholdYes}(V,t),
+  \]
+  using the threshold consequence of
+  Lemma~\ref{lem:minip-split-tree-pair-coverage}. A field proving
+  `MinIPNodeThresholdRecursivePredicate U hU t' iff the same disjunction used
+  to define that predicate is rejected, even if the field is named
+  `thresholdDecisionCorrectness'; the accepted statement must mention
+  $\operatorname{origThresholdYes}(V,t)$ at the root or
+  $\operatorname{origThresholdYes}(U,t)$ at a specified node and must prove
+  equivalence by classifying original pairs through the split tree.
 \end{lemma}
 \begin{proof}
-  \uses{def:minip, def:bichromatic-minip}
+  \uses{def:minip, def:bichromatic-minip, lem:minip-split-tree-pair-coverage}
   Given a $\MinIP_{n,\ell}$ instance $V = \{v_1, \ldots, v_n\}$, partition $V$
   into two halves $V_1, V_2$ of equal size and run $\mathcal A$ on the
   bichromatic instance $(V_1, V_2)$; this returns the minimal pair with one
