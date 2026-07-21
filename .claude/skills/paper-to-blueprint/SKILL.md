@@ -157,6 +157,16 @@ Lean decl names you could not confirm. Offer to refine, add a PDF, or push.
   mark it `\notready`, and leave a `% TODO` describing the gap — never invent a
   proof and never silently drop the result.
 - Split multi-step proofs into sub-lemmas so the graph is granular.
+- **Formalizability granularity (hard rule):** every node must be individually
+  formalizable as ONE Lean declaration with 1-1 structural correspondence to
+  its statement. Never emit "witness package" / "interface" mega-nodes that
+  bundle a recursive construction, several correctness equations, and a
+  runtime/transfer claim into one lemma — downstream Lean verification treats
+  the blueprint as the source of truth, so a node that needs unstated helper
+  statements to formalize is a malformed node. Break such content into
+  separate definition/lemma nodes up front (the construction, each correctness
+  equation, each transfer claim) and wire them with `\uses`. Rule of thumb:
+  if a statement needs more than ~4 named fields or equations, decompose it.
 - Wire **every** dependency with `\uses` (statement-level and proof-level).
 - Keep the paper's numbering/names in node titles so a reader can cross-reference.
 
