@@ -32,3 +32,6 @@ AutoBlueprint/Generated/
 
 # Cloudflare Wrangler local account/project cache
 .wrangler/
+telemetry-worker/.dev.vars
+telemetry-worker/.env
+telemetry-worker/node_modules/

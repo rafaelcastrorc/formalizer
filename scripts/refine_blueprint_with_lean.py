@@ -4,18 +4,20 @@
 This is the author/critic loop:
 
 1. validate the current blueprint;
-2. choose the next dependency-closed chunk from the blueprint ``\\uses`` graph;
-3. ask a read-only model call to generate disposable Lean for that chunk only,
+2. before chunking, optionally ask the model to decompose a bounded set of
+   structurally suspicious blueprint nodes into smaller helper nodes;
+3. choose the next dependency-closed chunk from the blueprint ``\\uses`` graph;
+4. ask a read-only model call to generate disposable Lean for that chunk only,
    while still showing the whole blueprint as context;
-4. run Lean on accepted chunk context plus the new chunk;
-5. audit that the compiled Lean statements actually align with the target nodes;
-6. if Lean/audit fails because the generated Lean is malformed or mistranslated,
+5. run Lean on accepted chunk context plus the new chunk;
+6. audit that the compiled Lean statements actually align with the target nodes;
+7. if Lean/audit fails because the generated Lean is malformed or mistranslated,
    retry Lean generation for the same chunk;
-7. if Lean/audit fails because the blueprint is missing mathematical content, ask
+8. if Lean/audit fails because the blueprint is missing mathematical content, ask
    a second model call to fix the blueprint, not the Lean file;
-8. after a blueprint repair, revalidate and replan chunks from the repaired
+9. after a blueprint repair, revalidate and replan chunks from the repaired
    blueprint;
-9. publish only when every chunk has passed.
+10. publish only when every chunk has passed.
 
 Lean code is not the source of truth here. The generated files under
 ``.auto-blueprint/formalization/`` are test artifacts and are overwritten across
@@ -44,6 +46,7 @@ from generate_blueprint import _extract_json, read_paper
 from lean_preflight import check_lean_environment, default_lean_command
 from model_runners import RunnerError, get_runner
 from model_runners.base import is_environment_error
+from telemetry import TelemetryRun, node_structural_features
 from validate_blueprint import Node, print_result, validate_blueprint
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -55,6 +58,8 @@ LEAN_GENERATION_RETRIES = 5
 AUTO_CHUNK_SIZE = 0
 DEFAULT_AUTO_CHUNK_LIMIT = 8
 MEDIUM_NODES_PER_CHUNK = 3
+DEFAULT_MODEL_TIMEOUT = 300
+DEFAULT_HARD_MODEL_TIMEOUT = 600
 CURRENT_LOG_PATH: Path | None = None
 MAX_LIBRARY_CANDIDATES = 40
 MIN_LIBRARY_CANDIDATES_BEFORE_MODEL_TERMS = 8
@@ -84,7 +89,8 @@ FORBIDDEN_BLUEPRINT_STUBS = re.compile(
     r")\b"
 )
 LEAN_DECL_START_RE = re.compile(
-    r"^\s*(?:noncomputable\s+)?(?:private\s+)?(?:protected\s+)?"
+    r"^\s*(?:@\[[^\]]+\]\s*)*"
+    r"(?:(?:noncomputable|private|protected|unsafe|partial)\s+)*"
     r"(theorem|lemma|def|abbrev|structure|inductive|class)\s+"
     r"([A-Za-z_][A-Za-z0-9_'.]*)\b"
 )
@@ -301,6 +307,64 @@ def _node_difficulty(label: str, node: Node, block: str) -> str:
     return "easy"
 
 
+def _decomposition_candidate_reasons(label: str, node: Node, block: str) -> list[str]:
+    """Explain why a node should be decomposed before expensive Lean attempts.
+
+    This is deliberately a prepass heuristic, not a correctness judgment. The
+    model still has to edit the blueprint, validation has to pass, and generated
+    Lean must later align with the resulting blueprint nodes one-to-one.
+    """
+    features = node_structural_features(label, node.kind, block, len(node.uses))
+    reasons: list[str] = []
+    if features["proof_chars"] > 1200 and features["display_math_count"] >= 2:
+        reasons.append("long proof with multiple displayed equations")
+    if features["sum_token_count"] + features["product_token_count"] >= 3:
+        reasons.append("multiple finite sum/product operators")
+    if features["reindex_token_count"] > 0:
+        reasons.append("reindexing or bijection language")
+    if features["equation_like_count"] >= 8 and features["proof_chars"] > 700:
+        reasons.append("many equation/inequality steps in one node")
+    if node.kind in {"theorem", "corollary"} and len(node.uses) >= 5:
+        reasons.append("high-level result with many dependencies")
+    if (
+        _node_difficulty(label, node, block) == "hard"
+        and features["proof_chars"] > 500
+        and features["display_math_count"] > 0
+    ):
+        reasons.append("scheduler-hard node with nontrivial proof text")
+    return reasons
+
+
+def _pre_decomposition_candidates(
+    nodes: dict[str, Node],
+    *,
+    accepted_labels: set[str],
+    limit: int,
+) -> list[tuple[str, list[str]]]:
+    """Return suspicious unresolved nodes for the pre-refinement decomposition pass."""
+    if limit <= 0:
+        return []
+    blocks = _node_tex_blocks(nodes)
+    candidates: list[tuple[int, str, list[str]]] = []
+    for label in _node_order(nodes):
+        node = nodes[label]
+        if label in accepted_labels or node.mathlibok:
+            continue
+        reasons = _decomposition_candidate_reasons(label, node, blocks.get(label, ""))
+        if not reasons:
+            continue
+        features = node_structural_features(label, node.kind, blocks.get(label, ""), len(node.uses))
+        score = (
+            len(reasons) * 10
+            + min(int(features["proof_chars"] or 0) // 250, 8)
+            + min(int(features["equation_like_count"] or 0), 12)
+            + min(len(node.uses), 8)
+        )
+        candidates.append((score, label, reasons))
+    candidates.sort(key=lambda item: (-item[0], _node_order(nodes).index(item[1])))
+    return [(label, reasons) for _score, label, reasons in candidates[:limit]]
+
+
 def _parse_decomposition_refusal(text: str) -> dict | None:
     """Detect a structured generation refusal (node needs blueprint helpers).
 
@@ -345,8 +409,15 @@ def _decomposition_note(labels: list[str], helpers: list[str] | None = None) -> 
     )
 
 
-def _next_chunk(nodes: dict[str, Node], accepted: set[str], *, chunk_size: int) -> list[str]:
+def _next_chunk(
+    nodes: dict[str, Node],
+    accepted: set[str],
+    *,
+    chunk_size: int,
+    force_singletons: set[str] | None = None,
+) -> list[str]:
     """Pick a dependency-closed chunk, batching easy nodes and isolating hard ones."""
+    force_singletons = force_singletons or set()
     available = set(accepted) | {label for label, node in nodes.items() if node.mathlibok}
     remaining = [label for label in _node_order(nodes) if label not in available]
     blocks = _node_tex_blocks(nodes)
@@ -366,6 +437,11 @@ def _next_chunk(nodes: dict[str, Node], accepted: set[str], *, chunk_size: int) 
                 continue
 
             difficulty = difficulties[label]
+            if label in force_singletons:
+                if not chunk:
+                    chunk.append(label)
+                return chunk
+
             if difficulty == "hard":
                 # If a hard node is the first ready obligation, isolate it.
                 # If easy/medium nodes are already in this chunk, leave the
@@ -383,6 +459,11 @@ def _next_chunk(nodes: dict[str, Node], accepted: set[str], *, chunk_size: int) 
             if len(chunk) >= chunk_size:
                 break
     return chunk
+
+
+def _is_timeout_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "timed out" in text or "timeout" in text
 
 
 def _chunk_summary(nodes: dict[str, Node], labels: list[str]) -> str:
@@ -416,6 +497,25 @@ def _chunk_difficulty_summary(nodes: dict[str, Node], labels: list[str]) -> str:
         f"{label}={_node_difficulty(label, nodes[label], blocks.get(label, ''))}"
         for label in labels
     )
+
+
+def _chunk_has_hard_node(nodes: dict[str, Node], labels: list[str]) -> bool:
+    blocks = _node_tex_blocks({label: nodes[label] for label in labels})
+    return any(
+        _node_difficulty(label, nodes[label], blocks.get(label, "")) == "hard"
+        for label in labels
+    )
+
+
+@contextlib.contextmanager
+def _runner_timeout(runner, timeout: int):
+    """Temporarily adjust a runner's per-call timeout for one model call."""
+    previous = runner.timeout
+    runner.timeout = timeout
+    try:
+        yield
+    finally:
+        runner.timeout = previous
 
 
 def _node_fingerprints(nodes: dict[str, Node]) -> dict[str, str]:
@@ -970,6 +1070,47 @@ def _chunk_manifest_path(name: str) -> Path:
     return _generated_module_dir(name) / "manifest.json"
 
 
+def _routing_hints_path(name: str) -> Path:
+    return SCRATCH_DIR / name / "routing_hints.json"
+
+
+def _load_routing_hints(name: str) -> dict[str, set[str]]:
+    path = _routing_hints_path(name)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"forced_singletons": set(), "timeout_hard_overrides": set()}
+    return {
+        "forced_singletons": {
+            str(label) for label in payload.get("forced_singletons", []) if str(label).strip()
+        },
+        "timeout_hard_overrides": {
+            str(label) for label in payload.get("timeout_hard_overrides", []) if str(label).strip()
+        },
+    }
+
+
+def _write_routing_hints(
+    name: str,
+    *,
+    forced_singletons: set[str],
+    timeout_hard_overrides: set[str],
+) -> None:
+    path = _routing_hints_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "forced_singletons": sorted(forced_singletons),
+                "timeout_hard_overrides": sorted(timeout_hard_overrides),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -1010,6 +1151,39 @@ def _read_chunk_manifest(name: str) -> dict[str, dict]:
     if not isinstance(entries, list):
         return {}
     return {entry["file"]: entry for entry in entries if isinstance(entry, dict) and "file" in entry}
+
+
+def _manifest_current_accepted_labels(name: str, validation_nodes: dict[str, Node]) -> set[str]:
+    """Return manifest labels whose code and blueprint fingerprints still match.
+
+    This is only a cheap prepass filter; the real ``--continue`` path still owns
+    accepting generated Lean as usable context.
+    """
+    manifest = _read_chunk_manifest(name)
+    if not manifest:
+        return set()
+    current_fingerprints = _node_fingerprints(validation_nodes)
+    generated_dir = _generated_module_dir(name)
+    labels: set[str] = set()
+    for entry in manifest.values():
+        file_name = str(entry.get("file") or "")
+        path = generated_dir / file_name
+        fingerprints = entry.get("fingerprints") or {}
+        entry_labels = entry.get("labels") or []
+        if (
+            file_name
+            and path.is_file()
+            and path.with_suffix(".olean").is_file()
+            and entry.get("sha256") == _file_sha256(path)
+            and set(fingerprints) == set(entry_labels)
+            and all(
+                label in validation_nodes
+                and current_fingerprints.get(label) == fingerprint
+                for label, fingerprint in fingerprints.items()
+            )
+        ):
+            labels.update(str(label) for label in entry_labels)
+    return labels
 
 
 def _olean_roots() -> list[Path]:
@@ -1353,6 +1527,7 @@ def _statement_audit_prompt(
             f"\nGenerated Lean declaration:\n```lean\n{decl.text[:5000] if decl else '(missing)'}\n```\n"
         )
     paper_block = f"\nOriginal paper context:\n<paper>\n{paper_text[:20000]}\n</paper>\n" if paper_text else ""
+    pair_text = "\n\n".join(pairs)
     return f"""TASK: STATEMENT-ALIGNMENT-AUDIT
 
 You are the publication gate for Auto-Blueprint.
@@ -1401,7 +1576,7 @@ Do not reject merely because the Lean proof is ugly. Judge statement alignment.
 Blueprint name: {name}
 {paper_block}
 Pairs to audit:
-{"\n\n".join(pairs)}
+{pair_text}
 """
 
 
@@ -1454,12 +1629,30 @@ def _run_statement_alignment_audit(
     paper_text: str,
     *,
     all_nodes: dict[str, Node] | None = None,
+    telemetry: TelemetryRun | None = None,
+    chunk_number: int | None = None,
 ) -> LeanAttempt | None:
     """Return None when the compiled Lean is aligned enough to publish."""
     code = lean_path.read_text(encoding="utf-8")
     deterministic_issues = _deterministic_statement_audit(code, nodes, all_nodes)
     if deterministic_issues:
         rejected = set(nodes)
+        if telemetry:
+            issues_artifact = telemetry.store_text(
+                "audit_issues",
+                "\n".join(deterministic_issues),
+                ext="txt",
+            )
+            telemetry.record(
+                "statement_audit",
+                chunk_number=chunk_number,
+                labels=list(nodes),
+                source="deterministic",
+                accepted=False,
+                classification=_deterministic_audit_kind(deterministic_issues),
+                rejected_labels=sorted(rejected),
+                issues=issues_artifact.to_event(REPO_ROOT),
+            )
         return LeanAttempt(
             ok=False,
             command=[],
@@ -1477,10 +1670,57 @@ def _run_statement_alignment_audit(
         decls,
         paper_text,
     )
-    result = runner.run(prompt, cwd=REPO_ROOT, retries=0)
+    prompt_artifact = telemetry.store_text("prompt_statement_audit", prompt) if telemetry else None
+    started = time.monotonic()
+    try:
+        result = runner.run(prompt, cwd=REPO_ROOT, retries=0)
+    except RunnerError as exc:
+        if telemetry:
+            telemetry.record(
+                "model_call",
+                purpose="statement_audit",
+                chunk_number=chunk_number,
+                labels=list(nodes),
+                status="error",
+                duration_s=time.monotonic() - started,
+                timeout_s=runner.timeout,
+                backend=runner.backend_name,
+                model=runner.model,
+                readonly=runner.readonly,
+                prompt=prompt_artifact.to_event(REPO_ROOT) if prompt_artifact else None,
+                error=str(exc),
+            )
+        raise
+    if telemetry:
+        response_artifact = telemetry.store_text("response_statement_audit", result.text)
+        telemetry.record(
+            "model_call",
+            purpose="statement_audit",
+            chunk_number=chunk_number,
+            labels=list(nodes),
+            status="success",
+            duration_s=result.duration_s,
+            timeout_s=runner.timeout,
+            backend=result.backend,
+            model=result.model,
+            readonly=runner.readonly,
+            prompt=prompt_artifact.to_event(REPO_ROOT) if prompt_artifact else None,
+            response=response_artifact.to_event(REPO_ROOT),
+        )
     try:
         payload = _extract_json(result.text)
     except ValueError as exc:
+        if telemetry:
+            telemetry.record(
+                "statement_audit",
+                chunk_number=chunk_number,
+                labels=list(nodes),
+                source="model",
+                accepted=False,
+                classification="invalid_json",
+                rejected_labels=list(nodes),
+                reason=str(exc),
+            )
         return LeanAttempt(
             ok=False,
             command=[],
@@ -1493,6 +1733,16 @@ def _run_statement_alignment_audit(
         str(issue.get("severity", "")).lower() == "reject" for issue in issues if isinstance(issue, dict)
     )
     if accepted:
+        if telemetry:
+            telemetry.record(
+                "statement_audit",
+                chunk_number=chunk_number,
+                labels=list(nodes),
+                source="model",
+                accepted=True,
+                classification=str(payload.get("classification") or "accepted"),
+                rejected_labels=[],
+            )
         return None
 
     formatted: list[str] = []
@@ -1513,6 +1763,23 @@ def _run_statement_alignment_audit(
 
     classification = str(payload.get("classification") or "lean_translation_issue")
     kind = _alignment_failure_kind(classification, formatted)
+    if telemetry:
+        issues_artifact = telemetry.store_text(
+            "audit_issues",
+            "\n".join(formatted),
+            ext="txt",
+        )
+        telemetry.record(
+            "statement_audit",
+            chunk_number=chunk_number,
+            labels=list(nodes),
+            source="model",
+            accepted=False,
+            classification=classification,
+            routed_kind=kind,
+            rejected_labels=sorted(rejected_labels),
+            issues=issues_artifact.to_event(REPO_ROOT),
+        )
     return LeanAttempt(
         ok=False,
         command=[],
@@ -1722,6 +1989,7 @@ def _chunk_lean_prompt(
     previous_chunk_code: str = "",
     audit_history: str = "",
     unavailable_imports: list[str] | None = None,
+    model_timeout_s: int | None = None,
 ) -> str:
     retry_block = ""
     if previous_lean_error:
@@ -1839,6 +2107,10 @@ Hard constraints:
   declarations exactly as written. Do not redefine them.
 - If the blueprint is missing a lemma/hypothesis/dependency, let the checker
   fail rather than patching around missing content.
+- This model call has a wall-clock budget of about {model_timeout_s or "unknown"}
+  seconds. Keep the implementation scoped to the requested declarations; if the
+  node is too large to formalize faithfully within this call, use the
+  `NEEDS-DECOMPOSITION` response instead of emitting weakened Lean.
 
 The script will compile:
 
@@ -1896,9 +2168,15 @@ def _agent_refine_prompt(
     paper_text: str,
     *,
     escalation_note: str = "",
+    model_timeout_s: int | None = None,
 ) -> str:
     paper_block = f"\nOriginal paper context:\n<paper>\n{paper_text}\n</paper>\n" if paper_text else ""
     escalation_block = f"\nIMPORTANT: {escalation_note}\n" if escalation_note else ""
+    budget_block = (
+        f"\nThis repair call has a wall-clock budget of about {model_timeout_s} seconds.\n"
+        if model_timeout_s
+        else ""
+    )
     return f"""TASK: REFINE-BLUEPRINT-FROM-LEAN-FAILURE
 
 Trial {trial} failed when Lean checked a disposable implementation generated
@@ -1906,6 +2184,7 @@ from the current blueprint.
 
 You are the blueprint author. Fix the blueprint, not the Lean implementation.
 {escalation_block}
+{budget_block}
 
 Rules:
 - Edit only `blueprints/{name}/blueprint/src/` and `blueprints/{name}/meta.yml`
@@ -1941,6 +2220,92 @@ Lean critic output:
 """
 
 
+def _pre_decomposition_prompt(
+    name: str,
+    blueprint_source: str,
+    nodes: dict[str, Node],
+    candidates: list[tuple[str, list[str]]],
+    paper_text: str,
+    *,
+    model_timeout_s: int | None = None,
+) -> str:
+    paper_block = f"\nOriginal paper context:\n<paper>\n{paper_text}\n</paper>\n" if paper_text else ""
+    budget_block = (
+        f"\nThis prepass has a wall-clock budget of about {model_timeout_s} seconds.\n"
+        if model_timeout_s
+        else ""
+    )
+    blocks = _node_tex_blocks(nodes)
+    candidate_lines = []
+    for label, reasons in candidates:
+        node = nodes[label]
+        candidate_lines.append(
+            f"## {label}\n"
+            f"- kind: {node.kind}\n"
+            f"- uses: {', '.join(sorted(node.uses)) or '(none)'}\n"
+            f"- heuristic reasons: {', '.join(reasons)}\n"
+            "```tex\n"
+            f"{blocks.get(label, '')[:5000]}\n"
+            "```"
+        )
+    return f"""TASK: PRE-REFINEMENT-BLUEPRINT-DECOMPOSITION
+
+Before Lean generation starts, inspect the listed blueprint nodes and decide
+whether any are too coarse for faithful one-to-one Lean formalization.
+{budget_block}
+
+You are still editing the blueprint, not Lean. If a candidate proof bundles
+several formal steps into one large statement, split it into smaller
+definition/lemma nodes and rewire `\\uses{{...}}` so the original claim depends
+on the helpers. Keep the mathematical content identical. Do not weaken claims.
+Do not add Lean code.
+
+Edit only `blueprints/{name}/blueprint/src/` and `blueprints/{name}/meta.yml`
+if metadata is genuinely wrong. After editing, run
+`python scripts/validate_blueprint.py {name}`.
+
+If no decomposition is needed, leave the files unchanged.
+
+Candidate nodes selected by deterministic prepass:
+{chr(10).join(candidate_lines)}
+
+{paper_block}
+Current blueprint source:
+```tex
+{blueprint_source}
+```
+"""
+
+
+def _api_pre_decomposition_prompt(
+    name: str,
+    blueprint_source: str,
+    nodes: dict[str, Node],
+    candidates: list[tuple[str, list[str]]],
+    paper_text: str,
+    *,
+    model_timeout_s: int | None = None,
+) -> str:
+    base = _pre_decomposition_prompt(
+        name,
+        blueprint_source,
+        nodes,
+        candidates,
+        paper_text,
+        model_timeout_s=model_timeout_s,
+    )
+    return f"""{base}
+
+API MODE: Return exactly one JSON object:
+{{
+  "content_tex": "full replacement for blueprints/{name}/blueprint/src/content.tex, or the unchanged source if no decomposition is needed",
+  "notes": "short explanation of decompositions made or why none were needed"
+}}
+
+Do not include `\\begin{{document}}` or `\\end{{document}}`.
+"""
+
+
 def _api_refine_prompt(
     name: str,
     blueprint_source: str,
@@ -1949,14 +2314,21 @@ def _api_refine_prompt(
     paper_text: str,
     *,
     escalation_note: str = "",
+    model_timeout_s: int | None = None,
 ) -> str:
     paper_block = f"\nOriginal paper context:\n<paper>\n{paper_text}\n</paper>\n" if paper_text else ""
     escalation_block = f"\nIMPORTANT: {escalation_note}\n" if escalation_note else ""
+    budget_block = (
+        f"\nThis repair call has a wall-clock budget of about {model_timeout_s} seconds.\n"
+        if model_timeout_s
+        else ""
+    )
     return f"""TASK: REFINE-BLUEPRINT-CONTENT-TEX
 
 Trial {trial} failed when Lean checked a disposable implementation generated
 from the current blueprint.
 {escalation_block}
+{budget_block}
 
 Return exactly one JSON object:
 {{
@@ -2007,6 +2379,207 @@ def _write_api_refinement(name: str, text: str) -> None:
         print(f"  refinement notes: {notes}")
 
 
+def _run_pre_decomposition_pass(
+    *,
+    name: str,
+    runner,
+    telemetry: TelemetryRun,
+    paper_text: str,
+    accepted_labels: set[str],
+    candidate_limit: int,
+    timeout_s: int,
+) -> tuple[bool, int]:
+    """Optionally decompose suspicious blueprint nodes before Lean generation.
+
+    Returns ``(changed, changed_count)``. All changes go through ``content.tex``
+    and normal blueprint validation; Lean still proves the post-prepass
+    blueprint, never a private side plan.
+    """
+    validation = validate_blueprint(REPO_ROOT, name)
+    print_result(validation)
+    if not validation.ok:
+        raise ValueError("pre-decomposition validation failed before model call")
+
+    blueprint_source = _read_blueprint_source(name)
+    current_fingerprints = _node_fingerprints(validation.nodes)
+    candidates = _pre_decomposition_candidates(
+        validation.nodes,
+        accepted_labels=accepted_labels,
+        limit=candidate_limit,
+    )
+    decision_id = f"{telemetry.run_id}:pre-decomposition"
+    blocks = _node_tex_blocks(validation.nodes)
+    for label, reasons in candidates:
+        telemetry.record(
+            "pre_decomposition_candidate",
+            decision_id=decision_id,
+            reasons=reasons,
+            **node_structural_features(
+                label,
+                validation.nodes[label].kind,
+                blocks.get(label, ""),
+                len(validation.nodes[label].uses),
+            ),
+        )
+    telemetry.record(
+        "decision_point",
+        decision_id=decision_id,
+        kind="pre_refinement_decomposition",
+        target_labels=[label for label, _reasons in candidates],
+        accepted_before=len(accepted_labels),
+        remaining_before=len(validation.nodes) - len(accepted_labels),
+        candidate_limit=candidate_limit,
+        model_timeout_s=timeout_s,
+        available_actions=["skip_pre_decomposition", "decompose_blueprint"],
+        chosen_action="decompose_blueprint" if candidates else "skip_pre_decomposition",
+    )
+    if not candidates:
+        telemetry.record(
+            "decision_outcome",
+            decision_id=decision_id,
+            outcome="pre_decomposition_skipped_no_candidates",
+        )
+        return False, 0
+
+    print(
+        "==> Pre-refinement decomposition pass: "
+        + ", ".join(label for label, _reasons in candidates),
+        flush=True,
+    )
+    if runner.backend_name in {"codex", "claude"}:
+        prompt = _pre_decomposition_prompt(
+            name,
+            blueprint_source,
+            validation.nodes,
+            candidates,
+            paper_text,
+            model_timeout_s=timeout_s,
+        )
+        prompt_artifact = telemetry.store_text("prompt_pre_decomposition", prompt)
+        started = time.monotonic()
+        try:
+            with _runner_timeout(runner, timeout_s):
+                result = runner.run(prompt, cwd=REPO_ROOT, retries=0)
+        except RunnerError as exc:
+            telemetry.record(
+                "model_call",
+                purpose="pre_decomposition",
+                decision_id=decision_id,
+                labels=[label for label, _reasons in candidates],
+                status="error",
+                duration_s=time.monotonic() - started,
+                timeout_s=timeout_s,
+                backend=runner.backend_name,
+                model=runner.model,
+                readonly=runner.readonly,
+                prompt=prompt_artifact.to_event(REPO_ROOT),
+                error=str(exc),
+                environment_error=is_environment_error(exc),
+            )
+            raise
+        response_artifact = telemetry.store_text("response_pre_decomposition", result.text)
+        telemetry.record(
+            "model_call",
+            purpose="pre_decomposition",
+            decision_id=decision_id,
+            labels=[label for label, _reasons in candidates],
+            status="success",
+            duration_s=result.duration_s,
+            timeout_s=timeout_s,
+            backend=result.backend,
+            model=result.model,
+            readonly=runner.readonly,
+            prompt=prompt_artifact.to_event(REPO_ROOT),
+            response=response_artifact.to_event(REPO_ROOT),
+        )
+    else:
+        prompt = _api_pre_decomposition_prompt(
+            name,
+            blueprint_source,
+            validation.nodes,
+            candidates,
+            paper_text,
+            model_timeout_s=timeout_s,
+        )
+        prompt_artifact = telemetry.store_text("prompt_pre_decomposition", prompt)
+        started = time.monotonic()
+        try:
+            with _runner_timeout(runner, timeout_s):
+                result = runner.run(prompt, cwd=REPO_ROOT, retries=1)
+        except RunnerError as exc:
+            telemetry.record(
+                "model_call",
+                purpose="pre_decomposition",
+                decision_id=decision_id,
+                labels=[label for label, _reasons in candidates],
+                status="error",
+                duration_s=time.monotonic() - started,
+                timeout_s=timeout_s,
+                backend=runner.backend_name,
+                model=runner.model,
+                readonly=runner.readonly,
+                prompt=prompt_artifact.to_event(REPO_ROOT),
+                error=str(exc),
+                environment_error=is_environment_error(exc),
+            )
+            raise
+        response_artifact = telemetry.store_text("response_pre_decomposition", result.text)
+        telemetry.record(
+            "model_call",
+            purpose="pre_decomposition",
+            decision_id=decision_id,
+            labels=[label for label, _reasons in candidates],
+            status="success",
+            duration_s=result.duration_s,
+            timeout_s=timeout_s,
+            backend=result.backend,
+            model=result.model,
+            readonly=runner.readonly,
+            prompt=prompt_artifact.to_event(REPO_ROOT),
+            response=response_artifact.to_event(REPO_ROOT),
+        )
+        _write_api_refinement(name, result.text)
+
+    repaired_validation = validate_blueprint(REPO_ROOT, name)
+    if not repaired_validation.ok:
+        print_result(repaired_validation)
+        raise ValueError("pre-decomposition produced invalid blueprint")
+    repaired_fingerprints = _node_fingerprints(repaired_validation.nodes)
+    changed = {
+        label
+        for label, before in current_fingerprints.items()
+        if repaired_fingerprints.get(label) != before
+    }
+    changed |= {label for label in repaired_fingerprints if label not in current_fingerprints}
+    changed_labels = sorted(changed)
+    telemetry.record(
+        "pre_decomposition_result",
+        decision_id=decision_id,
+        labels=[label for label, _reasons in candidates],
+        changed_labels=changed_labels,
+        changed_count=len(changed_labels),
+        node_count_before=len(validation.nodes),
+        node_count_after=len(repaired_validation.nodes),
+        validation_ok=True,
+    )
+    telemetry.record(
+        "decision_outcome",
+        decision_id=decision_id,
+        outcome="pre_decomposition_changed" if changed_labels else "pre_decomposition_noop",
+        labels=[label for label, _reasons in candidates],
+        changed_labels=changed_labels,
+    )
+    if changed_labels:
+        print(
+            f"  pre-decomposition changed {len(changed_labels)} node(s); "
+            f"blueprint now has {len(repaired_validation.nodes)} node(s)",
+            flush=True,
+        )
+    else:
+        print("  pre-decomposition made no blueprint changes", flush=True)
+    return bool(changed_labels), len(changed_labels)
+
+
 def _write_report(name: str, lines: list[str]) -> Path:
     out_dir = SCRATCH_DIR / name
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -2050,6 +2623,7 @@ def _load_existing_accepted_chunks(
     lean_command: list[str],
     audit_runner,
     paper_text: str,
+    telemetry: TelemetryRun | None = None,
 ) -> tuple[list[AcceptedChunk], int]:
     """Resume from generated chunk modules that still pass Lean and audit.
 
@@ -2159,6 +2733,8 @@ def _load_existing_accepted_chunks(
                 path,
                 paper_text,
                 all_nodes=validation_nodes,
+                telemetry=telemetry,
+                chunk_number=chunk_number,
             )
         object_attempt = _compile_module_olean(path, lean_command) if lean_attempt.ok and audit_failure is None else None
         if not lean_attempt.ok or audit_failure is not None or object_attempt is None or not object_attempt.ok:
@@ -2232,14 +2808,81 @@ def main(argv: list[str] | None = None) -> int:
         choices=("low", "medium", "high", "xhigh"),
         help="Codex reasoning effort for --runner codex/codex:<model>.",
     )
-    parser.add_argument("--timeout", type=int, default=3600)
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_MODEL_TIMEOUT,
+        help=(
+            "Base timeout in seconds for each non-deterministic model call "
+            f"(default: {DEFAULT_MODEL_TIMEOUT}). Deterministic Lean checks use "
+            "their own fixed timeouts."
+        ),
+    )
+    parser.add_argument(
+        "--hard-timeout",
+        type=int,
+        default=DEFAULT_HARD_MODEL_TIMEOUT,
+        help=(
+            "Timeout in seconds for model calls tied to a scheduler-hard "
+            f"target chunk (default: {DEFAULT_HARD_MODEL_TIMEOUT}). Must be "
+            "at least --timeout."
+        ),
+    )
+    parser.add_argument(
+        "--no-pre-decompose",
+        dest="pre_decompose",
+        action="store_false",
+        help=(
+            "Skip the pre-refinement blueprint decomposition pass. By default, "
+            "the run asks the model to split a small set of structurally "
+            "suspicious nodes before Lean generation starts."
+        ),
+    )
+    parser.add_argument(
+        "--pre-decompose-limit",
+        type=int,
+        default=6,
+        help=(
+            "Maximum number of suspicious unresolved blueprint nodes to show "
+            "to the pre-refinement decomposition pass (default: 6)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.max_trials < 1:
         raise SystemExit("--max-trials must be at least 1")
     if args.chunk_size < 0:
         raise SystemExit("--chunk-size must be 0 for auto or a positive integer")
+    if args.timeout < 1:
+        raise SystemExit("--timeout must be a positive number of seconds")
+    if args.hard_timeout < args.timeout:
+        raise SystemExit("--hard-timeout must be at least --timeout")
+    if args.pre_decompose_limit < 0:
+        raise SystemExit("--pre-decompose-limit must be non-negative")
     chunk_size = args.chunk_size or DEFAULT_AUTO_CHUNK_LIMIT
+
+    telemetry = TelemetryRun(
+        REPO_ROOT,
+        blueprint=args.name,
+        command=[sys.argv[0], *(argv or sys.argv[1:])],
+    )
+    telemetry.record(
+        "refine_config",
+        runner=args.runner,
+        max_trials=args.max_trials,
+        chunk_size=chunk_size,
+        timeout_s=args.timeout,
+        hard_timeout_s=args.hard_timeout,
+        continue_run=args.continue_run,
+        reasoning_effort=args.reasoning_effort or "",
+        pre_decompose=args.pre_decompose,
+        pre_decompose_limit=args.pre_decompose_limit,
+    )
+
+    def finish(code: int, status: str, **fields) -> int:
+        telemetry.record("run_end", exit_code=code, status=status, **fields)
+        telemetry.flush_upload_queue()
+        return code
 
     runner_kwargs = {}
     if args.reasoning_effort:
@@ -2288,13 +2931,80 @@ def main(argv: list[str] | None = None) -> int:
         f"- max trials: `{args.max_trials}`",
         f"- chunking: `automatic dependency traversal`",
         f"- internal chunk limit: `{chunk_size}`",
+        f"- model-call timeout: `{args.timeout}s`",
+        f"- hard-node model-call timeout: `{args.hard_timeout}s`",
         f"- internal Lean-generation retries: `{LEAN_GENERATION_RETRIES}`",
         f"- continue from generated chunks: `{args.continue_run}`",
+        f"- pre-refinement decomposition: `{args.pre_decompose}`",
+        f"- pre-refinement decomposition limit: `{args.pre_decompose_limit}`",
         f"- Lean command: `{' '.join(lean_command)}`",
     ]
     if CURRENT_LOG_PATH is not None:
         report_lines.append(f"- full log: `{CURRENT_LOG_PATH.relative_to(REPO_ROOT)}`")
     report_lines.append("")
+
+    repair_trials = 0
+    if args.pre_decompose and args.pre_decompose_limit:
+        changed = False
+        changed_count = 0
+        prepass_validation = validate_blueprint(REPO_ROOT, args.name)
+        prepass_accepted = (
+            _manifest_current_accepted_labels(args.name, prepass_validation.nodes)
+            if args.continue_run and prepass_validation.ok
+            else set()
+        )
+        try:
+            changed, changed_count = _run_pre_decomposition_pass(
+                name=args.name,
+                runner=runner,
+                telemetry=telemetry,
+                paper_text=paper_text,
+                accepted_labels=prepass_accepted,
+                candidate_limit=args.pre_decompose_limit,
+                timeout_s=args.hard_timeout,
+            )
+        except RunnerError as exc:
+            if is_environment_error(exc):
+                report_lines.append("## Pre-refinement decomposition model call failed")
+                report_lines.append("")
+                report_lines.append("```text")
+                report_lines.append(str(exc)[-4000:])
+                report_lines.append("```")
+                report = _write_report(args.name, report_lines)
+                print(f"Pre-refinement decomposition model call failed: {exc}", flush=True)
+                print(f"Report written to {report.relative_to(REPO_ROOT)}")
+                return finish(1, "environment_error", error=str(exc))
+            print(
+                f"Pre-refinement decomposition skipped after model-call failure: {exc}",
+                flush=True,
+            )
+            report_lines.append(
+                "- pre-refinement decomposition skipped after model-call failure; "
+                "continuing with the normal refinement loop"
+            )
+        except ValueError as exc:
+            report_lines.append("## Pre-refinement decomposition failed")
+            report_lines.append("")
+            report_lines.append("```text")
+            report_lines.append(str(exc))
+            report_lines.append("```")
+            report = _write_report(args.name, report_lines)
+            print(f"Pre-refinement decomposition failed: {exc}", flush=True)
+            print(f"Report written to {report.relative_to(REPO_ROOT)}")
+            return finish(1, "pre_decomposition_failed", error=str(exc))
+        if changed:
+            repair_trials += 1
+            report_lines.append(
+                f"- pre-refinement decomposition changed `{changed_count}` node(s); "
+                "counted as one blueprint-repair trial"
+            )
+            if repair_trials >= args.max_trials:
+                report = _write_report(args.name, report_lines)
+                print("Pre-refinement decomposition used the configured blueprint-repair budget.")
+                print(f"Report written to {report.relative_to(REPO_ROOT)}")
+                return finish(1, "max_trials_exhausted_after_pre_decomposition")
+        else:
+            report_lines.append("- pre-refinement decomposition made no blueprint changes")
 
     removed_stale = _clear_stale_attempt_artifacts(args.name)
     if removed_stale:
@@ -2313,18 +3023,18 @@ def main(argv: list[str] | None = None) -> int:
             report_lines.extend(f"- {error}" for error in resume_validation.errors)
             report = _write_report(args.name, report_lines)
             print(f"Report written to {report.relative_to(REPO_ROOT)}")
-            return 1
+            return finish(1, "resume_validation_failed")
         accepted_chunks, chunk_number = _load_existing_accepted_chunks(
             name=args.name,
             validation_nodes=resume_validation.nodes,
             lean_command=lean_command,
             audit_runner=gen_runner,
             paper_text=paper_text,
+            telemetry=telemetry,
         )
     else:
         chunk_number = 1
     accepted_labels, accepted_imports, accepted_signatures = _accepted_state(accepted_chunks)
-    repair_trials = 0
     # Audit rejections per blueprint label. Survives chunk renumbering so a
     # regeneration of the same node after a (possibly no-op) blueprint repair
     # still sees what the auditor rejected last time.
@@ -2337,6 +3047,17 @@ def main(argv: list[str] | None = None) -> int:
     # decompose). The ONLY hard stop is exhausting --max-trials blueprint
     # repairs; there is never a human-intervention exit.
     decomposition_tried: set[str] = set()
+    emitted_node_features: set[tuple[str, str]] = set()
+    routing_hints = _load_routing_hints(args.name)
+    forced_singletons = routing_hints["forced_singletons"]
+    timeout_hard_overrides = routing_hints["timeout_hard_overrides"]
+    if forced_singletons or timeout_hard_overrides:
+        print(
+            "==> loaded routing hints: "
+            f"{len(forced_singletons)} forced singleton(s), "
+            f"{len(timeout_hard_overrides)} hard-timeout override(s)",
+            flush=True,
+        )
 
     while True:
         print(
@@ -2351,12 +3072,25 @@ def main(argv: list[str] | None = None) -> int:
             report_lines.extend(f"- {error}" for error in validation.errors)
             report = _write_report(args.name, report_lines)
             print(f"Report written to {report.relative_to(REPO_ROOT)}")
-            return 1
+            return finish(1, "blueprint_validation_failed")
 
         blueprint_source = _read_blueprint_source(args.name)
+        blueprint_artifact = telemetry.store_text("blueprint", blueprint_source, ext="tex")
+        telemetry.record(
+            "blueprint_snapshot",
+            chunk_number=chunk_number,
+            validation_ok=True,
+            node_count=len(validation.nodes),
+            blueprint=blueprint_artifact.to_event(REPO_ROOT),
+        )
         current_fingerprints = _node_fingerprints(validation.nodes)
         accepted_labels, accepted_imports, accepted_signatures = _accepted_state(accepted_chunks)
-        target_labels = _next_chunk(validation.nodes, accepted_labels, chunk_size=chunk_size)
+        target_labels = _next_chunk(
+            validation.nodes,
+            accepted_labels,
+            chunk_size=chunk_size,
+            force_singletons=forced_singletons,
+        )
         if not target_labels:
             assembled = _standalone_accepted_code(accepted_chunks)
             final_path = SCRATCH_DIR / args.name / "assembled_formalization.lean"
@@ -2372,7 +3106,7 @@ def main(argv: list[str] | None = None) -> int:
                 report = _write_report(args.name, report_lines)
                 print("Final assembled Lean file did not compile.")
                 print(f"Report written to {report.relative_to(REPO_ROOT)}")
-                return 1
+                return finish(1, "final_lean_failed")
             published = _publish_lean_text(args.name, assembled)
             site_lean = _rebuild_site_for(args.name)
             report_lines.append("## Complete")
@@ -2383,7 +3117,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"All chunks passed. Published Lean saved to {published.relative_to(REPO_ROOT)}")
             print(f"Site rebuilt; Lean viewer available at {site_lean.relative_to(REPO_ROOT)}")
             print(f"Report written to {report.relative_to(REPO_ROOT)}")
-            return 0
+            return finish(0, "complete", accepted_chunks=chunk_number - 1)
 
         print(
             "==> Next dependency-closed chunk: "
@@ -2394,21 +3128,77 @@ def main(argv: list[str] | None = None) -> int:
         )
         difficulty_summary = _chunk_difficulty_summary(validation.nodes, target_labels)
         print(f"  scheduler difficulty: {difficulty_summary}", flush=True)
+        chunk_model_timeout = (
+            args.hard_timeout
+            if _chunk_has_hard_node(validation.nodes, target_labels)
+            or bool(set(target_labels) & timeout_hard_overrides)
+            else args.timeout
+        )
+        decision_id = f"{telemetry.run_id}:chunk:{chunk_number}"
+        if chunk_model_timeout != args.timeout:
+            print(
+                f"  model-call timeout for this hard chunk: {chunk_model_timeout}s "
+                f"(base {args.timeout}s)",
+                flush=True,
+            )
         library_context, library_candidates = _search_local_lean_libraries(
             args.name,
             validation.nodes,
             blueprint_source,
             term_runner=gen_runner,
         )
+        library_artifact = telemetry.store_text("library_candidates", library_context, ext="txt")
+        telemetry.record(
+            "library_candidates",
+            decision_id=decision_id,
+            chunk_number=chunk_number,
+            labels=target_labels,
+            candidate_count=len(library_candidates),
+            artifact=library_artifact.to_event(REPO_ROOT),
+        )
         report_lines.append(f"- local library candidates: `{len(library_candidates)}`")
         report_lines.append(f"## Chunk {chunk_number}")
         report_lines.append(f"- target nodes: `{', '.join(target_labels)}`")
         report_lines.append(f"- scheduler difficulty: `{difficulty_summary}`")
+        report_lines.append(f"- model-call timeout for this chunk: `{chunk_model_timeout}s`")
+        blocks_for_features = _node_tex_blocks({label: validation.nodes[label] for label in target_labels})
+        for label in target_labels:
+            feature_key = (label, current_fingerprints[label])
+            if feature_key in emitted_node_features:
+                continue
+            emitted_node_features.add(feature_key)
+            telemetry.record(
+                "node_features",
+                **node_structural_features(
+                    label,
+                    validation.nodes[label].kind,
+                    blocks_for_features.get(label, ""),
+                    len(validation.nodes[label].uses),
+                ),
+            )
+        telemetry.record(
+            "decision_point",
+            decision_id=decision_id,
+            kind="pre_lean_generation",
+            chunk_number=chunk_number,
+            target_labels=target_labels,
+            accepted_before=len(accepted_labels),
+            remaining_before=len(validation.nodes) - len(accepted_labels),
+            scheduler_difficulty=difficulty_summary,
+            model_timeout_s=chunk_model_timeout,
+            available_actions=[
+                "direct_lean_generation",
+                "needs_decomposition",
+                "blueprint_repair_after_failure",
+            ],
+            chosen_action="direct_lean_generation",
+        )
         critic_output = ""
         last_attempt_kind = "lean-generation"
         last_chunk_code = ""
         last_rejected_labels: set[str] = set()
         refusal_payload: dict | None = None
+        replan_without_repair = False
         for lean_try in range(1, LEAN_GENERATION_RETRIES + 1):
             print(
                 f"==> Chunk {chunk_number}, Lean attempt "
@@ -2421,26 +3211,49 @@ def main(argv: list[str] | None = None) -> int:
                 for snippet in rejection_history.get(label, [])[-2:]:
                     if snippet not in history_snippets:
                         history_snippets.append(snippet)
+            lean_prompt = _chunk_lean_prompt(
+                args.name,
+                blueprint_source,
+                validation.nodes,
+                target_labels,
+                accepted_labels,
+                "\n\n".join(accepted_signatures),
+                accepted_imports,
+                library_context=library_context,
+                previous_lean_error=critic_output if last_attempt_kind == "lean-generation" else "",
+                previous_chunk_code=last_chunk_code if last_attempt_kind == "lean-generation" else "",
+                audit_history="\n\n".join(history_snippets),
+                unavailable_imports=sorted(unavailable_imports),
+                model_timeout_s=chunk_model_timeout,
+            )
+            prompt_artifact = telemetry.store_text("prompt_lean_generation", lean_prompt)
+            model_call_started = time.monotonic()
             try:
-                lean_result = gen_runner.run(
-                    _chunk_lean_prompt(
-                        args.name,
-                        blueprint_source,
-                        validation.nodes,
-                        target_labels,
-                        accepted_labels,
-                        "\n\n".join(accepted_signatures),
-                        accepted_imports,
-                        library_context=library_context,
-                        previous_lean_error=critic_output if last_attempt_kind == "lean-generation" else "",
-                        previous_chunk_code=last_chunk_code if last_attempt_kind == "lean-generation" else "",
-                        audit_history="\n\n".join(history_snippets),
-                        unavailable_imports=sorted(unavailable_imports),
-                    ),
-                    cwd=REPO_ROOT,
-                    retries=0,
-                )
+                with _runner_timeout(gen_runner, chunk_model_timeout):
+                    lean_result = gen_runner.run(
+                        lean_prompt,
+                        cwd=REPO_ROOT,
+                        retries=0,
+                    )
             except RunnerError as exc:
+                timed_out = _is_timeout_error(exc)
+                telemetry.record(
+                    "model_call",
+                    purpose="lean_generation",
+                    decision_id=decision_id,
+                    chunk_number=chunk_number,
+                    attempt=lean_try,
+                    labels=target_labels,
+                    status="error",
+                    duration_s=time.monotonic() - model_call_started,
+                    timeout_s=chunk_model_timeout,
+                    backend=gen_runner.backend_name,
+                    model=gen_runner.model,
+                    readonly=gen_runner.readonly,
+                    prompt=prompt_artifact.to_event(REPO_ROOT),
+                    error=str(exc),
+                    environment_error=is_environment_error(exc),
+                )
                 report_lines.append(f"- Lean attempt {lean_try}: model call failed before Lean was generated")
                 report_lines.append("")
                 report_lines.append("```text")
@@ -2457,7 +3270,105 @@ def main(argv: list[str] | None = None) -> int:
                     report = _write_report(args.name, report_lines)
                     print(f"Environment error stopped the run: {exc}", flush=True)
                     print(f"Report written to {report.relative_to(REPO_ROOT)}")
-                    return 1
+                    return finish(1, "environment_error", error=str(exc))
+                if timed_out and len(target_labels) > 1:
+                    forced_singletons.update(target_labels)
+                    timeout_hard_overrides.update(target_labels)
+                    _write_routing_hints(
+                        args.name,
+                        forced_singletons=forced_singletons,
+                        timeout_hard_overrides=timeout_hard_overrides,
+                    )
+                    critic_output = (
+                        "The Lean-generation model timed out before returning code for a "
+                        "multi-node chunk. Replan the same blueprint frontier as singleton "
+                        "chunks and use the hard-node timeout for these labels:\n- "
+                        + "\n- ".join(target_labels)
+                    )
+                    telemetry.record(
+                        "decision_outcome",
+                        decision_id=decision_id,
+                        outcome="timeout_replan_singletons",
+                        labels=target_labels,
+                        attempt=lean_try,
+                        timeout_s=chunk_model_timeout,
+                    )
+                    report_lines.append(
+                        "- model timed out before generating Lean; replanning this batch "
+                        "as singleton hard-timeout chunks instead of retrying the same call"
+                    )
+                    print(
+                        "  model timed out before returning Lean; replanning this batch "
+                        "as singleton hard-timeout chunks",
+                        flush=True,
+                    )
+                    replan_without_repair = True
+                    break
+                if timed_out and chunk_model_timeout < args.hard_timeout:
+                    timeout_hard_overrides.update(target_labels)
+                    _write_routing_hints(
+                        args.name,
+                        forced_singletons=forced_singletons,
+                        timeout_hard_overrides=timeout_hard_overrides,
+                    )
+                    telemetry.record(
+                        "decision_outcome",
+                        decision_id=decision_id,
+                        outcome="timeout_reclassify_hard",
+                        labels=target_labels,
+                        attempt=lean_try,
+                        timeout_s=chunk_model_timeout,
+                        next_timeout_s=args.hard_timeout,
+                    )
+                    report_lines.append(
+                        "- singleton model call timed out at the base timeout; "
+                        "reclassifying this node as hard and retrying with the hard timeout"
+                    )
+                    print(
+                        "  singleton model call timed out at the base timeout; "
+                        "reclassifying as hard and retrying with hard timeout",
+                        flush=True,
+                    )
+                    replan_without_repair = True
+                    break
+                if timed_out:
+                    timeout_hard_overrides.update(target_labels)
+                    _write_routing_hints(
+                        args.name,
+                        forced_singletons=forced_singletons,
+                        timeout_hard_overrides=timeout_hard_overrides,
+                    )
+                    critic_output = (
+                        "The Lean-generation model timed out before returning code for "
+                        "the current singleton chunk even with the hard-node timeout. "
+                        "Treat this as evidence that the blueprint node may be too large "
+                        "or underspecified for faithful 1-1 formalization as a single "
+                        "declaration, and repair by decomposing it into smaller blueprint "
+                        "nodes.\n\nTimed-out labels:\n- "
+                        + "\n- ".join(target_labels)
+                    )
+                    last_attempt_kind = "blueprint"
+                    last_rejected_labels = set(target_labels)
+                    refusal_payload = {
+                        "missing_helpers": [
+                            "split the timed-out node into smaller explicit formalization helper nodes"
+                        ],
+                        "reason": "Lean-generation model call timed out before producing code with the hard-node timeout.",
+                    }
+                    telemetry.record(
+                        "decision_outcome",
+                        decision_id=decision_id,
+                        outcome="timeout_decomposition",
+                        labels=target_labels,
+                        attempt=lean_try,
+                        timeout_s=chunk_model_timeout,
+                    )
+                    print(
+                        "  model timed out before returning Lean for a singleton chunk "
+                        "with the hard-node timeout; routing to blueprint decomposition",
+                        flush=True,
+                    )
+                    break
                 # Anything else (post-retry transient, malformed reply) is
                 # handled in-loop: count it as a failed attempt and continue.
                 print(
@@ -2467,9 +3378,42 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 time.sleep(15)
                 continue
+            response_artifact = telemetry.store_text("response_lean_generation", lean_result.text)
+            telemetry.record(
+                "model_call",
+                purpose="lean_generation",
+                decision_id=decision_id,
+                chunk_number=chunk_number,
+                attempt=lean_try,
+                labels=target_labels,
+                status="success",
+                duration_s=lean_result.duration_s,
+                timeout_s=chunk_model_timeout,
+                backend=lean_result.backend,
+                model=lean_result.model,
+                readonly=gen_runner.readonly,
+                prompt=prompt_artifact.to_event(REPO_ROOT),
+                response=response_artifact.to_event(REPO_ROOT),
+            )
             refusal = _parse_decomposition_refusal(lean_result.text)
             if refusal is not None:
                 refused = [refusal["label"]] if refusal["label"] in target_labels else list(target_labels)
+                telemetry.record(
+                    "decomposition_requested",
+                    decision_id=decision_id,
+                    chunk_number=chunk_number,
+                    labels=refused,
+                    source="model_refusal",
+                    missing_helpers=refusal["missing_helpers"],
+                    reason=refusal["reason"],
+                )
+                telemetry.record(
+                    "decision_outcome",
+                    decision_id=decision_id,
+                    outcome="needs_decomposition",
+                    source="model_refusal",
+                    labels=refused,
+                )
                 print(
                     f"  generation refused: node(s) {', '.join(refused)} not formalizable "
                     "as stated; routing to blueprint decomposition",
@@ -2527,6 +3471,7 @@ def main(argv: list[str] | None = None) -> int:
             lean_path.write_text(lean_code, encoding="utf-8")
             scratch_attempt = trial_dir / f"chunk_{chunk_number:02d}_attempt_{lean_try:02d}.lean"
             scratch_attempt.write_text(lean_code, encoding="utf-8")
+            lean_artifact = telemetry.store_text("lean_attempt", lean_code, ext="lean")
             print(
                 f"  wrote {lean_path.relative_to(REPO_ROOT)} "
                 f"({len(lean_code.splitlines())} lines, model took {lean_result.duration_s:.0f}s)",
@@ -2556,10 +3501,45 @@ def main(argv: list[str] | None = None) -> int:
                 report_lines.append(critic_output[-4000:])
                 report_lines.append("```")
                 report_lines.append("")
+                telemetry.record(
+                    "lean_attempt",
+                    decision_id=decision_id,
+                    chunk_number=chunk_number,
+                    attempt=lean_try,
+                    labels=target_labels,
+                    status="precheck_failed",
+                    lean=lean_artifact.to_event(REPO_ROOT),
+                    lean_lines=len(lean_code.splitlines()),
+                    imports=new_imports,
+                    issues=precheck_issues,
+                )
                 continue
 
             print(f"==> Chunk {chunk_number}: running Lean", flush=True)
+            lean_started = time.monotonic()
             attempt = _run_lean(lean_path, lean_command)
+            lean_duration = time.monotonic() - lean_started
+            lean_output_artifact = (
+                telemetry.store_text("lean_output", attempt.output, ext="txt")
+                if attempt.output
+                else None
+            )
+            telemetry.record(
+                "lean_attempt",
+                decision_id=decision_id,
+                chunk_number=chunk_number,
+                attempt=lean_try,
+                labels=target_labels,
+                status="compile_passed" if attempt.ok else "compile_failed",
+                routed_kind=attempt.kind,
+                duration_s=lean_duration,
+                lean=lean_artifact.to_event(REPO_ROOT),
+                lean_lines=len(lean_code.splitlines()),
+                imports=new_imports,
+                command=attempt.command,
+                output_sha256=hashlib.sha256(attempt.output.encode("utf-8")).hexdigest(),
+                output=lean_output_artifact.to_event(REPO_ROOT) if lean_output_artifact else None,
+            )
             report_lines.append(f"- Lean attempt {lean_try}: `{scratch_attempt.relative_to(REPO_ROOT)}`")
 
             if attempt.ok:
@@ -2571,6 +3551,8 @@ def main(argv: list[str] | None = None) -> int:
                     lean_path,
                     paper_text,
                     all_nodes=validation.nodes,
+                    telemetry=telemetry,
+                    chunk_number=chunk_number,
                 )
                 if audit_failure is not None:
                     attempt = audit_failure
@@ -2630,6 +3612,8 @@ def main(argv: list[str] | None = None) -> int:
                                         lean_path,
                                         paper_text,
                                         all_nodes=validation.nodes,
+                                        telemetry=telemetry,
+                                        chunk_number=chunk_number,
                                     )
                                 if subset_lean.ok and subset_audit is None:
                                     object_attempt = _compile_module_olean(module_path, lean_command)
@@ -2659,6 +3643,15 @@ def main(argv: list[str] | None = None) -> int:
                                             "  kept independent subset; rejected/downstream nodes "
                                             "will be repaired/regenerated",
                                             flush=True,
+                                        )
+                                        telemetry.record(
+                                            "partial_subset_kept",
+                                            decision_id=decision_id,
+                                            chunk_number=chunk_number,
+                                            kept_labels=keep_labels,
+                                            rejected_labels=sorted(rejected_in_chunk),
+                                            accepted_after=len(accepted_labels),
+                                            lean=pruned_attempt_path.relative_to(REPO_ROOT),
                                         )
                                         report_lines.append(
                                             "  - kept independent passing subset: "
@@ -2724,6 +3717,30 @@ def main(argv: list[str] | None = None) -> int:
                     f"of {len(validation.nodes)} blueprint nodes.",
                     flush=True,
                 )
+                telemetry.record(
+                    "decision_outcome",
+                    decision_id=decision_id,
+                    outcome="accepted",
+                    accepted_labels=target_labels,
+                    accepted_after=len(accepted_labels),
+                    attempts=lean_try,
+                )
+                forced_singletons.difference_update(target_labels)
+                timeout_hard_overrides.difference_update(target_labels)
+                _write_routing_hints(
+                    args.name,
+                    forced_singletons=forced_singletons,
+                    timeout_hard_overrides=timeout_hard_overrides,
+                )
+                telemetry.record(
+                    "chunk_end",
+                    decision_id=decision_id,
+                    chunk_number=chunk_number,
+                    labels=target_labels,
+                    status="accepted",
+                    accepted_after=len(accepted_labels),
+                    attempts=lean_try,
+                )
                 chunk_number += 1
                 break
 
@@ -2746,6 +3763,10 @@ def main(argv: list[str] | None = None) -> int:
             if attempt.kind != "lean-generation":
                 break
 
+        if replan_without_repair:
+            chunk_number += 1
+            continue
+
         if set(target_labels) <= accepted_labels:
             continue
 
@@ -2760,6 +3781,13 @@ def main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
             report_lines.append("- generation retries exhausted; escalated to blueprint repair")
+            telemetry.record(
+                "decision_outcome",
+                decision_id=decision_id,
+                outcome="generation_retries_exhausted",
+                labels=target_labels,
+                attempts=LEAN_GENERATION_RETRIES,
+            )
 
         stuck_labels = sorted(last_rejected_labels or set(target_labels))
         if repair_trials >= args.max_trials:
@@ -2781,31 +3809,137 @@ def main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
             if runner.mode == "agent":
-                repair = runner.run(
-                    _agent_refine_prompt(
-                        args.name,
-                        blueprint_source,
-                        critic_output,
-                        repair_trials,
-                        paper_text,
-                        escalation_note=escalation_note,
-                    ),
-                    cwd=REPO_ROOT,
-                    retries=0,
+                repair_prompt = _agent_refine_prompt(
+                    args.name,
+                    blueprint_source,
+                    critic_output,
+                    repair_trials,
+                    paper_text,
+                    escalation_note=escalation_note,
+                    model_timeout_s=chunk_model_timeout,
+                )
+                repair_prompt_artifact = telemetry.store_text("prompt_blueprint_repair", repair_prompt)
+                repair_started = time.monotonic()
+                try:
+                    with _runner_timeout(runner, chunk_model_timeout):
+                        repair = runner.run(
+                            repair_prompt,
+                            cwd=REPO_ROOT,
+                            retries=0,
+                        )
+                except RunnerError as exc:
+                    telemetry.record(
+                        "model_call",
+                        purpose="blueprint_repair",
+                        decision_id=decision_id,
+                        chunk_number=chunk_number,
+                        repair_trial=repair_trials,
+                        labels=stuck_labels,
+                        status="error",
+                        duration_s=time.monotonic() - repair_started,
+                        timeout_s=chunk_model_timeout,
+                        backend=runner.backend_name,
+                        model=runner.model,
+                        readonly=runner.readonly,
+                        prompt=repair_prompt_artifact.to_event(REPO_ROOT),
+                        error=str(exc),
+                        environment_error=is_environment_error(exc),
+                    )
+                    report_lines.append("## Blueprint repair model call failed")
+                    report_lines.append("")
+                    report_lines.append("```text")
+                    report_lines.append(str(exc)[-4000:])
+                    report_lines.append("```")
+                    report = _write_report(args.name, report_lines)
+                    print(f"Blueprint repair model call failed: {exc}", flush=True)
+                    print(f"Report written to {report.relative_to(REPO_ROOT)}")
+                    status = "environment_error" if is_environment_error(exc) else "blueprint_repair_model_failed"
+                    return finish(1, status, error=str(exc))
+                repair_response_artifact = telemetry.store_text("response_blueprint_repair", repair.text)
+                telemetry.record(
+                    "model_call",
+                    purpose="blueprint_repair",
+                    decision_id=decision_id,
+                    chunk_number=chunk_number,
+                    repair_trial=repair_trials,
+                    labels=stuck_labels,
+                    status="success",
+                    duration_s=repair.duration_s,
+                    timeout_s=chunk_model_timeout,
+                    backend=repair.backend,
+                    model=repair.model,
+                    readonly=runner.readonly,
+                    prompt=repair_prompt_artifact.to_event(REPO_ROOT),
+                    response=repair_response_artifact.to_event(REPO_ROOT),
+                    elapsed_s=time.monotonic() - repair_started,
+                    escalation_note=bool(escalation_note),
                 )
                 print(f"  blueprint repair finished ({repair.duration_s:.0f}s)", flush=True)
             else:
-                refine_result = runner.run(
-                    _api_refine_prompt(
-                        args.name,
-                        blueprint_source,
-                        critic_output,
-                        repair_trials,
-                        paper_text,
-                        escalation_note=escalation_note,
-                    ),
-                    cwd=REPO_ROOT,
-                    retries=1,
+                repair_prompt = _api_refine_prompt(
+                    args.name,
+                    blueprint_source,
+                    critic_output,
+                    repair_trials,
+                    paper_text,
+                    escalation_note=escalation_note,
+                    model_timeout_s=chunk_model_timeout,
+                )
+                repair_prompt_artifact = telemetry.store_text("prompt_blueprint_repair", repair_prompt)
+                repair_started = time.monotonic()
+                try:
+                    with _runner_timeout(runner, chunk_model_timeout):
+                        refine_result = runner.run(
+                            repair_prompt,
+                            cwd=REPO_ROOT,
+                            retries=1,
+                        )
+                except RunnerError as exc:
+                    telemetry.record(
+                        "model_call",
+                        purpose="blueprint_repair",
+                        decision_id=decision_id,
+                        chunk_number=chunk_number,
+                        repair_trial=repair_trials,
+                        labels=stuck_labels,
+                        status="error",
+                        duration_s=time.monotonic() - repair_started,
+                        timeout_s=chunk_model_timeout,
+                        backend=runner.backend_name,
+                        model=runner.model,
+                        readonly=runner.readonly,
+                        prompt=repair_prompt_artifact.to_event(REPO_ROOT),
+                        error=str(exc),
+                        environment_error=is_environment_error(exc),
+                    )
+                    report_lines.append("## Blueprint repair model call failed")
+                    report_lines.append("")
+                    report_lines.append("```text")
+                    report_lines.append(str(exc)[-4000:])
+                    report_lines.append("```")
+                    report = _write_report(args.name, report_lines)
+                    print(f"Blueprint repair model call failed: {exc}", flush=True)
+                    print(f"Report written to {report.relative_to(REPO_ROOT)}")
+                    status = "environment_error" if is_environment_error(exc) else "blueprint_repair_model_failed"
+                    return finish(1, status, error=str(exc))
+                repair_response_artifact = telemetry.store_text("response_blueprint_repair", refine_result.text)
+                telemetry.record(
+                    "model_call",
+                    purpose="blueprint_repair",
+                    decision_id=decision_id,
+                    chunk_number=chunk_number,
+                    repair_trial=repair_trials,
+                    labels=stuck_labels,
+                    status="success",
+                    duration_s=refine_result.duration_s,
+                    timeout_s=chunk_model_timeout,
+                    backend=refine_result.backend,
+                    model=refine_result.model,
+                    readonly=runner.readonly,
+                    prompt=repair_prompt_artifact.to_event(REPO_ROOT),
+                    response=repair_response_artifact.to_event(REPO_ROOT),
+                    elapsed_s=time.monotonic() - repair_started,
+                    escalation_note=bool(escalation_note),
                 )
                 try:
                     _write_api_refinement(args.name, refine_result.text)
@@ -2820,7 +3954,7 @@ def main(argv: list[str] | None = None) -> int:
                     report = _write_report(args.name, report_lines)
                     print(f"API blueprint repair failed: {exc}", flush=True)
                     print(f"Report written to {report.relative_to(REPO_ROOT)}")
-                    return 1
+                    return finish(1, "api_repair_invalid_json", error=str(exc))
 
             repaired_validation = validate_blueprint(REPO_ROOT, args.name)
             if not repaired_validation.ok:
@@ -2829,7 +3963,7 @@ def main(argv: list[str] | None = None) -> int:
                 report_lines.extend(f"- {error}" for error in repaired_validation.errors)
                 report = _write_report(args.name, report_lines)
                 print(f"Report written to {report.relative_to(REPO_ROOT)}")
-                return 1
+                return finish(1, "repair_validation_failed")
 
             repaired_fingerprints = _node_fingerprints(repaired_validation.nodes)
             changed = {
@@ -2838,6 +3972,17 @@ def main(argv: list[str] | None = None) -> int:
                 if repaired_fingerprints.get(label) != before
             }
             changed |= {label for label in repaired_fingerprints if label not in current_fingerprints}
+            telemetry.record(
+                "blueprint_repair_result",
+                decision_id=decision_id,
+                chunk_number=chunk_number,
+                repair_trial=repair_trials,
+                labels=stuck_labels,
+                changed_labels=sorted(changed),
+                changed_count=len(changed),
+                validation_ok=True,
+                escalation_note=bool(escalation_note),
+            )
             if changed or repair_trials >= args.max_trials:
                 break
             # No-op repair ladder: plain -> explicit escalation -> forced
@@ -2851,6 +3996,14 @@ def main(argv: list[str] | None = None) -> int:
                     flush=True,
                 )
                 report_lines.append("- blueprint repair was a no-op; escalated with explicit instructions")
+                telemetry.record(
+                    "repair_escalation",
+                    decision_id=decision_id,
+                    chunk_number=chunk_number,
+                    repair_trial=repair_trials,
+                    labels=stuck_labels,
+                    mode="explicit_instructions",
+                )
                 escalation_note = (
                     "Your previous repair attempt changed NOTHING in the parsed node text — "
                     "the validator found zero modified nodes, so the audit will reject the "
@@ -2869,6 +4022,14 @@ def main(argv: list[str] | None = None) -> int:
                     flush=True,
                 )
                 report_lines.append("- repair no-op after escalation; forced decomposition mode")
+                telemetry.record(
+                    "repair_escalation",
+                    decision_id=decision_id,
+                    chunk_number=chunk_number,
+                    repair_trial=repair_trials,
+                    labels=stuck_labels,
+                    mode="forced_decomposition",
+                )
                 escalation_note = _decomposition_note(stuck_labels)
                 continue
             # Every repair strategy no-oped this round. Refinement continues
@@ -2881,6 +4042,14 @@ def main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
             report_lines.append("- repairs no-oped; regenerating with accumulated audit feedback")
+            telemetry.record(
+                "repair_escalation",
+                decision_id=decision_id,
+                chunk_number=chunk_number,
+                repair_trial=repair_trials,
+                labels=stuck_labels,
+                mode="regenerate_with_audit_history",
+            )
             break
 
         invalidated = _dependency_descendants(repaired_validation.nodes, changed) if changed else set()
@@ -2912,9 +4081,26 @@ def main(argv: list[str] | None = None) -> int:
                 f"- blueprint repair changed `{len(changed)}` node(s), invalidated "
                 f"`{len(invalidated)}` downstream node(s), dropped `{dropped}` accepted chunk(s)"
             )
+            telemetry.record(
+                "blueprint_repair_applied",
+                decision_id=decision_id,
+                chunk_number=chunk_number,
+                labels=stuck_labels,
+                changed_labels=sorted(changed),
+                invalidated_labels=sorted(invalidated),
+                dropped_chunks=dropped,
+                accepted_chunks_kept=len(accepted_chunks),
+            )
         else:
             print("  blueprint repair did not change parsed node text; keeping accepted chunks", flush=True)
             report_lines.append("- blueprint repair did not change parsed node text; kept accepted chunks")
+            telemetry.record(
+                "blueprint_repair_noop",
+                decision_id=decision_id,
+                chunk_number=chunk_number,
+                labels=stuck_labels,
+                accepted_chunks_kept=len(accepted_chunks),
+            )
         # The failed chunk's module file was never accepted; remove it so a
         # later --continue does not re-check it and discard accepted work.
         failed_module_path = _chunk_module(args.name, chunk_number)[1]
@@ -2930,7 +4116,7 @@ def main(argv: list[str] | None = None) -> int:
     report = _write_report(args.name, report_lines)
     print(f"Lean did not pass after {args.max_trials} trial(s).")
     print(f"Report written to {report.relative_to(REPO_ROOT)}")
-    return 1
+    return finish(1, "max_trials_exhausted")
 
 
 def logged_main(argv: list[str] | None = None) -> int:

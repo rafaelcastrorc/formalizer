@@ -291,7 +291,9 @@ uv run python scripts/refine_blueprint_with_lean.py my-paper \
   --paper /Users/rafaelcastro/Downloads/pseudo-rand-gen.pdf \
   --runner codex \
   --reasoning-effort high \
-  --max-trials 3
+  --max-trials 3 \
+  --timeout 300 \
+  --hard-timeout 600
 ```
 
 This loop is intentionally different from “ask the model to hack Lean until it
@@ -300,13 +302,16 @@ passes.”
 ```mermaid
 flowchart TD
     A["Existing blueprint"] --> B["Validate blueprint structure"]
-    B --> P["Automatically choose next dependency-closed chunk from uses graph"]
+    B --> BP["Pre-refinement decomposition pass for structurally suspicious nodes"]
+    BP -->|Blueprint changed| B
+    BP -->|No change / skipped| P["Automatically choose next dependency-closed chunk from uses graph"]
     P -->|No chunks left| Z["Assemble final formalization.lean"]
     Z --> ZC["Run final Lean check"]
     ZC --> L["Publish formalization.lean"]
     B --> S["Search local Lean libraries for this blueprint version"]
     P --> C["Read-only model generates Lean for this chunk only"]
     S --> C
+    C -->|Needs smaller blueprint helpers| J
     C --> D["Run lake env lean on accepted module imports plus chunk"]
     D -->|Lean compile fails from bad Lean encoding| E["Retry Lean generation for same chunk"]
     E --> C
@@ -329,7 +334,17 @@ flowchart TD
     M --> N["Website links each node to its Lean declaration"]
 ```
 
-Each chunk loop does this:
+Before chunking starts, the script runs a bounded pre-refinement decomposition
+pass unless `--no-pre-decompose` is set. The deterministic prepass selects a
+small number of unresolved nodes with formalization-risk signals such as long
+proofs, several displayed equations, finite sums/products, reindexing language,
+or many equation-like steps. A model may then edit the blueprint to split those
+nodes into smaller helper definitions/lemmas. If it changes the blueprint, that
+change is validated and counted as one blueprint-repair trial; Lean generation
+then starts from the updated blueprint. This does not create a side plan: the
+blueprint source is still what Lean must implement one-to-one.
+
+Each chunk loop then does this:
 
 1. validate the current blueprint structure;
 2. automatically choose the next dependency-closed chunk from the `\uses{...}`
@@ -338,7 +353,12 @@ Each chunk loop does this:
 4. make a read-only model call that sees the whole dependency graph, the target
    node source, relevant unresolved dependency source, accepted Lean signatures,
    local library candidates with declaration snippets, and a small Lean idiom
-   sheet, then ask it to generate Lean only for the target chunk;
+   sheet, then ask it to generate Lean only for the target chunk. If the model
+   determines that a target node cannot be formalized faithfully as one public
+   Lean declaration from the current blueprint text, it may return
+   `NEEDS-DECOMPOSITION: {...}` instead of weakened Lean; that is routed to
+   blueprint repair so the node can be split into explicit helper nodes by the
+   refinement loop;
 5. save accepted chunks as temporary Lean modules and run `lake env lean` on
    imports of those modules plus the new chunk;
 6. if Lean compiles, run correctness and statement-alignment audits for the
@@ -346,8 +366,9 @@ Each chunk loop does this:
 7. if Lean/audit fails because the blueprint is concrete but the Lean
    translation is bad, retry Lean generation for the same chunk;
 8. if Lean/audit fails because the blueprint is missing
-   mathematical content, is too abstract, or lets Lean erase the intended
-   behavior, make a second model call with the blueprint plus the critic output;
+   mathematical content, is too abstract, lets Lean erase the intended
+   behavior, or the Lean generator explicitly requests decomposition, make a
+   second model call with the blueprint plus the critic output;
 9. require that second call to edit the blueprint, not the Lean file;
 10. when a statement audit rejects only part of a chunk, compute the rejected
     nodes' downstream closure inside that chunk; if unrelated nodes remain,
@@ -360,6 +381,14 @@ Each chunk loop does this:
     next chunk;
 13. when all chunks pass, assemble a standalone `formalization.lean`, run a
     final Lean check, and publish it.
+
+Blueprint decomposition is part of refinement, not a manual preprocessing step.
+The checked-in blueprint should not be hand-edited just to pre-split one
+paper's hard node. When a node looks too large before Lean generation, the
+pre-refinement pass may split it first. When that was not enough, or when a
+node only becomes obviously underspecified after generated Lean/audit feedback,
+the normal repair path can still split it later from the Lean/audit failure or
+`NEEDS-DECOMPOSITION` response.
 
 So a blueprint-content failure has two model phases:
 
@@ -381,6 +410,12 @@ failure text explicitly included in that prompt. This means a later call can
 repeat a modeling mistake if the previous repair did not make the missing
 requirement concrete in the blueprint. The system handles that by rejecting the
 weak Lean again and forcing another blueprint repair.
+
+If a blueprint repair produces no parsed node-text changes, the run no longer
+keeps blindly spending the same repair shape forever. It first escalates with
+explicit instructions, then forces decomposition mode for the stuck node(s), and
+if those repair strategies still no-op, it regenerates with the accumulated
+audit history until the `--max-trials` budget is exhausted.
 
 Lean and audit errors are therefore still used to repair the blueprint. Chunking
 only changes the size of the Lean obligation; the blueprint remains the source
@@ -426,6 +461,29 @@ paths as already verified instead of reopening Mathlib to check them. If
 deterministic search finds too little, the read-only model proposes extra search
 terms, then deterministic search runs again. The resulting candidate list is
 reused for every Lean-generation retry in that chunk.
+
+`--timeout` is the base wall-clock budget for each non-deterministic model
+call made by the refinement loop. It is not a whole-run timeout and it does not
+control deterministic Lean compilation checks, which have their own fixed
+timeouts. The default is 300 seconds so ordinary chunks cannot silently spend
+10-20 minutes in a single model call. `--hard-timeout` is the per-call budget
+used when the scheduler classifies the current target chunk as hard; it must be
+at least `--timeout` and defaults to 600 seconds. The Web UI exposes both
+fields in the **Refine with Lean** tab. If a model call hits its budget, the
+runner reports a timeout and the refinement loop handles that as a failed model
+attempt or, when appropriate, escalates to blueprint repair/decomposition.
+Timeouts before any Lean code is returned are handled specially because retrying
+the same oversized prompt usually just wastes another full timeout window. If a
+multi-node chunk times out, the scheduler immediately replans those labels as
+singleton chunks and uses the hard-node timeout for them. If a singleton chunk
+times out at the base timeout, the scheduler first reclassifies that node as
+hard and retries it with `--hard-timeout`. Only if a singleton chunk times out
+again with the hard-node timeout does the run treat that as evidence that the
+blueprint node may be too large or underspecified to formalize faithfully as one
+declaration and route it to blueprint decomposition. Timeout routing hints are
+stored under `.auto-blueprint/formalization/<name>/routing_hints.json`, so a
+later `--continue` run does not have to rediscover the same timeout pattern from
+scratch.
 
 Lean-generation failures are handled differently. If the generated Lean fails
 because of syntax, bad imports, implicit-argument problems, missing explicit
@@ -547,9 +605,138 @@ and the previous `report.md`. Timestamped `run-*.log` files are kept. This keeps
 old failed implementations from becoming accidental context for agent-mode
 model calls while preserving the logs needed for debugging.
 
-If the read-only model call times out or fails before producing Lean, the run
-stops without changing the blueprint and writes a fresh `report.md` for that
-same run. That prevents an old report from looking like the current failure.
+Transient model/backend failures such as overloads, connection resets, and
+502/503/504-style errors are retried automatically. Environment failures such
+as quota limits, invalid API keys, or a missing CLI stop the run without
+changing the blueprint; rerun with `--continue` after fixing the environment.
+Other model-call failures before Lean is produced are treated as failed Lean
+generation attempts and kept inside the bounded refinement loop. In all cases,
+the run writes a fresh `report.md` so an old report cannot look like the
+current failure.
+
+Failed chunk files that were never accepted are removed before moving on, so a
+later `--continue` does not re-check stale failed Lean and discard unrelated
+accepted work.
+
+### Telemetry for classifier training
+
+Every Lean-refinement run records append-only telemetry under:
+
+```text
+.auto-blueprint/telemetry/
+```
+
+This directory is ignored by Git. It is local scratch data, so local storage is
+free except for disk space. Shared storage is not magically free; it depends on
+the collector you configure. Cloudflare R2/KV/D1 or another object/database
+backend can be used, but the repository only assumes an HTTP collector endpoint.
+
+The telemetry is raw observation data, not guessed labels. It stores:
+
+- run configuration, command, blueprint name, and Git commit;
+- blueprint snapshots after validation;
+- node structural features such as node kind, dependency count, text length,
+  proof length, displayed-math count, equation-like token count, finite
+  sum/product counts, quantifier counts, reindexing/induction/continuity
+  mentions, matrix mentions, construction mentions, and asymptotic/runtime
+  mentions;
+- pre-refinement decomposition candidates, heuristic reasons, model
+  prompt/response artifacts, changed nodes, node counts before/after, and
+  whether the candidate actually changed in the repaired blueprint;
+- local Lean-library candidate lists shown to the model;
+- every expensive model call prompt/response artifact, purpose, timeout,
+  backend, duration, status, and error if it failed;
+- Lean attempt source, Lean output, compile status, imports, and duration;
+- statement-audit outcomes, rejected labels, and routing classification;
+- blueprint-repair outcomes, changed nodes, invalidated downstream nodes, and
+  kept/dropped accepted chunks.
+
+The point is to let a later training pipeline derive labels from observed
+outcomes. For example, a classifier can learn from “this decision later accepted
+within budget,” “this node requested decomposition,” “this model call timed
+out,” or “this repair changed zero parsed nodes.” The collection code does not
+invent confidence values.
+
+The first classifiers this data is meant to support are:
+
+- **pre-decomposition classifier**: given an original blueprint node, predict
+  whether it should be split before Lean generation;
+- **scheduler classifier**: given ready dependency-frontier nodes, predict
+  whether to batch, isolate, or use the hard timeout;
+- **Lean-vs-blueprint failure classifier**: given generated Lean and error/audit
+  output, predict whether to retry Lean generation or repair the blueprint;
+- **library-candidate ranker**: given a node and local library search results,
+  rank the declarations/modules most likely to help;
+- **timeout/runtime regressor**: estimate expected model-call duration so the
+  run can avoid calls likely to exceed the configured budget.
+
+To aggregate everyone’s runs automatically, deploy the checked-in Cloudflare
+Worker collector once:
+
+```bash
+cd telemetry-worker
+npx wrangler r2 bucket create auto-blueprint-telemetry
+npx wrangler secret put TELEMETRY_TOKEN
+npx wrangler deploy
+```
+
+Use a long shared secret when `wrangler secret put TELEMETRY_TOKEN` prompts for
+the value. The deployed collector URL will look like:
+
+```text
+https://auto-blueprint-telemetry.<your-workers-subdomain>.workers.dev/telemetry
+```
+
+Then each contributor sets these environment variables before running the Web
+UI or CLI:
+
+```bash
+export AUTO_BLUEPRINT_TELEMETRY_URL="https://auto-blueprint-telemetry.<your-workers-subdomain>.workers.dev/telemetry"
+export AUTO_BLUEPRINT_TELEMETRY_TOKEN="<same shared secret>"
+export AUTO_BLUEPRINT_TELEMETRY_PROJECT="auto-blueprint"
+```
+
+They must start Auto-Blueprint from that same terminal, for example:
+
+```bash
+uv run python scripts/webui.py
+```
+
+The collector receives one JSON object per POST. Event uploads have:
+
+```json
+{"kind":"event","payload":{ "...": "..." }}
+```
+
+Artifact uploads have:
+
+```json
+{"kind":"artifact","artifact_kind":"prompt_lean_generation","sha256":"...","content_b64":"..."}
+```
+
+Uploads are best-effort and never fail refinement. The client flushes the queue
+after key events such as model calls, Lean attempts, statement audits, repairs,
+and run end, so shared data usually arrives during a long run rather than only
+at the end. If the collector is down, queue files stay under
+`.auto-blueprint/telemetry/upload_queue/`; successful uploads are renamed with
+`.uploaded` rather than deleted, so the local data is still available. Set
+`AUTO_BLUEPRINT_TELEMETRY=0` to disable collection for a run.
+
+To flatten local telemetry into inspectable JSONL datasets:
+
+```bash
+uv run python scripts/build_classifier_dataset.py
+```
+
+That writes:
+
+```text
+.auto-blueprint/telemetry/datasets/decision_examples.jsonl
+.auto-blueprint/telemetry/datasets/model_call_examples.jsonl
+.auto-blueprint/telemetry/datasets/node_feature_examples.jsonl
+.auto-blueprint/telemetry/datasets/repair_examples.jsonl
+.auto-blueprint/telemetry/datasets/pre_decomposition_examples.jsonl
+```
 
 If Lean passes, the passing attempt is promoted out of scratch space and saved
 as:

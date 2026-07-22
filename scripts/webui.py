@@ -497,10 +497,18 @@ def common_runner_args(p: dict) -> list[str]:
         args += ["--reasoning-effort", effort]
     timeout = str(p.get("timeout") or "").strip()
     if timeout:
-        if not timeout.isdigit():
-            raise ValueError("timeout must be a number of seconds")
+        if not timeout.isdigit() or int(timeout) < 1:
+            raise ValueError("timeout must be a positive number of seconds")
         args += ["--timeout", timeout]
     return args
+
+
+def positive_int_field(p: dict, key: str, label: str) -> str:
+    value = str(p.get(key) or "").strip()
+    if value:
+        if not value.isdigit() or int(value) < 1:
+            raise ValueError(f"{label} must be a positive number of seconds")
+    return value
 
 
 def build_command(action: str, p: dict) -> list[str]:
@@ -534,6 +542,12 @@ def build_command(action: str, p: dict) -> list[str]:
             raise ValueError("pick a blueprint to refine")
         cmd = [py, str(SCRIPTS / "refine_blueprint_with_lean.py"), name]
         cmd += common_runner_args(p)
+        hard_timeout = positive_int_field(p, "hard_timeout", "hard-node timeout")
+        if hard_timeout:
+            base_timeout = int(str(p.get("timeout") or "300").strip() or "300")
+            if int(hard_timeout) < base_timeout:
+                raise ValueError("hard-node timeout must be at least the base timeout")
+            cmd += ["--hard-timeout", hard_timeout]
         trials = str(p.get("max_trials") or "3").strip()
         if not trials.isdigit() or int(trials) < 1:
             raise ValueError("max trials must be a positive number")
@@ -790,6 +804,17 @@ PAGE = r"""<!doctype html>
                  color: var(--muted); font-size: 11.5px; }
   .stage.running .pill { color: var(--accent); border-color: var(--accent); }
   .stage.done .pill { color: var(--ok); border-color: var(--ok); }
+  .progress { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px;
+              margin-bottom: 12px; }
+  @media (max-width: 900px) { .progress { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .metric { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+            background: var(--bg); min-width: 0; }
+  .metric .label { color: var(--muted); font-size: 11.5px; white-space: nowrap;
+                   overflow: hidden; text-overflow: ellipsis; }
+  .metric .value { margin-top: 2px; font-size: 18px; line-height: 1.15;
+                   font-weight: 650; font-variant-numeric: tabular-nums; }
+  .metric .sub { color: var(--muted); font-size: 11.5px; min-height: 16px;
+                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #log { background: var(--log-bg); color: var(--log-text); border-radius: 10px;
          padding: 14px; height: 430px; overflow: auto; white-space: pre-wrap;
          word-break: break-word; font: 12px/1.55 ui-monospace, "SF Mono", Menlo, monospace; }
@@ -830,6 +855,7 @@ PAGE = r"""<!doctype html>
   <div class="panel">
     <h2 style="display:flex"><span>Log</span>
       <span style="margin-left:auto;font-weight:normal;color:var(--muted);font-size:12px" id="cmdline"></span></h2>
+    <div id="progress" class="progress"></div>
     <div id="stages" class="stages"><div class="stage"><span class="name">No running job</span><span class="time">0s</span><span class="pill">idle</span></div></div>
     <div id="log"></div>
   </div>
@@ -848,6 +874,7 @@ let jobWasRunning = false;
 let stageRows = [];
 let currentStage = null;
 let fallbackStageSecond = 0;
+let progress = {};
 
 function el(id){ return document.getElementById(id); }
 function esc(s){ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
@@ -869,6 +896,95 @@ function logSecond(line, jobElapsed){
 
 function stripLogPrefix(line){
   return line.replace(/^\[\+\d+s\]\s*/, '');
+}
+
+function resetProgress(){
+  progress = {};
+  renderProgress();
+}
+
+function metric(label, value, sub=''){
+  return `<div class="metric">
+    <div class="label">${esc(label)}</div>
+    <div class="value">${esc(value)}</div>
+    <div class="sub">${esc(sub)}</div>
+  </div>`;
+}
+
+function renderProgress(){
+  const box = el('progress');
+  if (!box) return;
+  if (!(progress && progress.visible)) {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  box.style.display = 'grid';
+  const total = Number.isFinite(progress.totalNodes) ? progress.totalNodes : null;
+  const proven = Number.isFinite(progress.acceptedNodes) ? progress.acceptedNodes : null;
+  const remaining = Number.isFinite(progress.remainingNodes)
+    ? progress.remainingNodes
+    : (total != null && proven != null ? Math.max(total - proven, 0) : null);
+  const trialsUsed = Number.isFinite(progress.repairTrialsUsed) ? progress.repairTrialsUsed : null;
+  const trialsMax = Number.isFinite(progress.repairTrialsMax) ? progress.repairTrialsMax : null;
+  const trialsLeft = trialsUsed != null && trialsMax != null ? Math.max(trialsMax - trialsUsed, 0) : null;
+  const provenSub = total != null && proven != null ? `${Math.round((proven / Math.max(total, 1)) * 100)}%` : '';
+  box.innerHTML = [
+    metric('Blueprint nodes', total == null ? '—' : String(total), progress.currentChunk ? `chunk ${progress.currentChunk}` : ''),
+    metric('Proven so far', proven == null ? '—' : String(proven), provenSub),
+    metric('Nodes remaining', remaining == null ? '—' : String(remaining), total == null ? '' : `of ${total}`),
+    metric('Repair trials left', trialsLeft == null ? '—' : String(trialsLeft),
+      trialsUsed == null || trialsMax == null ? '' : `${trialsUsed}/${trialsMax} used`),
+  ].join('');
+}
+
+function ingestProgressLines(lines){
+  let changed = false;
+  for (const raw of lines || []){
+    const line = stripLogPrefix(raw);
+    let m;
+    if (line.includes('refine_blueprint_with_lean.py')) {
+      progress.visible = true;
+      changed = true;
+    }
+    if ((m = line.match(/validate [^:]+: ok \((\d+) node\(s\)\)/))){
+      progress.totalNodes = Number(m[1]);
+      changed = true;
+    }
+    if ((m = line.match(/blueprint repairs used (\d+)\/(\d+)/))){
+      progress.repairTrialsUsed = Number(m[1]);
+      progress.repairTrialsMax = Number(m[2]);
+      changed = true;
+    }
+    if ((m = line.match(/resumed with (\d+) accepted blueprint node\(s\)/))){
+      progress.acceptedNodes = Number(m[1]);
+      changed = true;
+    }
+    if ((m = line.match(/\((\d+) accepted,\s+(\d+) remaining including this chunk\)/))){
+      progress.acceptedNodes = Number(m[1]);
+      progress.remainingNodes = Number(m[2]);
+      progress.totalNodes = progress.acceptedNodes + progress.remainingNodes;
+      changed = true;
+    }
+    if ((m = line.match(/Chunk (\d+) passed; accepted (\d+) of (\d+) blueprint nodes/))){
+      progress.currentChunk = Number(m[1]);
+      progress.acceptedNodes = Number(m[2]);
+      progress.totalNodes = Number(m[3]);
+      progress.remainingNodes = Math.max(progress.totalNodes - progress.acceptedNodes, 0);
+      changed = true;
+    } else if ((m = line.match(/==> Chunk (\d+):/))){
+      progress.currentChunk = Number(m[1]);
+      changed = true;
+    }
+    if (line.includes('All chunks passed')){
+      if (Number.isFinite(progress.totalNodes)) {
+        progress.acceptedNodes = progress.totalNodes;
+        progress.remainingNodes = 0;
+      }
+      changed = true;
+    }
+  }
+  if (changed) renderProgress();
 }
 
 function stageFromLine(line){
@@ -895,6 +1011,7 @@ function resetStages(){
   stageRows = [];
   currentStage = null;
   fallbackStageSecond = 0;
+  resetProgress();
   renderStages({status:'idle', elapsed:0});
 }
 
@@ -933,10 +1050,19 @@ function renderStages(job){
   box.scrollTop = box.scrollHeight;
 }
 
-function runnerFields(){
+renderProgress();
+
+function runnerFields(baseTimeout='3600', includeHard=false){
   const opts = state.backends.map(b=>`<option ${b==='claude-code'?'selected':''}>${b}</option>`).join('');
   const effs = ['<option value="">(default)</option>']
     .concat(state.efforts.map(e=>`<option>${e}</option>`)).join('');
+  const hard = includeHard ? `
+    <div class="row">
+      <div><label>Hard-node model-call timeout (seconds)</label>
+        <input type="number" id="f_hard_timeout" value="600" min="1"></div>
+      <div><label>Timeout behavior</label>
+        <div class="hint">Base applies to every model call; hard chunks may use the longer value.</div></div>
+    </div>` : '';
   return `
     <div class="row">
       <div><label>Runner</label>
@@ -947,9 +1073,9 @@ function runnerFields(){
     <div class="row">
       <div><label>Reasoning effort (codex only)</label>
         <select id="f_effort" disabled>${effs}</select></div>
-      <div><label>Timeout (seconds)</label>
-        <input type="number" id="f_timeout" value="3600"></div>
-    </div>`;
+      <div><label>Base model-call timeout (seconds)</label>
+        <input type="number" id="f_timeout" value="${baseTimeout}" min="1"></div>
+    </div>${hard}`;
 }
 
 function paperField(required){
@@ -976,7 +1102,7 @@ const FORMS = {
     ${paperField(true)}
     <label>Blueprint name (optional — the model picks one if empty)</label>
     <input type="text" id="f_name" placeholder="my-paper">
-    ${runnerFields()}
+    ${runnerFields('3600')}
     <div class="check"><input type="checkbox" id="f_force"><label for="f_force">Force (replace existing folder)</label></div>
     <div class="check"><input type="checkbox" id="f_nobuild"><label for="f_nobuild">Validate only, skip site build</label></div>`,
   refine: () => `
@@ -987,9 +1113,9 @@ const FORMS = {
     <div class="leanbox" id="leanStatus">Lean setup not checked.
       <br><button type="button" onclick="checkLean()">Check Lean setup</button>
     </div>
-    <div class="check"><input type="checkbox" id="f_continue"><label for="f_continue">Continue from accepted generated chunks</label></div>
+    <div class="check"><input type="checkbox" id="f_continue" checked><label for="f_continue">Continue from accepted generated chunks</label></div>
     ${paperField(false)}
-    ${runnerFields()}
+    ${runnerFields('300', true)}
     <label>Lean command override (optional)</label>
     <input type="text" id="f_leancmd" placeholder="lake env lean">`,
   validate: () => `
@@ -1005,7 +1131,7 @@ function renderTabs(){
   el('tabs').innerHTML = TABS.map(t=>
     `<button class="${t.id===active?'active':''}" onclick="setTab('${t.id}')">${t.label}</button>`).join('');
 }
-function setTab(id){ active = id; renderTabs(); renderForm(); }
+function setTab(id){ active = id; renderTabs(); renderForm(); renderProgress(); }
 
 function renderForm(){
   el('form').innerHTML = FORMS[active]();
@@ -1050,6 +1176,7 @@ function params(){
     runner_backend: v('f_backend'), runner_model: v('f_model'),
     reasoning_effort: el('f_effort') && !el('f_effort').disabled ? v('f_effort') : '',
     timeout: v('f_timeout'),
+    hard_timeout: v('f_hard_timeout'),
   };
   if (active === 'generate')
     return {action:'generate', paper:v('f_paper'), name:v('f_name'),
@@ -1065,6 +1192,11 @@ function params(){
 
 async function run(){
   el('error').textContent = '';
+  resetProgress();
+  if (active === 'refine') {
+    progress.visible = true;
+    renderProgress();
+  }
   const r = await fetch('/api/run', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify(params())});
   const j = await r.json();
@@ -1122,6 +1254,7 @@ async function poll(){
       log.textContent += j.lines.join('\n') + '\n';
       offset = j.total;
       ingestStageLines(j.lines, j);
+      ingestProgressLines(j.lines);
       if (atBottom) log.scrollTop = log.scrollHeight;
     }
     const running = j.status === 'running';

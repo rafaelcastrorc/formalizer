@@ -116,6 +116,13 @@ The refinement loop now has a deterministic scheduler heuristic that classifies
 ready blueprint nodes as `easy`, `medium`, or `hard` before forming a
 dependency-closed chunk. This is intentionally simple and should be improved.
 
+There is also a pre-refinement decomposition pass. Before the first Lean chunk,
+it logs structurally suspicious unresolved nodes, asks the model whether those
+nodes should be split into helper blueprint nodes, validates any resulting
+blueprint edit, and records the before/after outcome. This is intentionally
+bounded and still keeps the blueprint as the source of truth: if decomposition
+happens, it happens in `content.tex` before Lean generation.
+
 Current scoring signals:
 
 - node kind:
@@ -124,14 +131,37 @@ Current scoring signals:
   - definition adds no weight by itself;
 - number of explicit `\uses{...}` dependencies;
 - source-block length;
+- proof length;
+- displayed-math and equation-like token counts;
+- finite sum/product counts;
+- reindexing, induction, continuity, construction, matrix, and asymptotic
+  language;
 - hard-keyword hits such as `reduction`, `hardness`, `runtime`, `transfer`,
   `approximation`, `tensor`, `SETH`, and `OVC`.
 
 Current behavior:
 
+- before chunking, a bounded prepass may ask the model to decompose the most
+  suspicious unresolved nodes;
 - `hard` nodes are isolated as singleton chunks;
 - a small number of `medium` nodes may be batched;
 - `easy` nodes may batch up to the internal chunk limit.
+
+Telemetry now records data for these classifier families:
+
+- pre-decomposition: candidate features/reasons, whether the prepass changed
+  the blueprint, which labels changed, and node counts before/after;
+- scheduling/runtime: chosen chunk, difficulty summary, timeout used, prompt
+  size, model duration, timeout/error status, and final chunk outcome;
+- Lean-vs-blueprint failure: generated Lean, Lean/audit output, rejected labels,
+  retry/repair/decomposition routing, and downstream invalidation;
+- library ranking: local candidate declaration snippets, target labels, model
+  duration, Lean success/failure, and audit result.
+
+`scripts/build_classifier_dataset.py` flattens this into JSONL tables including
+`pre_decomposition_examples.jsonl`, `decision_examples.jsonl`,
+`model_call_examples.jsonl`, `node_feature_examples.jsonl`, and
+`repair_examples.jsonl`.
 
 Open questions/improvements:
 
