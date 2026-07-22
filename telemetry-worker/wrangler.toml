@@ -1,0 +1,10 @@
+name = "auto-blueprint-telemetry"
+main = "src/index.js"
+compatibility_date = "2026-07-21"
+
+[[r2_buckets]]
+binding = "TELEMETRY_BUCKET"
+bucket_name = "auto-blueprint-telemetry"
+
+[secrets]
+required = ["TELEMETRY_TOKEN"]
