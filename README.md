@@ -282,9 +282,76 @@ It checks:
 Validation is not mathematical proof checking. It is a structural safety and
 quality gate for generated blueprints.
 
-## Lean-Guided Refinement
+## Lean Formalization (statements-first, recommended)
 
-After a blueprint exists, you can run the author/critic loop:
+After a blueprint exists, the recommended way to formalize it is the
+statements-first pipeline:
+
+```bash
+uv run python scripts/formalize_blueprint.py my-paper \
+  --paper /path/to/paper.pdf \
+  --runner codex \
+  --workers 3
+```
+
+The blueprint is still the only source of truth and Lean is still the critic;
+this pipeline changes *when* model calls happen and how much each one does, so
+a 150-node paper takes tens of model calls instead of hundreds:
+
+1. **Phase 1 — skeleton.** Batched calls generate one Lean declaration per
+   blueprint node, ~24 nodes per call, in dependency order: real bodies for
+   definition nodes, `:= sorry` proofs for theorem-like nodes. Each section is
+   compiled locally, compile errors are fixed in batched rounds, and the
+   statement-alignment audit (deterministic coverage checks plus one batched
+   model audit per section) runs on the statements **before** any proof effort
+   is spent. Accepted statements are frozen: later phases can only replace
+   `sorry` bodies — the harness splices proofs into the frozen file itself, so
+   a model cannot silently reshape a statement.
+2. **Phase 2 — proofs.** For every frozen `sorry`, a deterministic tactic
+   ladder (`rfl`/`omega`/`norm_num`/`ring`/`simp`/`aesop`) runs first at zero
+   model cost; survivors are filled by batched model calls
+   (`--proof-batch-size`, default 12 proofs per call) running in parallel
+   across sections (`--workers`); the residue escalates to singleton calls at
+   `--escalation-effort` (default `high`). Sections are independent once
+   statements are frozen, so proof order does not matter.
+3. **Repair — evidence only.** A timed-out model call is treated as latency,
+   never as mathematical difficulty: batches are bisected and singletons are
+   retried at higher effort. Only real Lean/audit output, an explicit
+   `NEEDS-DECOMPOSITION` refusal, or a statement that cannot even be *stated*
+   within two full escalated budgets can trigger a blueprint repair (bounded
+   by `--max-trials`, default 8). Repairs invalidate downstream nodes by
+   **statement** fingerprint, so proof-prose edits never discard accepted
+   work, and the invalidated declarations are pruned out of frozen sections
+   deterministically.
+
+The published contract is unchanged: `formalization.lean` contains no
+`sorry`, passes the strict correctness audit, is recompiled from scratch as a
+final gate, and every declaration corresponds 1-1 to a blueprint node.
+`sorry` exists only inside the internal scratch skeleton under
+`AutoBlueprint/Generated/<Name>/SkeletonNN.lean`, which is never published.
+
+Every dependency contract is still enforced: a node whose blueprint entry
+`\uses{...}` another node must visibly use that node's generated Lean name.
+For definitions this is checked when the statement freezes; for theorem-like
+nodes it is checked as soon as the proof exists, and a proof that re-derives a
+dependency inline is rejected.
+
+Useful flags: `--section-size` (statements per Phase-1 call, default 24),
+`--proof-batch-size` (proofs per Phase-2 call, default 12), `--workers`
+(parallel proof workers, default 3), `--reasoning-effort` (codex effort for
+batched calls, default `medium`), `--escalation-effort` (default `high`),
+`--timeout`/`--hard-timeout` (per-call budgets, defaults 300/600 s),
+`--no-ladder`, `--no-build`, and `--continue`. `--continue` reloads
+`skeleton_state.json`, keeps every section whose file hash and blueprint
+statement fingerprints still match (cascading invalidation through blueprint
+descendants), and resumes from the first stale node.
+
+The Web UI **Refine with Lean** tab runs this pipeline by default; uncheck
+"Fast statements-first pipeline" to fall back to the legacy loop below.
+
+## Legacy Lean-Guided Refinement (per-chunk loop)
+
+The original per-chunk author/critic loop is still available:
 
 ```bash
 uv run python scripts/refine_blueprint_with_lean.py my-paper \
@@ -295,6 +362,12 @@ uv run python scripts/refine_blueprint_with_lean.py my-paper \
   --timeout 300 \
   --hard-timeout 600
 ```
+
+It generates and audits one dependency-closed chunk (usually one node) per
+model call, sequentially. It is significantly slower and more call-hungry than
+the statements-first pipeline and routes model-call timeouts into blueprint
+decomposition; prefer `scripts/formalize_blueprint.py` unless you specifically
+want the old behavior.
 
 This loop is intentionally different from “ask the model to hack Lean until it
 passes.”
