@@ -323,6 +323,7 @@ def _recorded_job_matches(pid: int) -> bool:
         return False
     markers = (
         "scripts/refine_blueprint_with_lean.py",
+        "scripts/formalize_blueprint.py",
         "scripts/generate_blueprint.py",
         "scripts/setup_lean.py",
         "scripts/validate_blueprint.py",
@@ -392,6 +393,7 @@ def _stale_pipeline_process_groups() -> dict[int, str]:
         recorded_job_pgid = 0
     markers = (
         "scripts/refine_blueprint_with_lean.py",
+        "scripts/formalize_blueprint.py",
         "scripts/generate_blueprint.py",
     )
     for line in proc.stdout.splitlines()[1:]:
@@ -540,8 +542,16 @@ def build_command(action: str, p: dict) -> list[str]:
         name = (p.get("name") or "").strip()
         if not name:
             raise ValueError("pick a blueprint to refine")
-        cmd = [py, str(SCRIPTS / "refine_blueprint_with_lean.py"), name]
+        fast = bool(p.get("fast", True))
+        script = "formalize_blueprint.py" if fast else "refine_blueprint_with_lean.py"
+        cmd = [py, str(SCRIPTS / script), name]
         cmd += common_runner_args(p)
+        if fast:
+            workers = str(p.get("workers") or "").strip()
+            if workers:
+                if not workers.isdigit() or int(workers) < 1:
+                    raise ValueError("workers must be a positive number")
+                cmd += ["--workers", workers]
         hard_timeout = positive_int_field(p, "hard_timeout", "hard-node timeout")
         if hard_timeout:
             base_timeout = int(str(p.get("timeout") or "300").strip() or "300")
@@ -943,7 +953,7 @@ function ingestProgressLines(lines){
   for (const raw of lines || []){
     const line = stripLogPrefix(raw);
     let m;
-    if (line.includes('refine_blueprint_with_lean.py')) {
+    if (line.includes('refine_blueprint_with_lean.py') || line.includes('formalize_blueprint.py')) {
       progress.visible = true;
       changed = true;
     }
@@ -1108,8 +1118,11 @@ const FORMS = {
   refine: () => `
     <label>Blueprint</label>
     <select id="f_name">${bpSelect()}</select>
+    <div class="check"><input type="checkbox" id="f_fast" checked><label for="f_fast">Fast statements-first pipeline (recommended; uncheck for the legacy per-chunk loop)</label></div>
+    <label>Parallel proof workers (fast pipeline only)</label>
+    <input type="number" id="f_workers" value="3" min="1">
     <label>Max blueprint-repair trials</label>
-    <input type="number" id="f_trials" value="3" min="1">
+    <input type="number" id="f_trials" value="8" min="1">
     <div class="leanbox" id="leanStatus">Lean setup not checked.
       <br><button type="button" onclick="checkLean()">Check Lean setup</button>
     </div>
@@ -1184,7 +1197,8 @@ function params(){
   if (active === 'refine')
     return {action:'refine', name:v('f_name'), max_trials:v('f_trials'),
             paper:v('f_paper'), lean_command:v('f_leancmd'),
-            continue_run:c('f_continue'), ...common};
+            continue_run:c('f_continue'), fast:c('f_fast'), workers:v('f_workers'),
+            ...common};
   const names = [...document.querySelectorAll('.bpcheck:checked')].map(n=>n.value);
   if (active === 'validate') return {action:'validate', names};
   return {action:'build', names, strict:c('f_strict')};
