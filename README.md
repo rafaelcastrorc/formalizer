@@ -711,16 +711,39 @@ The collector receives one JSON object per POST. Event uploads have:
 Artifact uploads have:
 
 ```json
-{"kind":"artifact","artifact_kind":"prompt_lean_generation","sha256":"...","content_b64":"..."}
+{"kind":"artifact","project":"auto-blueprint","blueprint":"subquadratic-transformers","run_id":"...","artifact_kind":"prompt_lean_generation","sha256":"...","content_b64":"..."}
 ```
 
-Uploads are best-effort and never fail refinement. The client flushes the queue
-after key events such as model calls, Lean attempts, statement audits, repairs,
-and run end, so shared data usually arrives during a long run rather than only
-at the end. If the collector is down, queue files stay under
+Uploads are best-effort and never fail refinement. The client queues bounded
+JSON envelopes only; large prompt/response artifacts are split into uploadable
+chunks before they enter the queue. The client flushes after key events such as
+model calls, Lean attempts, statement audits, repairs, and run end, so shared
+data usually arrives during a long run rather than only at the end. If the
+collector/network/token is temporarily wrong, queue files stay under
 `.auto-blueprint/telemetry/upload_queue/`; successful uploads are renamed with
-`.uploaded` rather than deleted, so the local data is still available. Set
-`AUTO_BLUEPRINT_TELEMETRY=0` to disable collection for a run.
+`.uploaded` rather than deleted, so the local data is still available.
+
+To inspect or drain the queue explicitly:
+
+```bash
+uv run python scripts/telemetry.py doctor --show-target
+uv run python scripts/telemetry.py flush --max-items 1000
+```
+
+If the collector/schema was fixed after some files were already uploaded, replay
+the local `.uploaded` envelopes through the current normalizer:
+
+```bash
+uv run python scripts/telemetry.py reupload --include-uploaded --max-items 2000
+```
+
+Successful replays get a sibling `.reuploaded` marker. This makes the command
+resumable and prevents accidentally duplicating the same local telemetry on
+every run; pass `--force` only when intentionally replaying again.
+
+Both commands use the same `AUTO_BLUEPRINT_TELEMETRY_URL` and
+`AUTO_BLUEPRINT_TELEMETRY_TOKEN` environment variables as the refinement run.
+Set `AUTO_BLUEPRINT_TELEMETRY=0` to disable collection for a run.
 
 To flatten local telemetry into inspectable JSONL datasets:
 

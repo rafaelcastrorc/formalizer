@@ -9,22 +9,32 @@ function jsonResponse(body, status = 200) {
   });
 }
 
+function stringField(value, fallback) {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function scalarField(value, fallback) {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return fallback;
+}
+
 function safeSegment(value, fallback = "unknown") {
-  const raw = String(value || fallback).trim();
+  const raw = scalarField(value, fallback);
   const safe = raw.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
   return (safe || fallback).slice(0, 120);
 }
 
 function payloadProject(payload) {
-  return payload.project || payload.payload?.project || "auto-blueprint";
+  return stringField(payload.project, stringField(payload.payload?.project, "auto-blueprint"));
 }
 
 function payloadBlueprint(payload) {
-  return payload.blueprint || payload.payload?.blueprint || "unknown-blueprint";
+  return stringField(payload.blueprint, stringField(payload.payload?.blueprint, ""));
 }
 
 function payloadRunId(payload) {
-  return payload.run_id || payload.payload?.run_id || "unknown-run";
+  return stringField(payload.run_id, stringField(payload.payload?.run_id, ""));
 }
 
 export default {
@@ -76,8 +86,16 @@ export default {
     const now = new Date();
     const date = now.toISOString().slice(0, 10);
     const project = safeSegment(payloadProject(payload));
-    const blueprint = safeSegment(payloadBlueprint(payload));
-    const runId = safeSegment(payloadRunId(payload));
+    const rawBlueprint = payloadBlueprint(payload);
+    const rawRunId = payloadRunId(payload);
+    if (!rawBlueprint) {
+      return jsonResponse({ error: "missing_blueprint" }, 400);
+    }
+    if (!rawRunId) {
+      return jsonResponse({ error: "missing_run_id" }, 400);
+    }
+    const blueprint = safeSegment(rawBlueprint);
+    const runId = safeSegment(rawRunId);
     const seq = safeSegment(payload.payload?.seq ?? payload.sha256 ?? crypto.randomUUID(), "item");
     const key = `raw/${project}/${blueprint}/${date}/${runId}/${seq}-${kind}-${crypto.randomUUID()}.json`;
 

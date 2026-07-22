@@ -3081,7 +3081,7 @@ def main(argv: list[str] | None = None) -> int:
             chunk_number=chunk_number,
             validation_ok=True,
             node_count=len(validation.nodes),
-            blueprint=blueprint_artifact.to_event(REPO_ROOT),
+            blueprint_artifact=blueprint_artifact.to_event(REPO_ROOT),
         )
         current_fingerprints = _node_fingerprints(validation.nodes)
         accepted_labels, accepted_imports, accepted_signatures = _accepted_state(accepted_chunks)
