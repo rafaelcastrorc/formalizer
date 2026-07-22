@@ -36,6 +36,62 @@ def _which_or_app(name: str, app_path: Path) -> str | None:
     return None
 
 
+def list_codex_model_ids(*, timeout: int = 5) -> list[str]:
+    """Return model slugs from the local Codex CLI catalog, if available."""
+    exe = _which_or_app("codex", CODEX_APP_CLI)
+    if not exe:
+        return []
+    try:
+        proc = subprocess.run(
+            [exe, "debug", "models"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    payload = None
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+            break
+        except json.JSONDecodeError:
+            continue
+    if not isinstance(payload, dict):
+        return []
+    slugs = [
+        item.get("slug")
+        for item in payload.get("models", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("slug"), str)
+        and item.get("visibility") != "hidden"
+    ]
+    return [slug for slug in slugs if slug]
+
+
+def choose_codex_base_model(models: list[str]) -> str:
+    """Pick the cheaper/lighter Codex model from the local catalog."""
+    usable = [model for model in models if "review" not in model.lower()]
+    for model in usable:
+        if "mini" in model.lower():
+            return model
+    return usable[-1] if usable else ""
+
+
+def choose_codex_escalation_model(models: list[str]) -> str:
+    """Pick the strongest Codex model from the local catalog."""
+    for model in models:
+        low = model.lower()
+        if "mini" not in low and "review" not in low:
+            return model
+    return choose_codex_base_model(models)
+
+
 def _describe_tool_use(name: str, tool_input: dict) -> str:
     """One-line summary of an agent tool call for status output."""
     if name == "Bash":

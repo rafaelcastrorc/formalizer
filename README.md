@@ -302,11 +302,14 @@ a 150-node paper takes tens of model calls instead of hundreds:
    blueprint node, ~24 nodes per call, in dependency order: real bodies for
    definition nodes, `:= sorry` proofs for theorem-like nodes. Each section is
    compiled locally, compile errors are fixed in batched rounds, and the
-   statement-alignment audit (deterministic coverage checks plus one batched
-   model audit per section) runs on the statements **before** any proof effort
-   is spent. Accepted statements are frozen: later phases can only replace
-   `sorry` bodies — the harness splices proofs into the frozen file itself, so
-   a model cannot silently reshape a statement.
+   blueprint-contract audit (deterministic coverage checks plus one batched
+   model audit per section) runs on the statements and proof obligations
+   **before** any proof effort is spent. If deterministic checks isolate only a
+   few bad declarations inside an otherwise useful section, Phase 1 asks for
+   replacements for those declarations only, then recompiles and audits the
+   whole section again. Accepted statements are frozen: later phases can only
+   replace `sorry` bodies — the harness splices proofs into the frozen file
+   itself, so a model cannot silently reshape a statement.
 2. **Phase 2 — proofs.** For every frozen `sorry`, a deterministic tactic
    ladder (`rfl`/`omega`/`norm_num`/`ring`/`simp`/`aesop`) runs first at zero
    model cost; survivors are filled by batched model calls
@@ -315,13 +318,26 @@ a 150-node paper takes tens of model calls instead of hundreds:
    `--escalation-effort` (default `high`). Sections are independent once
    statements are frozen, so proof order does not matter.
 3. **Repair — evidence only.** A timed-out model call is treated as latency,
-   never as mathematical difficulty: batches are bisected and singletons are
-   retried at higher effort. Only real Lean/audit output, an explicit
+   never as mathematical difficulty: batches are bisected, targeted declaration
+   patches are used for small skeleton failures, and singletons are retried at
+   higher effort. A base-model skeleton `NEEDS-DECOMPOSITION` response is
+   treated as a generator claim, not immediate repair evidence: Phase 1 first
+   retries the same section through the escalation runner, allowing complete
+   local helper declarations when needed. Blueprint repair calls whose target
+   still contains multiple labels are also split on timeout instead of treating
+   latency as mathematical evidence. Only real Lean/audit output, an escalated
    `NEEDS-DECOMPOSITION` refusal, or a statement that cannot even be *stated*
    within two full escalated budgets can trigger a blueprint repair (bounded
-   by `--max-trials`, default 8). Repairs invalidate downstream nodes by
-   **statement** fingerprint, so proof-prose edits never discard accepted
-   work, and the invalidated declarations are pruned out of frozen sections
+   by `--max-trials`, default 8). If the same Phase-1 section keeps returning
+   to repair after ordinary skeleton fixes, the pipeline performs one
+   constrained section-normalization pass: the escalation runner may rewrite
+   only that stuck section plus immediate helper nodes, the result is validated,
+   and it is rejected/rolled back if it changes too many node contracts. If the
+   section still churns after normalization, the run stops with a report rather
+   than spending the whole trial budget. Repairs invalidate downstream nodes by
+   the full per-node blueprint contract, including the proof sketch, so
+   accepted Lean is rechecked when the blueprint proof it is supposed to
+   certify changes. Invalidated declarations are pruned out of frozen sections
    deterministically.
 
 The published contract is unchanged: `formalization.lean` contains no
@@ -338,16 +354,82 @@ dependency inline is rejected.
 
 Useful flags: `--section-size` (statements per Phase-1 call, default 24),
 `--proof-batch-size` (proofs per Phase-2 call, default 12), `--workers`
-(parallel proof workers, default 3), `--reasoning-effort` (codex effort for
-batched calls, default `medium`), `--escalation-effort` (default `high`),
+(parallel proof workers, default 3), `--runner` (base runner/model for batched
+calls; when omitted, the CLI uses the same cheap-API-first preset as the Web
+UI), `--reasoning-effort` (codex effort for batched calls, default `medium`),
+`--escalation-runner` (runner/model for singleton retries and blueprint repair;
+when `--runner` is explicitly set, the CLI default is the same runner, otherwise
+it uses the stronger half of the auto preset),
+`--escalation-effort` (codex effort for escalation calls, default `high`),
 `--timeout`/`--hard-timeout` (per-call budgets, defaults 300/600 s),
-`--no-ladder`, `--no-build`, and `--continue`. `--continue` reloads
-`skeleton_state.json`, keeps every section whose file hash and blueprint
-statement fingerprints still match (cascading invalidation through blueprint
-descendants), and resumes from the first stale node.
+`--no-ladder`, `--no-build`, and `--continue`. For non-Codex runners,
+`--reasoning-effort`/`--escalation-effort` do not change model strength; use
+different `--runner` and `--escalation-runner` model specs instead.
+`--continue` reloads
+`skeleton_state.json`, keeps every section whose file hash, blueprint statement
+fingerprints, and full proof-contract fingerprints still match (cascading
+invalidation through blueprint descendants), and resumes from the first stale
+node.
 
-The Web UI **Refine with Lean** tab runs this pipeline by default; uncheck
-"Fast statements-first pipeline" to fall back to the legacy loop below.
+The Web UI **Refine with Lean** tab runs this pipeline by default. Its preset
+is intentionally two-tiered:
+
+- If `OPENAI_API_KEY` is set, the UI/CLI calls OpenAI's `GET /v1/models`,
+  fills the dropdown from the returned model IDs, and chooses a base model from
+  the live list using cheap-tier class markers such as `mini`/`nano`; escalation
+  is chosen from non-`mini`/`nano` text models in the same live list.
+- Else, if `ANTHROPIC_API_KEY` is set, the UI/CLI calls Anthropic's
+  `GET /v1/models`, fills the dropdown from the returned model IDs, chooses a
+  `haiku`-class base model when available, and chooses a non-`haiku`
+  `sonnet`/`opus`-class escalation model when available.
+- Else, it falls back to local Codex by reading `codex debug models`, filling
+  the dropdown from the returned model slugs, and choosing a lighter base model
+  plus a stronger escalation model from that catalog.
+
+The model fields remain editable because provider/account model availability
+can differ, and model-list calls can fail offline. Leave a model field blank to
+use that runner's default. Uncheck "Fast
+statements-first pipeline" to fall back to the legacy loop below.
+
+The explicit OpenAI-style CLI shape, if you want to pin model names yourself,
+is:
+
+```bash
+uv run python scripts/formalize_blueprint.py subquadratic-transformers \
+  --runner openai:gpt-5-mini \
+  --escalation-runner openai:gpt-5 \
+  --timeout 300 \
+  --hard-timeout 600 \
+  --workers 3 \
+  --continue
+```
+
+Fast pipeline diagram:
+
+```mermaid
+flowchart TD
+    A["Existing blueprint"] --> B["Validate blueprint structure"]
+    B --> C["Plan dependency-ordered sections from the uses graph"]
+    C --> D["Phase 1: generate Lean skeleton statements in batched sections"]
+    D --> E["Compile skeleton section locally with theorem-like proofs as sorry"]
+    E -->|Statement compile/fix feedback| D
+    E --> F["Blueprint-contract audit before proof work"]
+    F --> G["Deterministic coverage and dependency checks"]
+    G --> H["Read-only critic compares blueprint nodes to frozen Lean statements"]
+    H -->|Statement matches blueprint| I["Freeze accepted statements"]
+    H -->|Statement cannot represent blueprint faithfully| R["Author model repairs blueprint source"]
+    R --> B
+    I --> J["Phase 2: fill frozen sorry bodies"]
+    J --> K["Free deterministic tactic ladder"]
+    K --> L["Batched proof model calls for remaining proofs"]
+    L --> M["Singleton escalation for residue"]
+    M --> N["Run strict correctness audit: no sorry, axioms, vacuous True proofs"]
+    N -->|Proof failed but statement is still valid| J
+    N -->|Blueprint evidence from real Lean/audit output| R
+    N -->|All proofs accepted| O["Assemble formalization.lean"]
+    O --> P["Final from-scratch Lean check"]
+    P --> Q["Publish Lean file and rebuild blueprint page"]
+```
 
 ## Legacy Lean-Guided Refinement (per-chunk loop)
 
@@ -371,6 +453,8 @@ want the old behavior.
 
 This loop is intentionally different from “ask the model to hack Lean until it
 passes.”
+
+Legacy loop diagram:
 
 ```mermaid
 flowchart TD
@@ -832,6 +916,13 @@ That writes:
 .auto-blueprint/telemetry/datasets/node_feature_examples.jsonl
 .auto-blueprint/telemetry/datasets/repair_examples.jsonl
 .auto-blueprint/telemetry/datasets/pre_decomposition_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_run_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_skeleton_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_statement_audit_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_tactic_ladder_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_proof_attempt_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_proof_section_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_final_check_examples.jsonl
 ```
 
 If Lean passes, the passing attempt is promoted out of scratch space and saved

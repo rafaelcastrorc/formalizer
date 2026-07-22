@@ -23,8 +23,62 @@ from typing import Any
 from .base import ModelRunner, RunnerError, RunResult
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models"
 ANTHROPIC_API_VERSION = "2023-06-01"
+OPENAI_MODELS_URL = "https://api.openai.com/v1/models"
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+NON_TEXT_MODEL_MARKERS = (
+    "audio",
+    "dall",
+    "embed",
+    "image",
+    "moderation",
+    "realtime",
+    "search",
+    "speech",
+    "tts",
+    "transcribe",
+    "vision",
+    "whisper",
+)
+
+
+def is_text_model(model_id: str) -> bool:
+    low = model_id.lower()
+    return not any(marker in low for marker in NON_TEXT_MODEL_MARKERS)
+
+
+def choose_model(models: list[str], *, prefer: tuple[str, ...], avoid: tuple[str, ...] = ()) -> str:
+    """Pick a model from a live provider list using model-class keywords.
+
+    The provider model-list endpoints tell us what the API key can use, but not
+    price. This function deliberately avoids fixed model IDs and only uses broad
+    family markers such as ``mini``/``haiku`` for the cheap tier and
+    ``gpt``/``sonnet``/``opus`` for escalation.
+    """
+    for model in models:
+        low = model.lower()
+        if not is_text_model(model):
+            continue
+        if any(token in low for token in prefer) and not any(token in low for token in avoid):
+            return model
+    for model in models:
+        low = model.lower()
+        if is_text_model(model) and not any(token in low for token in avoid):
+            return model
+    return ""
+
+
+def _get_json(url: str, headers: dict[str, str], timeout: int) -> dict:
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:3000]
+        raise RunnerError(f"HTTP {exc.code}: {detail}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RunnerError(f"network error: {exc}") from exc
 
 
 def _post_json(url: str, body: dict[str, Any], headers: dict[str, str], timeout: int) -> dict:
@@ -42,6 +96,42 @@ def _post_json(url: str, body: dict[str, Any], headers: dict[str, str], timeout:
         raise RunnerError(f"HTTP {exc.code}: {detail}") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise RunnerError(f"network error: {exc}") from exc
+
+
+def list_openai_model_ids(*, timeout: int = 5) -> list[str]:
+    """Return model IDs available to the configured OpenAI API key."""
+    key = os.environ.get("OPENAI_API_KEY")
+    if not key:
+        return []
+    payload = _get_json(
+        OPENAI_MODELS_URL,
+        {"Authorization": f"Bearer {key}"},
+        timeout,
+    )
+    ids = [
+        item.get("id")
+        for item in payload.get("data", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    ]
+    return [model_id for model_id in ids if model_id]
+
+
+def list_anthropic_model_ids(*, timeout: int = 5) -> list[str]:
+    """Return model IDs available to the configured Anthropic API key."""
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        return []
+    payload = _get_json(
+        ANTHROPIC_MODELS_URL,
+        {"x-api-key": key, "anthropic-version": ANTHROPIC_API_VERSION},
+        timeout,
+    )
+    ids = [
+        item.get("id")
+        for item in payload.get("data", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    ]
+    return [model_id for model_id in ids if model_id]
 
 
 def _openai_text(payload: dict) -> str:

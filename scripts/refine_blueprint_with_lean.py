@@ -1528,7 +1528,7 @@ def _statement_audit_prompt(
         )
     paper_block = f"\nOriginal paper context:\n<paper>\n{paper_text[:20000]}\n</paper>\n" if paper_text else ""
     pair_text = "\n\n".join(pairs)
-    return f"""TASK: STATEMENT-ALIGNMENT-AUDIT
+    return f"""TASK: BLUEPRINT-CONTRACT-AUDIT
 
 You are the publication gate for Auto-Blueprint.
 
@@ -1536,6 +1536,13 @@ Lean has already accepted the generated file, but that is not enough. Decide
 whether each generated Lean declaration actually formalizes the corresponding
 blueprint node without weakening, erasing parameters, replacing concrete
 claims by abstract placeholders, or changing the mathematical content.
+
+Also check proof-obligation coverage at the node level. The Lean declaration
+does not need to follow the prose proof line by line, but it must represent the
+substantive mathematical obligations the blueprint proof relies on. If the
+blueprint proof uses a construction, case split, intermediate claim, reduction,
+invariant, or dependency that is not represented by the node statement, a
+listed `\\uses{{...}}` dependency, or the generated Lean declaration, reject it.
 
 Return exactly one JSON object:
 {{
@@ -1569,9 +1576,16 @@ Reject examples:
 - Lean declaration drops parameters, hypotheses, quantifiers, approximation
   factors, complexity assumptions, or dependency requirements.
 - Lean declaration proves a different or much weaker theorem.
+- Lean bypasses the blueprint proof by using an abstract theorem/tag/witness
+  instead of representing the construction or intermediate obligations the
+  blueprint proof says establish the result.
+- The blueprint proof contains substantive proof obligations that are only prose
+  and should be split into explicit helper nodes before Lean can certify them.
 - A required non-Mathlib node has no matching Lean declaration.
 
-Do not reject merely because the Lean proof is ugly. Judge statement alignment.
+Do not reject merely because the Lean proof is ugly or uses different low-level
+tactics. Judge whether the generated Lean certifies the blueprint proof
+obligations, not cosmetic proof shape.
 
 Blueprint name: {name}
 {paper_block}

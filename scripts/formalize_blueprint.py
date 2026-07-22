@@ -9,11 +9,12 @@ Phase 1 (skeleton). A few batched model calls generate one Lean declaration per
 blueprint node, section by section in dependency order: real bodies for
 definition nodes, ``:= sorry`` proofs for theorem-like nodes. Each section is
 compiled locally, compile errors are fixed in batched rounds, and the
-statement-alignment audit (deterministic coverage + one batched model audit per
-section) runs on the *statements* before any proof effort is spent. Accepted
-statements are frozen: later phases may only replace ``sorry`` bodies, never
-edit a statement. A statement that cannot faithfully encode its node routes to
-blueprint repair, exactly as before.
+blueprint-contract audit (deterministic coverage + one batched model audit per
+section) checks the frozen statements against the node text and proof
+obligations before proof effort is spent. Accepted statements are frozen: later
+phases may only replace ``sorry`` bodies, never edit a statement. A statement
+that cannot faithfully encode its node routes to blueprint repair, exactly as
+before.
 
 Phase 2 (proofs). For every frozen ``sorry``:
 1. a deterministic tactic ladder (``rfl``/``omega``/``norm_num``/``ring``/
@@ -25,8 +26,8 @@ Phase 2 (proofs). For every frozen ``sorry``:
 Timeouts are treated as latency, never as mathematical difficulty: a timed-out
 call is bisected or retried at higher effort. Only real Lean/audit output (or
 an explicit NEEDS-DECOMPOSITION refusal) can trigger a blueprint repair, and
-repairs invalidate downstream nodes by *statement* fingerprint, so proof-prose
-edits never discard accepted work.
+repairs invalidate downstream nodes by the full per-node blueprint contract, so
+proof-sketch edits recheck the Lean that is supposed to certify them.
 
 Published output is unchanged in meaning: ``formalization.lean`` contains no
 ``sorry``, passes the strict correctness audit and a from-scratch Lean check,
@@ -55,7 +56,9 @@ from pathlib import Path
 from generate_blueprint import _extract_json, read_paper
 from lean_preflight import check_lean_environment
 from model_runners import RunnerError, get_runner
+from model_runners.api import choose_model, list_anthropic_model_ids, list_openai_model_ids
 from model_runners.base import is_environment_error
+from model_runners.cli import choose_codex_base_model, choose_codex_escalation_model, list_codex_model_ids
 from refine_blueprint_with_lean import (
     LEAN_IDIOM_CHEATSHEET,
     FORBIDDEN_ASSUMPTIONS,
@@ -95,7 +98,7 @@ from refine_blueprint_with_lean import (
     _write_api_refinement,
     _write_report,
 )
-from telemetry import TelemetryRun
+from telemetry import TelemetryRun, node_structural_features
 from validate_blueprint import Node, print_result, validate_blueprint
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -109,9 +112,48 @@ DEFAULT_PROOF_BATCH = 12
 DEFAULT_WORKERS = 3
 STATEMENT_FIX_ROUNDS = 3
 AUDIT_REGEN_ROUNDS = 2
+TARGETED_DECL_PATCH_ROUNDS = 2
+TARGETED_DECL_PATCH_MAX_LABELS = 4
+SECTION_NORMALIZATION_REPAIR_TRIGGER = 1
+SECTION_NORMALIZATION_MAX_CHANGED = 16
+SECTION_STUCK_MAX_REPAIRS_AFTER_NORMALIZATION = 2
 PROOF_SINGLETON_RETRIES = 2
 LEAN_CHECK_TIMEOUT = 900
 LADDER_HEARTBEATS = 400_000
+
+
+def _default_fast_runner_specs() -> tuple[str, str]:
+    """Default two-tier model policy for the statements-first pipeline.
+
+    Prefer cheap hosted API calls for the wide batched skeleton/proof work, then
+    reserve the stronger tier for singleton proof retries and blueprint repair.
+    If no API credentials are configured, fall back to local Codex models so the
+    command still works on a developer machine.
+    """
+    def spec(backend: str, model: str) -> str:
+        return f"{backend}:{model}" if model else backend
+
+    if os.environ.get("OPENAI_API_KEY"):
+        models: list[str] = []
+        with contextlib.suppress(Exception):
+            models = list_openai_model_ids(timeout=5)
+        return (
+            spec("openai", choose_model(models, prefer=("mini", "nano"))),
+            spec("openai", choose_model(models, prefer=("gpt", "o"), avoid=("mini", "nano"))),
+        )
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        models = []
+        with contextlib.suppress(Exception):
+            models = list_anthropic_model_ids(timeout=5)
+        return (
+            spec("anthropic", choose_model(models, prefer=("haiku",))),
+            spec("anthropic", choose_model(models, prefer=("sonnet", "opus"), avoid=("haiku",))),
+        )
+    models = list_codex_model_ids(timeout=5)
+    return (
+        spec("codex", choose_codex_base_model(models)),
+        spec("codex", choose_codex_escalation_model(models)),
+    )
 
 # Tactic ladder: cheap-first closers for the micro-lemma tail. Each entry may
 # require an import; unavailable imports drop the tactic deterministically.
@@ -126,7 +168,7 @@ LADDER_IMPORTS = [
 _DECL_START_RE = re.compile(
     r"^\s*(?:@\[[^\]]+\]\s*)*"
     r"(?:(?:noncomputable|private|protected|unsafe|partial)\s+)*"
-    r"(theorem|lemma|def|abbrev|structure|inductive|class|instance)"
+    r"(theorem|lemma|def|abbrev|structure|inductive|class|instance)\b"
     r"(?:\s+([A-Za-z_][A-Za-z0-9_'.]*))?"
 )
 _DECL_PREFIX_RE = re.compile(
@@ -169,9 +211,8 @@ def _statement_blocks(nodes: dict[str, Node]) -> dict[str, str]:
     """Per-node TeX with the trailing proof environment stripped.
 
     The statement block is the alignment contract for the frozen Lean
-    statement; the proof prose is context for the proof phase only. Hashing
-    statements (not whole blocks) is what lets proof-prose-only blueprint edits
-    keep accepted work.
+    statement. It is not the full cache contract: proof sketches also matter
+    because accepted Lean is supposed to certify the blueprint proof.
     """
     blocks = _node_tex_blocks(nodes)
     return {
@@ -184,6 +225,18 @@ def _statement_fingerprints(nodes: dict[str, Node]) -> dict[str, str]:
     return {
         label: hashlib.sha256(block.encode("utf-8")).hexdigest()
         for label, block in _statement_blocks(nodes).items()
+    }
+
+
+def _contract_fingerprints(nodes: dict[str, Node]) -> dict[str, str]:
+    """Hash the full per-node TeX contract, including proof sketches.
+
+    Fast-mode resume uses this broader fingerprint so a proof-prose repair does
+    not silently keep Lean generated for the old proof obligation structure.
+    """
+    return {
+        label: hashlib.sha256(block.encode("utf-8")).hexdigest()
+        for label, block in _node_tex_blocks(nodes).items()
     }
 
 
@@ -250,6 +303,19 @@ class ParsedModule:
     imports: list[str]
     preamble: list[str]
     decls: list[DeclBlock]
+
+
+@dataclass
+class SkeletonFinding:
+    """One Phase-1 skeleton audit finding, optionally tied to one blueprint node.
+
+    Targeted findings let Phase 1 ask the model to replace only the bad Lean
+    declaration instead of regenerating or repairing a whole section.
+    """
+
+    message: str
+    label: str | None = None
+    lean_name: str | None = None
 
 
 def _parse_module(code: str) -> ParsedModule:
@@ -425,34 +491,52 @@ def _check_lean(path: Path, lean_command: list[str], *, timeout: int = LEAN_CHEC
     return proc.returncode == 0, combined
 
 
-def _skeleton_code_issues(code: str, target_kinds: dict[str, str]) -> list[str]:
+def _skeleton_code_findings(
+    code: str, target_kinds: dict[str, str], label_by_lean_name: dict[str, str]
+) -> list[SkeletonFinding]:
     """Correctness audit variant for the skeleton phase.
 
     Like ``_audit_lean_code`` but ``sorry`` is legal exactly as the terminal
     proof of a theorem-like declaration; everywhere else (definition bodies,
     preamble, mid-proof) it is rejected.
     """
-    issues: list[str] = []
+    findings: list[SkeletonFinding] = []
+
+    def decl_finding(name: str | None, message: str) -> SkeletonFinding:
+        return SkeletonFinding(
+            message=message,
+            label=label_by_lean_name.get(name or ""),
+            lean_name=name,
+        )
+
     if re.search(r"\badmit\b|by\s*\?", code):
-        issues.append("contains a forbidden placeholder (`admit` or `by ?`)")
+        findings.append(SkeletonFinding("contains a forbidden placeholder (`admit` or `by ?`)"))
     if "set_option autoImplicit true" in code:
-        issues.append("enables `autoImplicit`")
+        findings.append(SkeletonFinding("enables `autoImplicit`"))
     bad = [f"{kind} {name}" for kind, name in FORBIDDEN_ASSUMPTIONS.findall(code)]
     if bad:
-        issues.append(f"uses top-level assumptions instead of implementations: {', '.join(bad[:12])}")
+        findings.append(
+            SkeletonFinding(
+                f"uses top-level assumptions instead of implementations: {', '.join(bad[:12])}"
+            )
+        )
     invented = sorted(set(FORBIDDEN_BLUEPRINT_STUBS.findall(code)))
     if invented:
-        issues.append(f"calls invented paper/blueprint helpers: {', '.join(invented[:12])}")
+        findings.append(
+            SkeletonFinding(f"calls invented paper/blueprint helpers: {', '.join(invented[:12])}")
+        )
     if _FORBIDDEN_TOPLEVEL_RE.search(code):
-        issues.append(
-            "contains top-level `variable`/`namespace`/`section`/`example` commands; "
-            "each declaration must be self-contained"
+        findings.append(
+            SkeletonFinding(
+                "contains top-level `variable`/`namespace`/`section`/`example` commands; "
+                "each declaration must be self-contained"
+            )
         )
     parsed = _parse_module(code)
     for line in parsed.preamble:
         stripped = line.strip()
         if stripped and not stripped.startswith(("open", "--", "/-")):
-            issues.append(f"unexpected non-`open` preamble command: `{stripped[:80]}`")
+            findings.append(SkeletonFinding(f"unexpected non-`open` preamble command: `{stripped[:80]}`"))
     for decl in parsed.decls:
         if "sorry" not in decl.text:
             continue
@@ -460,21 +544,110 @@ def _skeleton_code_issues(code: str, target_kinds: dict[str, str]) -> list[str]:
         if expected_kind in THEOREM_LIKE_KINDS and _has_terminal_sorry(decl.text):
             inner = _TERMINAL_SORRY_RE.sub("", decl.text)
             if re.search(r"\bsorry\b", inner):
-                issues.append(f"`{decl.name}` uses sorry outside the terminal proof position")
+                findings.append(
+                    decl_finding(decl.name, f"`{decl.name}` uses sorry outside the terminal proof position")
+                )
             continue
-        issues.append(
-            f"`{decl.name or decl.kind}` contains sorry but is not a theorem-like "
-            "blueprint target; definition bodies and helpers must be complete"
+        findings.append(
+            decl_finding(
+                decl.name,
+                f"`{decl.name or decl.kind}` contains sorry but is not a theorem-like "
+                "blueprint target; definition bodies and helpers must be complete",
+            )
         )
     for decl in parsed.decls:
         name = decl.name or ""
         if PLACEHOLDER_NAME_RE.search(name):
-            issues.append(f"placeholder declaration name `{name}`")
+            findings.append(decl_finding(name, f"placeholder declaration name `{name}`"))
         if decl.kind in {"def", "abbrev"} and re.search(r":\s*Prop\s*:=\s*True\b", decl.text):
-            issues.append(f"`{name}` defines a proposition as `True`")
+            findings.append(decl_finding(name, f"`{name}` defines a proposition as `True`"))
         if decl.kind in {"theorem", "lemma"} and re.search(r":\s*True\s*:=", decl.text):
-            issues.append(f"`{name}` proves only `True`")
-    return issues
+            findings.append(decl_finding(name, f"`{name}` proves only `True`"))
+    return findings
+
+
+def _skeleton_code_issues(code: str, target_kinds: dict[str, str]) -> list[str]:
+    return [finding.message for finding in _skeleton_code_findings(code, target_kinds, {})]
+
+
+def _format_skeleton_findings(findings: list[SkeletonFinding]) -> str:
+    lines: list[str] = []
+    for finding in findings:
+        prefix = ""
+        if finding.label and finding.lean_name:
+            prefix = f"{finding.label} / `{finding.lean_name}`: "
+        elif finding.label:
+            prefix = f"{finding.label}: "
+        elif finding.lean_name:
+            prefix = f"`{finding.lean_name}`: "
+        lines.append(prefix + finding.message)
+    return "Deterministic skeleton audit rejected the file:\n- " + "\n- ".join(lines)
+
+
+def _skeleton_finding_class(message: str) -> str:
+    """Stable, paper-independent class for deterministic skeleton routing."""
+    if "missing generated declaration" in message:
+        return "missing_decl"
+    if "placeholder declaration name" in message:
+        return "placeholder_name"
+    if "outside the terminal proof position" in message:
+        return "nonterminal_sorry"
+    if "contains sorry but is not a theorem-like" in message:
+        return "non_theorem_sorry"
+    if "does not mention required dependency" in message:
+        return "missing_dependency_mention"
+    if "is a definition but generated" in message:
+        return "wrong_kind"
+    if "is theorem-like but generated" in message:
+        return "wrong_kind"
+    if "forbidden placeholder" in message:
+        return "forbidden_placeholder"
+    if "invented paper/blueprint helpers" in message:
+        return "invented_helper"
+    if "unexpected non-`open` preamble" in message or "top-level" in message:
+        return "bad_file_shape"
+    return "other"
+
+
+def _skeleton_findings_fingerprint(findings: list[SkeletonFinding]) -> tuple[tuple[str, str, str, str], ...]:
+    """Deterministic stagnation key for Phase 1 audit failures.
+
+    If this key is unchanged after a model patch, the model call did not move
+    the section toward acceptance; route to a smaller/escalated attempt instead
+    of repeating the same patch/regenerate cycle.
+    """
+    return tuple(
+        sorted(
+            (
+                finding.label or "",
+                finding.lean_name or "",
+                _skeleton_finding_class(finding.message),
+                finding.message,
+            )
+            for finding in findings
+        )
+    )
+
+
+def _dependency_closed_subset(ctx: Ctx, labels: list[str], targets: list[str]) -> list[str]:
+    """Smallest original-order subset containing targets and same-section deps."""
+    label_set = set(labels)
+    needed: set[str] = set()
+
+    def visit(label: str) -> None:
+        if label in needed or label not in label_set:
+            return
+        needed.add(label)
+        node = ctx.nodes.get(label)
+        if node is None:
+            return
+        for dep in sorted(node.uses):
+            if dep in label_set:
+                visit(dep)
+
+    for label in targets:
+        visit(label)
+    return [label for label in labels if label in needed]
 
 
 # ---------------------------------------------------------------------------
@@ -492,17 +665,40 @@ class CallResult:
 class RepairRequest(Exception):
     """Raised when only a blueprint edit can unblock progress."""
 
-    def __init__(self, evidence: str, labels: list[str], *, decomposition_helpers: list[str] | None = None):
+    def __init__(
+        self,
+        evidence: str,
+        labels: list[str],
+        *,
+        decomposition_helpers: list[str] | None = None,
+        section_labels: list[str] | None = None,
+    ):
         super().__init__(evidence[:500])
         self.evidence = evidence
         self.labels = labels
         self.decomposition_helpers = decomposition_helpers or []
+        self.section_labels = section_labels or list(labels)
+
+
+@dataclass
+class SectionStuckState:
+    """Tracks a repeatedly failing Phase-1 section across blueprint edits."""
+
+    labels: set[str]
+    repairs: int = 0
+    normalized: bool = False
+    repairs_after_normalization: int = 0
+
+
+class SectionNormalizationRejected(RuntimeError):
+    """A normalization attempt was rolled back and should not stop the run."""
 
 
 @dataclass
 class Ctx:
     name: str
     runner_spec: str
+    escalation_runner_spec: str
     base_effort: str | None
     escalation_effort: str | None
     base_timeout: int
@@ -518,6 +714,7 @@ class Ctx:
     stmt_blocks: dict[str, str] = field(default_factory=dict)
     tex_blocks: dict[str, str] = field(default_factory=dict)
     stmt_fps: dict[str, str] = field(default_factory=dict)
+    contract_fps: dict[str, str] = field(default_factory=dict)
     unavailable_imports: set[str] = field(default_factory=set)
 
     def refresh_nodes(self, nodes: dict[str, Node]) -> None:
@@ -525,6 +722,7 @@ class Ctx:
         self.stmt_blocks = _statement_blocks(nodes)
         self.tex_blocks = _node_tex_blocks(nodes)
         self.stmt_fps = _statement_fingerprints(nodes)
+        self.contract_fps = _contract_fingerprints(nodes)
 
 
 def _make_runner(spec: str, *, timeout: int, readonly: bool, effort: str | None, with_skill: bool = False):
@@ -549,9 +747,11 @@ def _call_model(
     effort: str | None,
     labels: list[str],
     readonly: bool = True,
+    escalated: bool = False,
     tag: str = "",
 ) -> CallResult:
-    runner = _make_runner(ctx.runner_spec, timeout=timeout, readonly=readonly, effort=effort)
+    runner_spec = ctx.escalation_runner_spec if escalated else ctx.runner_spec
+    runner = _make_runner(runner_spec, timeout=timeout, readonly=readonly, effort=effort)
     prompt_artifact = _store_text(ctx.telemetry, f"prompt_{purpose}", prompt)
     started = time.monotonic()
     try:
@@ -624,7 +824,12 @@ def _section_module(name: str, number: int) -> tuple[str, Path]:
     return module, path
 
 
-def _save_state(name: str, sections: list[Section], stmt_fps: dict[str, str]) -> None:
+def _save_state(
+    name: str,
+    sections: list[Section],
+    stmt_fps: dict[str, str],
+    contract_fps: dict[str, str],
+) -> None:
     entries = []
     for sec in sections:
         try:
@@ -640,6 +845,7 @@ def _save_state(name: str, sections: list[Section], stmt_fps: dict[str, str]) ->
                 "import_modules": sec.import_modules,
                 "sha256": sha,
                 "statement_fps": {label: stmt_fps.get(label, "") for label in sec.labels},
+                "contract_fps": {label: contract_fps.get(label, "") for label in sec.labels},
             }
         )
     path = _state_path(name)
@@ -648,7 +854,7 @@ def _save_state(name: str, sections: list[Section], stmt_fps: dict[str, str]) ->
 
 
 def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
-    """Resume: keep sections whose file and blueprint statements are unchanged.
+    """Resume: keep sections whose file and blueprint contracts are unchanged.
 
     Any dropped label cascades to its blueprint descendants and to sections
     importing a dropped module, because their frozen statements may reference
@@ -667,12 +873,15 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
     for entry in entries:
         path = generated_dir / str(entry.get("file") or "")
         labels = [str(label) for label in entry.get("labels") or []]
-        fps = entry.get("statement_fps") or {}
+        stmt_fps = entry.get("statement_fps") or {}
+        contract_fps = entry.get("contract_fps") or {}
         ok = (
             path.is_file()
             and labels
             and all(
-                label in ctx.nodes and ctx.stmt_fps.get(label) == fps.get(label)
+                label in ctx.nodes
+                and ctx.stmt_fps.get(label) == stmt_fps.get(label)
+                and ctx.contract_fps.get(label) == contract_fps.get(label)
                 for label in labels
             )
             and not any(dep in dropped_modules for dep in entry.get("import_modules") or [])
@@ -682,7 +891,7 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
             ok = not (set(labels) & invalidated)
         if ok and hashlib.sha256(path.read_bytes()).hexdigest() != entry.get("sha256"):
             # The file changed after the last state save (e.g. proofs were
-            # spliced right before a crash). The blueprint statements still
+            # spliced right before a crash). The full blueprint contracts still
             # match, so salvage instead of discarding: all labels must still
             # have declarations and the module must recompile.
             code = path.read_text(encoding="utf-8")
@@ -882,6 +1091,236 @@ Target nodes for THIS file:
 """
 
 
+def _targeted_skeleton_patch_prompt(
+    ctx: Ctx,
+    patch_labels: list[str],
+    sections: list[Section],
+    import_modules: list[str],
+    module_code: str,
+    findings: list[SkeletonFinding],
+    *,
+    timeout_s: int,
+) -> str:
+    target_text = "\n\n".join(
+        f"## {label} ({ctx.nodes[label].kind}; Lean name `{_lean_name(label)}`; "
+        f"uses [{', '.join(sorted(ctx.nodes[label].uses)) or 'none'}])\n"
+        f"```tex\n{ctx.stmt_blocks.get(label, '')[:5000]}\n```"
+        for label in patch_labels
+    )
+    relevant = [
+        finding
+        for finding in findings
+        if finding.label in set(patch_labels) or finding.lean_name in {_lean_name(label) for label in patch_labels}
+    ]
+    signatures = _accepted_signatures(sections, import_modules)
+    return f"""TASK: PATCH-BLUEPRINT-SKELETON-DECLARATIONS
+
+Return exactly one Lean 4 code block. No commentary.
+
+The large skeleton section below was generated in one batch. Most of it may be
+usable. Replace ONLY the target declaration(s) listed below so the whole section
+can pass the deterministic skeleton audit.
+
+Rules:
+- Return replacement declarations only; do not return the whole file.
+- For each target blueprint node, include exactly one declaration with the
+  required Lean name.
+- Definition-kind nodes must have real bodies; `sorry` is forbidden there.
+- Theorem-like nodes may end with terminal `:= sorry`.
+- The replacement statement must still encode the same blueprint node. Do not
+  weaken, abstract away, or replace it with `True`.
+- If a replacement must use another blueprint node listed in `uses`, visibly
+  mention that node's generated Lean name.
+- You may include a small complete helper declaration immediately before a
+  replacement only if the replacement genuinely needs it.
+- This call has a wall-clock budget of about {timeout_s}s.
+
+{_common_rules(ctx)}
+
+Blueprint name: {ctx.name}
+
+Available imports for earlier accepted skeleton declarations:
+```lean
+{chr(10).join(f'import {m}' for m in import_modules) or '-- none'}
+```
+
+Signatures already frozen in those modules:
+```lean
+{signatures[-10000:] or '-- none'}
+```
+
+Deterministic audit findings to fix:
+```text
+{_format_skeleton_findings(relevant)[-10000:]}
+```
+
+Current section file:
+```lean
+{module_code[:50000]}
+```
+
+Target blueprint nodes to patch:
+{target_text}
+"""
+
+
+def _patchable_skeleton_labels(findings: list[SkeletonFinding], labels: list[str]) -> list[str]:
+    """Return the small set of labels worth repairing in-place.
+
+    Global file-shape problems still use the existing whole-section retry path.
+    Targeted replacement is for declaration-local deterministic failures only.
+    """
+    section_labels = set(labels)
+    targeted = [finding.label for finding in findings if finding.label in section_labels]
+    if not targeted:
+        return []
+    if any(finding.label is None for finding in findings):
+        return []
+    ordered = [label for label in labels if label in set(targeted)]
+    if len(ordered) > TARGETED_DECL_PATCH_MAX_LABELS:
+        return []
+    return ordered
+
+
+def _apply_skeleton_replacements(
+    parsed: ParsedModule, labels: list[str], patch_labels: list[str], replacement_code: str
+) -> ParsedModule | None:
+    """Merge replacement declarations into a generated section.
+
+    The section remains a section: this only swaps or inserts declarations for
+    the listed target labels. Helpers returned by the model are kept, but the
+    caller re-runs the deterministic audit on the whole module before freezing.
+    """
+    patch_parsed = _parse_module(replacement_code)
+    target_names = {_lean_name(label) for label in labels}
+    patch_names = {_lean_name(label) for label in patch_labels}
+    replacements = {decl.name: decl for decl in patch_parsed.decls if decl.name in patch_names}
+    if set(replacements) != patch_names:
+        return None
+
+    helper_decls = [
+        decl
+        for decl in patch_parsed.decls
+        if decl.name and decl.name not in patch_names and decl.name not in target_names
+    ]
+    original = list(parsed.decls)
+
+    helper_inserted = False
+    used_replacements: set[str] = set()
+    new_decls: list[DeclBlock] = []
+    for decl in original:
+        if decl.name in patch_names:
+            if not helper_inserted:
+                new_decls.extend(helper_decls)
+                helper_inserted = True
+            new_decls.append(replacements[decl.name])
+            used_replacements.add(decl.name)
+        else:
+            new_decls.append(decl)
+
+    for label in patch_labels:
+        lean_name = _lean_name(label)
+        if lean_name in used_replacements:
+            continue
+        insert_at = None
+        label_pos = labels.index(label)
+        for previous in reversed(labels[:label_pos]):
+            idx = next((i for i, decl in enumerate(new_decls) if decl.name == _lean_name(previous)), None)
+            if idx is not None:
+                insert_at = idx + 1
+                break
+        if insert_at is None:
+            for following in labels[label_pos + 1 :]:
+                idx = next((i for i, decl in enumerate(new_decls) if decl.name == _lean_name(following)), None)
+                if idx is not None:
+                    insert_at = idx
+                    break
+        if insert_at is None:
+            insert_at = len(new_decls)
+        if not helper_inserted:
+            new_decls[insert_at:insert_at] = helper_decls
+            helper_inserted = True
+            insert_at += len(helper_decls)
+        new_decls.insert(insert_at, replacements[lean_name])
+        used_replacements.add(lean_name)
+
+    # Drop obsolete duplicate target declarations if a missing-declaration patch
+    # inserted one while an unnamed malformed declaration remained nearby.
+    seen_targets: set[str] = set()
+    deduped: list[DeclBlock] = []
+    for decl in new_decls:
+        if decl.name in target_names:
+            if decl.name in seen_targets:
+                continue
+            seen_targets.add(decl.name)
+        deduped.append(decl)
+    return ParsedModule(imports=parsed.imports, preamble=parsed.preamble, decls=deduped)
+
+
+def _targeted_patch_skeleton_decls(
+    ctx: Ctx,
+    labels: list[str],
+    sections: list[Section],
+    import_modules: list[str],
+    parsed: ParsedModule,
+    module_code: str,
+    findings: list[SkeletonFinding],
+    *,
+    timeout: int,
+) -> tuple[ParsedModule | None, str]:
+    patch_labels = _patchable_skeleton_labels(findings, labels)
+    if not patch_labels:
+        return None, "not patchable"
+    _log(
+        "  deterministic audit isolated "
+        + f"{len(patch_labels)} declaration(s); patching: "
+        + ", ".join(patch_labels)
+    )
+    prompt = _targeted_skeleton_patch_prompt(
+        ctx,
+        patch_labels,
+        sections,
+        import_modules,
+        module_code,
+        findings,
+        timeout_s=timeout,
+    )
+    result = _call_model(
+        ctx,
+        prompt,
+        purpose="skeleton_declaration_patch",
+        timeout=timeout,
+        effort=ctx.base_effort,
+        labels=patch_labels,
+    )
+    if result.status == "timeout":
+        result = _call_model(
+            ctx,
+            prompt,
+            purpose="skeleton_declaration_patch",
+            timeout=ctx.hard_timeout,
+            effort=ctx.escalation_effort,
+            labels=patch_labels,
+            escalated=True,
+        )
+    if result.status != "ok":
+        return None, f"targeted declaration patch {result.status}: {result.error}"
+    try:
+        replacement_code = _extract_lean_code(result.text)
+    except ValueError as exc:
+        return None, f"targeted declaration patch did not return Lean code: {exc}"
+    patched = _apply_skeleton_replacements(parsed, labels, patch_labels, replacement_code)
+    if patched is None:
+        return None, "targeted declaration patch omitted one or more required replacement declarations"
+    _record(
+        ctx.telemetry,
+        "skeleton_declaration_patch_result",
+        labels=patch_labels,
+        status="applied",
+    )
+    return patched, "patched"
+
+
 def _proof_prompt(
     ctx: Ctx,
     targets: list[tuple[str, str]],  # (label, frozen decl text)
@@ -933,6 +1372,11 @@ replaced by a real proof:
 - Proofs must be self-contained tactic blocks (`have`/`let`/`calc` inside are
   fine). Do NOT add new top-level declarations; if a proof genuinely needs a
   helper lemma, reply with NEEDS-DECOMPOSITION for that label instead.
+- The proof must certify the blueprint proof obligations for this node. It does
+  not need to mirror the prose line by line, but it must not bypass the
+  blueprint argument by using an abstract theorem/tag/witness that erases the
+  construction, case split, reduction, invariant, or intermediate claim the
+  blueprint proof relies on.
 - If a node's blueprint entry lists dependencies, the proof (or statement)
   must visibly use their generated Lean names; a proof that re-derives a
   dependency inline will be rejected.
@@ -959,38 +1403,65 @@ Target declarations:
 # Alignment audit (skeleton-aware)
 
 
-def _skeleton_deterministic_audit(code: str, ctx: Ctx, labels: list[str]) -> list[str]:
+def _skeleton_deterministic_findings(code: str, ctx: Ctx, labels: list[str]) -> list[SkeletonFinding]:
     """Coverage/kind checks for a section. Dependency-mention checks are only
     applied to declarations that are already complete (definitions and eagerly
     proved theorem-likes); sorry-proved statements get theirs at proof time."""
-    issues: list[str] = []
+    findings: list[SkeletonFinding] = []
     decls = _lean_declarations(code)
     for label in labels:
         node = ctx.nodes[label]
         if node.mathlibok:
             continue
+        lean_name = _lean_name(label)
         decl = decls.get(_lean_name(label))
         if decl is None:
-            issues.append(f"missing generated declaration for {label} -> `{_lean_name(label)}`")
+            findings.append(
+                SkeletonFinding(
+                    f"missing generated declaration for {label} -> `{lean_name}`",
+                    label=label,
+                    lean_name=lean_name,
+                )
+            )
             continue
         if node.kind == "definition" and decl.kind in {"theorem", "lemma"}:
-            issues.append(f"{label} is a definition but generated `{decl.kind} {decl.name}`")
+            findings.append(
+                SkeletonFinding(
+                    f"{label} is a definition but generated `{decl.kind} {decl.name}`",
+                    label=label,
+                    lean_name=lean_name,
+                )
+            )
         if node.kind in THEOREM_LIKE_KINDS and decl.kind in {"structure", "inductive", "class"}:
-            issues.append(f"{label} is theorem-like but generated `{decl.kind} {decl.name}`")
+            findings.append(
+                SkeletonFinding(
+                    f"{label} is theorem-like but generated `{decl.kind} {decl.name}`",
+                    label=label,
+                    lean_name=lean_name,
+                )
+            )
         if not _has_terminal_sorry(decl.text):
             missing = _nonmathlib_uses_missing_from_decl(label, node, decl, ctx.nodes, decls)
             if missing:
-                issues.append(
-                    f"{label} does not mention required dependency generated name(s): "
-                    + ", ".join(f"`{_lean_name(dep)}`" for dep in missing[:12])
+                findings.append(
+                    SkeletonFinding(
+                        f"{label} does not mention required dependency generated name(s): "
+                        + ", ".join(f"`{_lean_name(dep)}`" for dep in missing[:12]),
+                        label=label,
+                        lean_name=lean_name,
+                    )
                 )
-    return issues
+    return findings
+
+
+def _skeleton_deterministic_audit(code: str, ctx: Ctx, labels: list[str]) -> list[str]:
+    return [finding.message for finding in _skeleton_deterministic_findings(code, ctx, labels)]
 
 
 def _model_alignment_audit(
     ctx: Ctx, labels: list[str], code: str, *, tag: str = ""
 ) -> tuple[str, str, set[str]] | None:
-    """Batched statement-alignment audit. None means accepted.
+    """Batched blueprint-contract audit. None means accepted.
 
     Returns (kind, reason, rejected_labels) on rejection, where kind is
     ``blueprint`` or ``lean-generation`` (statement re-generation).
@@ -1017,14 +1488,15 @@ def _model_alignment_audit(
             timeout=ctx.hard_timeout,
             effort=ctx.escalation_effort,
             labels=labels,
+            escalated=True,
             tag=tag,
         )
         if result.status != "ok":
-            return ("lean-generation", f"statement audit call failed: {result.error}", set(labels))
+            return ("lean-generation", f"blueprint contract audit call failed: {result.error}", set(labels))
     try:
         payload = _extract_json(result.text)
     except ValueError as exc:
-        return ("lean-generation", f"statement audit returned invalid JSON: {exc}", set(labels))
+        return ("lean-generation", f"blueprint contract audit returned invalid JSON: {exc}", set(labels))
     issues = payload.get("issues") or []
     accepted = bool(payload.get("accepted")) and not any(
         str(issue.get("severity", "")).lower() == "reject"
@@ -1053,7 +1525,7 @@ def _model_alignment_audit(
     if not rejected:
         rejected = set(labels)
     kind = _alignment_failure_kind(str(payload.get("classification") or ""), formatted)
-    return (kind, "Statement alignment audit rejected:\n- " + "\n- ".join(formatted), rejected)
+    return (kind, "Blueprint contract audit rejected:\n- " + "\n- ".join(formatted), rejected)
 
 
 # ---------------------------------------------------------------------------
@@ -1065,6 +1537,8 @@ def _freeze_section(
     labels: list[str],
     sections: list[Section],
     next_number: int,
+    *,
+    force_first_escalated: bool = False,
 ) -> list[Section]:
     """Generate, compile-fix, audit, and freeze one section (possibly bisected).
 
@@ -1073,6 +1547,7 @@ def _freeze_section(
     """
     import_modules = _sections_for_deps(ctx, labels, sections)
     target_kinds = {_lean_name(label): ctx.nodes[label].kind for label in labels}
+    label_by_lean_name = {_lean_name(label): label for label in labels}
     module, path = _section_module(ctx.name, next_number)
     path.parent.mkdir(parents=True, exist_ok=True)
     _log(f"==> Skeleton section {next_number:02d}: {len(labels)} node(s): " + ", ".join(labels[:6]) + ("..." if len(labels) > 6 else ""))
@@ -1080,9 +1555,14 @@ def _freeze_section(
     feedback = ""
     previous_code = ""
     audit_rounds = 0
+    escalated_refusals: set[str] = set()
+    force_escalated_round = force_first_escalated
+    escalated_stagnation_fps: set[tuple[tuple[str, str, str, str], ...]] = set()
     for round_no in range(1, STATEMENT_FIX_ROUNDS + AUDIT_REGEN_ROUNDS + 2):
-        effort = ctx.base_effort
-        timeout = ctx.base_timeout if round_no == 1 else ctx.hard_timeout
+        use_escalated_runner = force_escalated_round
+        force_escalated_round = False
+        effort = ctx.escalation_effort if use_escalated_runner else ctx.base_effort
+        timeout = ctx.hard_timeout if use_escalated_runner or round_no > 1 else ctx.base_timeout
         prompt = _skeleton_prompt(
             ctx,
             labels,
@@ -1099,7 +1579,9 @@ def _freeze_section(
             timeout=timeout,
             effort=effort,
             labels=labels,
+            escalated=use_escalated_runner,
         )
+        result_was_escalated = use_escalated_runner
         if result.status == "timeout":
             if len(labels) > 1:
                 # Latency, not difficulty: bisect the section and recurse.
@@ -1118,7 +1600,9 @@ def _freeze_section(
                 timeout=ctx.hard_timeout,
                 effort=ctx.escalation_effort,
                 labels=labels,
+                escalated=True,
             )
+            result_was_escalated = True
             if result.status == "error":
                 feedback = f"model call failed: {result.error}"
                 continue
@@ -1131,6 +1615,7 @@ def _freeze_section(
                     "escalated effort; the node is likely too large or underspecified "
                     "to state as one declaration. Decompose it into smaller nodes.",
                     labels,
+                    section_labels=labels,
                 )
         elif result.status == "error":
             feedback = f"model call failed: {result.error}"
@@ -1139,11 +1624,37 @@ def _freeze_section(
         refusal = _parse_decomposition_refusal(result.text)
         if refusal is not None:
             refused = [refusal["label"]] if refusal["label"] in labels else list(labels)
+            refusal_key = ",".join(refused)
+            if not result_was_escalated and refusal_key not in escalated_refusals:
+                escalated_refusals.add(refusal_key)
+                force_escalated_round = True
+                missing = refusal.get("missing_helpers") or []
+                feedback = (
+                    "The base skeleton generator returned NEEDS-DECOMPOSITION. "
+                    "Treat that as a statement-generation claim, not blueprint "
+                    "repair evidence yet. Before editing the blueprint, make an "
+                    "escalated attempt to state the same blueprint node(s) inside "
+                    "this section. You may introduce small complete local helper "
+                    "declarations in this same Lean file when needed, but you must "
+                    "not weaken the blueprint statement.\n\n"
+                    f"Refused label(s): {', '.join(refused)}\n"
+                    f"Reason: {refusal['reason']}\n"
+                    f"Requested helper(s): {', '.join(missing) or '(none)'}"
+                )
+                previous_code = ""
+                _log(
+                    "  skeleton generator requested decomposition for "
+                    + ", ".join(refused)
+                    + "; escalating statement generation before blueprint repair"
+                )
+                continue
             raise RepairRequest(
-                "The statement generator determined node(s) cannot be stated 1-1 as "
-                f"written.\nReason: {refusal['reason']}",
+                "The escalated statement generator determined node(s) cannot be "
+                "stated 1-1 as written.\n"
+                f"Reason: {refusal['reason']}",
                 refused,
                 decomposition_helpers=refusal["missing_helpers"],
+                section_labels=labels,
             )
 
         code = _extract_lean_code(result.text)
@@ -1159,11 +1670,110 @@ def _freeze_section(
         all_imports = [f"import {m}" for m in import_modules] + parsed.imports
         module_code, _ranges = _compose_module(all_imports, parsed.preamble, [d.text for d in parsed.decls])
 
-        issues = _skeleton_code_issues(module_code, target_kinds)
-        issues += _skeleton_deterministic_audit(module_code, ctx, labels)
+        findings = _skeleton_code_findings(module_code, target_kinds, label_by_lean_name)
+        findings += _skeleton_deterministic_findings(module_code, ctx, labels)
+        patch_note = ""
+        patch_round = 0
+        while findings and patch_round < TARGETED_DECL_PATCH_ROUNDS:
+            before_patch_fp = _skeleton_findings_fingerprint(findings)
+            patch_round += 1
+            patched, patch_note = _targeted_patch_skeleton_decls(
+                ctx,
+                labels,
+                sections,
+                import_modules,
+                parsed,
+                module_code,
+                findings,
+                timeout=ctx.base_timeout if patch_round == 1 else ctx.hard_timeout,
+            )
+            if patched is None:
+                break
+            parsed = patched
+            all_imports = [f"import {m}" for m in import_modules] + parsed.imports
+            module_code, _ranges = _compose_module(
+                all_imports, parsed.preamble, [d.text for d in parsed.decls]
+            )
+            findings = _skeleton_code_findings(module_code, target_kinds, label_by_lean_name)
+            findings += _skeleton_deterministic_findings(module_code, ctx, labels)
+            if findings:
+                after_patch_fp = _skeleton_findings_fingerprint(findings)
+                if after_patch_fp == before_patch_fp:
+                    patch_labels = _patchable_skeleton_labels(findings, labels)
+                    support_labels = _dependency_closed_subset(ctx, labels, patch_labels)
+                    _record(
+                        ctx.telemetry,
+                        "skeleton_stagnation_detected",
+                        labels=labels,
+                        patch_labels=patch_labels,
+                        support_labels=support_labels,
+                        failure_classes=sorted(
+                            {
+                                _skeleton_finding_class(finding.message)
+                                for finding in findings
+                            }
+                        ),
+                    )
+                    if support_labels and len(support_labels) < len(labels):
+                        _log(
+                            "  targeted patch made no deterministic progress; "
+                            "retrying dependency-closed subset with escalation: "
+                            + ", ".join(support_labels)
+                        )
+                        first = _freeze_section(
+                            ctx,
+                            support_labels,
+                            sections,
+                            next_number,
+                            force_first_escalated=True,
+                        )
+                        combined = sections + first
+                        support_set = set(support_labels)
+                        remaining = [label for label in labels if label not in support_set]
+                        if not remaining:
+                            return first
+                        second = _freeze_section(
+                            ctx,
+                            remaining,
+                            combined,
+                            next_number + len(first),
+                        )
+                        return first + second
+                    if after_patch_fp not in escalated_stagnation_fps and not result_was_escalated:
+                        escalated_stagnation_fps.add(after_patch_fp)
+                        force_escalated_round = True
+                        feedback = (
+                            "Targeted declaration patch made no deterministic "
+                            "progress. Regenerate this same section once with "
+                            "escalated effort, paying special attention to these "
+                            "unchanged audit findings:\n"
+                            + _format_skeleton_findings(findings)[-10000:]
+                        )
+                        previous_code = module_code
+                        _log(
+                            "  targeted patch made no deterministic progress; "
+                            "escalating the same section once"
+                        )
+                        break
+                    raise RepairRequest(
+                        "Targeted skeleton declaration patch made no "
+                        "deterministic progress on the same audit failures.\n"
+                        + _format_skeleton_findings(findings)[-10000:],
+                        patch_labels or labels,
+                        section_labels=labels,
+                    )
+                _log(
+                    "  targeted declaration patch still has "
+                    + f"{len(findings)} deterministic issue(s)"
+                )
+        if force_escalated_round:
+            continue
+        issues = [finding.message for finding in findings]
         if issues:
-            feedback = "Deterministic skeleton audit rejected the file:\n- " + "\n- ".join(issues)
-            previous_code = code
+            feedback = _format_skeleton_findings(findings)
+            if patch_note and patch_note != "not patchable":
+                feedback += f"\n\nTargeted declaration patch result: {patch_note}"
+            previous_code = module_code
             _log(f"  deterministic audit failed ({len(issues)} issue(s)); regenerating")
             continue
 
@@ -1179,13 +1789,14 @@ def _freeze_section(
         if audit is not None:
             kind, reason, rejected = audit
             if kind == "blueprint":
-                raise RepairRequest(reason, sorted(rejected))
+                raise RepairRequest(reason, sorted(rejected), section_labels=labels)
             audit_rounds += 1
             if audit_rounds > AUDIT_REGEN_ROUNDS:
                 raise RepairRequest(
-                    "Statement alignment audit kept rejecting regenerated statements; "
+                    "Blueprint contract audit kept rejecting regenerated statements; "
                     "the blueprint text likely under-determines the statement.\n" + reason,
                     sorted(rejected),
+                    section_labels=labels,
                 )
             feedback = reason
             previous_code = module_code
@@ -1219,6 +1830,7 @@ def _freeze_section(
         "Skeleton generation exhausted its fix rounds for this section. Last feedback:\n"
         + feedback,
         labels,
+        section_labels=labels,
     )
 
 
@@ -1228,7 +1840,7 @@ def _run_phase1(ctx: Ctx, sections: list[Section], pending: set[str]) -> list[Se
         new_sections = _freeze_section(ctx, group, sections, next_number)
         sections.extend(new_sections)
         next_number = max(sec.number for sec in sections) + 1
-        _save_state(ctx.name, sections, ctx.stmt_fps)
+        _save_state(ctx.name, sections, ctx.stmt_fps, ctx.contract_fps)
     return sections
 
 
@@ -1323,6 +1935,16 @@ def _run_tactic_ladder(ctx: Ctx, sec: Section, sorry_labels: list[str], *, tag: 
             proved = []
     if proved:
         _log(f"tactic ladder closed {len(proved)}/{len(candidates)} proof(s) for free", tag=tag)
+    _record(
+        ctx.telemetry,
+        "tactic_ladder_result",
+        section=sec.number,
+        labels=sorted(candidates),
+        candidate_count=len(candidates),
+        proved_labels=proved,
+        proved_count=len(proved),
+        imports=ladder_imports,
+    )
     return proved
 
 
@@ -1506,9 +2128,35 @@ def _prove_section(ctx: Ctx, sec: Section, sections: list[Section]) -> SectionPr
                 batch_size = max(1, batch_size // 2)
                 next_remaining.extend(batch)
                 _log(f"batch timed out; reducing batch size to {batch_size}", tag=tag)
+                _record(
+                    ctx.telemetry,
+                    "proof_attempt_result",
+                    section=sec.number,
+                    phase="proof_batch",
+                    round=round_no,
+                    labels=batch,
+                    status="timeout_bisected",
+                    proved_labels=[],
+                    failed_labels=batch,
+                    decomposition_labels=[],
+                    next_batch_size=batch_size,
+                )
                 continue
             if result.status != "ok":
                 next_remaining.extend(batch)
+                _record(
+                    ctx.telemetry,
+                    "proof_attempt_result",
+                    section=sec.number,
+                    phase="proof_batch",
+                    round=round_no,
+                    labels=batch,
+                    status=result.status,
+                    proved_labels=[],
+                    failed_labels=batch,
+                    decomposition_labels=[],
+                    error=result.error,
+                )
                 continue
             refusal = _parse_decomposition_refusal(result.text)
             if refusal is not None:
@@ -1516,10 +2164,41 @@ def _prove_section(ctx: Ctx, sec: Section, sections: list[Section]) -> SectionPr
                 outcome.decomposition[refused] = refusal["missing_helpers"]
                 errors[refused] = f"generator refusal: {refusal['reason']}"
                 next_remaining.extend(label for label in batch if label != refused)
+                _record(
+                    ctx.telemetry,
+                    "proof_attempt_result",
+                    section=sec.number,
+                    phase="proof_batch",
+                    round=round_no,
+                    labels=batch,
+                    status="needs_decomposition",
+                    proved_labels=[],
+                    failed_labels=[label for label in batch if label != refused],
+                    decomposition_labels=[refused],
+                    missing_helpers={refused: refusal["missing_helpers"]},
+                )
                 continue
             proved, batch_errors = _apply_proof_batch(ctx, sec, result.text, targets, tag=tag)
             outcome.proved.extend(proved)
             errors.update(batch_errors)
+            failed_batch = [
+                label
+                for label in batch
+                if label not in proved and label not in outcome.decomposition
+            ]
+            _record(
+                ctx.telemetry,
+                "proof_attempt_result",
+                section=sec.number,
+                phase="proof_batch",
+                round=round_no,
+                labels=batch,
+                status="partial" if proved and failed_batch else ("success" if proved else "failed"),
+                proved_labels=proved,
+                failed_labels=failed_batch,
+                decomposition_labels=[],
+                errors={label: batch_errors[label] for label in failed_batch if label in batch_errors},
+            )
             next_remaining.extend(
                 label for label in batch if label not in proved and label not in outcome.decomposition
             )
@@ -1551,6 +2230,7 @@ def _prove_section(ctx: Ctx, sec: Section, sections: list[Section]) -> SectionPr
                 timeout=ctx.hard_timeout,
                 effort=ctx.escalation_effort,
                 labels=[label],
+                escalated=True,
                 tag=tag,
             )
             if result.status != "ok":
@@ -1558,30 +2238,93 @@ def _prove_section(ctx: Ctx, sec: Section, sections: list[Section]) -> SectionPr
                     label,
                     f"escalated proof call {result.status}: {result.error[:400]}",
                 )
+                _record(
+                    ctx.telemetry,
+                    "proof_attempt_result",
+                    section=sec.number,
+                    phase="proof_singleton",
+                    attempt=attempt,
+                    labels=[label],
+                    status=result.status,
+                    proved_labels=[],
+                    failed_labels=[label],
+                    decomposition_labels=[],
+                    error=result.error,
+                )
                 continue
             refusal = _parse_decomposition_refusal(result.text)
             if refusal is not None:
                 outcome.decomposition[label] = refusal["missing_helpers"]
                 errors[label] = f"generator refusal: {refusal['reason']}"
+                _record(
+                    ctx.telemetry,
+                    "proof_attempt_result",
+                    section=sec.number,
+                    phase="proof_singleton",
+                    attempt=attempt,
+                    labels=[label],
+                    status="needs_decomposition",
+                    proved_labels=[],
+                    failed_labels=[],
+                    decomposition_labels=[label],
+                    missing_helpers={label: refusal["missing_helpers"]},
+                )
                 break
             proved, batch_errors = _apply_proof_batch(ctx, sec, result.text, targets, tag=tag)
             errors.update(batch_errors)
             if proved:
                 outcome.proved.extend(proved)
                 solved = True
+                _record(
+                    ctx.telemetry,
+                    "proof_attempt_result",
+                    section=sec.number,
+                    phase="proof_singleton",
+                    attempt=attempt,
+                    labels=[label],
+                    status="success",
+                    proved_labels=proved,
+                    failed_labels=[],
+                    decomposition_labels=[],
+                )
                 break
+            _record(
+                ctx.telemetry,
+                "proof_attempt_result",
+                section=sec.number,
+                phase="proof_singleton",
+                attempt=attempt,
+                labels=[label],
+                status="failed",
+                proved_labels=[],
+                failed_labels=[label],
+                decomposition_labels=[],
+                errors={label: batch_errors.get(label, errors.get(label, ""))},
+            )
             parsed, index = _module_decl_texts(sec)
         if not solved and label not in outcome.decomposition:
             still.append(label)
 
     for label in still:
         outcome.failed[label] = errors.get(label, "no proof found within the configured budgets")
+    _record(
+        ctx.telemetry,
+        "proof_section_result",
+        section=sec.number,
+        labels=sec.labels,
+        proved_labels=outcome.proved,
+        failed_labels=sorted(outcome.failed),
+        decomposition_labels=sorted(outcome.decomposition),
+        proved_count=len(outcome.proved),
+        failed_count=len(outcome.failed),
+        decomposition_count=len(outcome.decomposition),
+    )
     # Deliberately no .olean recompile here: statements never change in phase 2,
     # so importers keep working against the frozen (sorry-proved) oleans, and
     # skipping the rebuild avoids racing concurrent section workers. The final
     # assembled check compiles everything from scratch anyway.
     with _STATE_LOCK:
-        _save_state(ctx.name, sections, ctx.stmt_fps)
+        _save_state(ctx.name, sections, ctx.stmt_fps, ctx.contract_fps)
     return outcome
 
 
@@ -1652,7 +2395,7 @@ def _repair_blueprint(
 ) -> set[str]:
     """One bounded blueprint-repair model call. Returns changed labels."""
     blueprint_source = _read_blueprint_source(ctx.name)
-    before_fps = dict(ctx.stmt_fps)
+    before_fps = dict(ctx.contract_fps)
     _log(f"==> Blueprint repair {trial}/{max_trials} for: " + ", ".join(labels[:8]))
     prompt_builder = _agent_refine_prompt if repair_runner_agent else _api_refine_prompt
     prompt = prompt_builder(
@@ -1665,7 +2408,7 @@ def _repair_blueprint(
         model_timeout_s=ctx.hard_timeout,
     )
     runner = _make_runner(
-        ctx.runner_spec,
+        ctx.escalation_runner_spec,
         timeout=ctx.hard_timeout,
         readonly=False,
         effort=ctx.escalation_effort,
@@ -1673,7 +2416,51 @@ def _repair_blueprint(
     )
     prompt_artifact = _store_text(ctx.telemetry, "prompt_blueprint_repair", prompt)
     started = time.monotonic()
-    result = runner.run(prompt, cwd=REPO_ROOT, retries=0)
+    try:
+        result = runner.run(prompt, cwd=REPO_ROOT, retries=0)
+    except RunnerError as exc:
+        duration = time.monotonic() - started
+        status = "timeout" if _is_timeout_error(exc) else "error"
+        _record(
+            ctx.telemetry,
+            "model_call",
+            purpose="blueprint_repair",
+            labels=labels,
+            status=status,
+            duration_s=duration,
+            timeout_s=ctx.hard_timeout,
+            backend=runner.backend_name,
+            model=runner.model,
+            prompt=prompt_artifact.to_event(REPO_ROOT),
+            error=str(exc),
+            environment_error=is_environment_error(exc),
+        )
+        if status == "timeout" and len(labels) > 1 and not is_environment_error(exc):
+            mid = len(labels) // 2
+            _log(
+                "  blueprint repair timed out; splitting target into "
+                + f"{mid} + {len(labels) - mid} label(s)"
+            )
+            left = _repair_blueprint(
+                ctx,
+                evidence,
+                labels[:mid],
+                trial=trial,
+                max_trials=max_trials,
+                escalation_note=escalation_note,
+                repair_runner_agent=repair_runner_agent,
+            )
+            right = _repair_blueprint(
+                ctx,
+                evidence,
+                labels[mid:],
+                trial=trial,
+                max_trials=max_trials,
+                escalation_note=escalation_note,
+                repair_runner_agent=repair_runner_agent,
+            )
+            return left | right
+        raise
     _record(
         ctx.telemetry,
         "model_call",
@@ -1696,14 +2483,221 @@ def _repair_blueprint(
     ctx.refresh_nodes(validation.nodes)
     changed = {
         label
-        for label, fp in ctx.stmt_fps.items()
+        for label, fp in ctx.contract_fps.items()
         if before_fps.get(label) != fp
     }
-    changed |= {label for label in before_fps if label not in ctx.stmt_fps}
+    changed |= {label for label in before_fps if label not in ctx.contract_fps}
+    changed |= {label for label in ctx.contract_fps if label not in before_fps}
     _record(
         ctx.telemetry,
         "blueprint_repair_result",
         labels=labels,
+        changed_labels=sorted(changed),
+        changed_count=len(changed),
+    )
+    return changed
+
+
+def _section_overlap(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+def _stuck_state_for(
+    states: list[SectionStuckState], section_labels: list[str]
+) -> SectionStuckState:
+    current = set(section_labels)
+    best = max(states, key=lambda state: _section_overlap(state.labels, current), default=None)
+    if best is not None and _section_overlap(best.labels, current) >= 0.5:
+        best.labels |= current
+        return best
+    state = SectionStuckState(labels=current)
+    states.append(state)
+    return state
+
+
+def _section_normalization_prompt(
+    ctx: Ctx,
+    blueprint_source: str,
+    section_labels: list[str],
+    evidence: str,
+    *,
+    model_timeout_s: int,
+    api_mode: bool,
+) -> str:
+    blocks = _node_tex_blocks(ctx.nodes)
+    section_nodes = "\n\n".join(
+        f"## {label} ({ctx.nodes[label].kind}; uses "
+        f"{', '.join(sorted(ctx.nodes[label].uses)) or 'none'})\n"
+        f"```tex\n{blocks.get(label, '')[:5000]}\n```"
+        for label in section_labels
+        if label in ctx.nodes
+    )
+    paper_block = f"\nOriginal paper context:\n<paper>\n{ctx.paper_text}\n</paper>\n" if ctx.paper_text else ""
+    base = f"""TASK: NORMALIZE-STUCK-BLUEPRINT-SECTION
+
+Phase 1 is repeatedly failing to freeze one dependency-ordered section. Do a
+single constrained blueprint normalization pass for that section only.
+
+Goal:
+- Make the listed blueprint nodes easier to state one-to-one in Lean.
+- Preserve the mathematical content.
+- Keep the blueprint as the source of truth; do not write Lean code.
+
+Hard constraints:
+- Edit only `blueprints/{ctx.name}/blueprint/src/content.tex`.
+- Do not weaken, delete, or replace claims with placeholders.
+- Preserve existing labels unless a node must be split.
+- If splitting is necessary, insert helper nodes immediately before the node
+  that uses them and add explicit `\\uses{{...}}` edges.
+- Do not touch unrelated downstream sections.
+- Do not rewrite the whole blueprint.
+- Keep changes small: target the listed section plus direct helper nodes only.
+- After editing, run `python scripts/validate_blueprint.py {ctx.name}`.
+- This call has a wall-clock budget of about {model_timeout_s}s.
+
+The recurring evidence is:
+```text
+{evidence[-12000:]}
+```
+
+Section nodes to normalize:
+{section_nodes}
+
+{paper_block}
+Current blueprint source:
+```tex
+{blueprint_source}
+```
+"""
+    if not api_mode:
+        return base
+    return f"""{base}
+
+API MODE: Return exactly one JSON object:
+{{
+  "content_tex": "full replacement for blueprints/{ctx.name}/blueprint/src/content.tex",
+  "notes": "short explanation of the small section-normalization changes"
+}}
+
+Do not include `\\begin{{document}}` or `\\end{{document}}`.
+"""
+
+
+def _normalize_stuck_section(
+    ctx: Ctx,
+    evidence: str,
+    section_labels: list[str],
+    *,
+    trial: int,
+    max_trials: int,
+    repair_runner_agent: bool,
+) -> set[str]:
+    """One constrained normalization pass for a repeatedly failing section.
+
+    Rolls back if the model invalidates the blueprint or edits too broadly.
+    """
+    content_path = REPO_ROOT / "blueprints" / ctx.name / "blueprint" / "src" / "content.tex"
+    before_content = content_path.read_text(encoding="utf-8")
+    blueprint_source = _read_blueprint_source(ctx.name)
+    before_fps = dict(ctx.contract_fps)
+    _log(
+        f"==> Section normalization {trial}/{max_trials} for: "
+        + ", ".join(section_labels[:8])
+    )
+    prompt = _section_normalization_prompt(
+        ctx,
+        blueprint_source,
+        section_labels,
+        evidence,
+        model_timeout_s=ctx.hard_timeout,
+        api_mode=not repair_runner_agent,
+    )
+    runner = _make_runner(
+        ctx.escalation_runner_spec,
+        timeout=ctx.hard_timeout,
+        readonly=False,
+        effort=ctx.escalation_effort,
+        with_skill=True,
+    )
+    prompt_artifact = _store_text(ctx.telemetry, "prompt_section_normalization", prompt)
+    started = time.monotonic()
+    try:
+        result = runner.run(prompt, cwd=REPO_ROOT, retries=0)
+    except RunnerError as exc:
+        _record(
+            ctx.telemetry,
+            "model_call",
+            purpose="section_normalization",
+            labels=section_labels,
+            status="timeout" if _is_timeout_error(exc) else "error",
+            duration_s=time.monotonic() - started,
+            timeout_s=ctx.hard_timeout,
+            backend=runner.backend_name,
+            model=runner.model,
+            prompt=prompt_artifact.to_event(REPO_ROOT),
+            error=str(exc),
+            environment_error=is_environment_error(exc),
+        )
+        raise
+    _record(
+        ctx.telemetry,
+        "model_call",
+        purpose="section_normalization",
+        labels=section_labels,
+        status="success",
+        duration_s=time.monotonic() - started,
+        timeout_s=ctx.hard_timeout,
+        backend=runner.backend_name,
+        model=runner.model,
+        prompt=prompt_artifact.to_event(REPO_ROOT),
+        response=_store_text(ctx.telemetry, "response_section_normalization", result.text).to_event(REPO_ROOT),
+    )
+    try:
+        if not repair_runner_agent:
+            _write_api_refinement(ctx.name, result.text)
+        validation = validate_blueprint(REPO_ROOT, ctx.name)
+        if not validation.ok:
+            print_result(validation)
+            raise ValueError("section normalization produced an invalid blueprint")
+        ctx.refresh_nodes(validation.nodes)
+        changed = {
+            label
+            for label, fp in ctx.contract_fps.items()
+            if before_fps.get(label) != fp
+        }
+        changed |= {label for label in before_fps if label not in ctx.contract_fps}
+        changed |= {label for label in ctx.contract_fps if label not in before_fps}
+        if len(changed) > SECTION_NORMALIZATION_MAX_CHANGED:
+            raise SectionNormalizationRejected(
+                "section normalization changed too many node contracts "
+                f"({len(changed)} > {SECTION_NORMALIZATION_MAX_CHANGED})"
+            )
+    except SectionNormalizationRejected as exc:
+        content_path.write_text(before_content, encoding="utf-8")
+        validation = validate_blueprint(REPO_ROOT, ctx.name)
+        if validation.ok:
+            ctx.refresh_nodes(validation.nodes)
+        _record(
+            ctx.telemetry,
+            "section_normalization_result",
+            labels=section_labels,
+            status="rejected",
+            reason=str(exc),
+        )
+        raise
+    except Exception:
+        content_path.write_text(before_content, encoding="utf-8")
+        validation = validate_blueprint(REPO_ROOT, ctx.name)
+        if validation.ok:
+            ctx.refresh_nodes(validation.nodes)
+        raise
+    _record(
+        ctx.telemetry,
+        "section_normalization_result",
+        labels=section_labels,
+        status="applied",
         changed_labels=sorted(changed),
         changed_count=len(changed),
     )
@@ -1737,7 +2731,18 @@ def _assemble_final(ctx: Ctx, sections: list[Section]) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("name", help="Existing blueprint name under blueprints/<name>/")
-    parser.add_argument("--runner", default="codex", help="Runner spec, e.g. codex, claude-code")
+    parser.add_argument(
+        "--runner",
+        help=(
+            "Base runner spec for batched skeleton/proof calls. If omitted, "
+            "uses a cheap API runner when OPENAI_API_KEY or ANTHROPIC_API_KEY "
+            "is set, otherwise falls back to local Codex."
+        ),
+    )
+    parser.add_argument(
+        "--escalation-runner",
+        help="Runner spec for escalated singleton/repair calls (default: same as --runner)",
+    )
     parser.add_argument("--paper", help="Optional original paper path/URL/text")
     parser.add_argument("--max-trials", type=int, default=8, help="Blueprint-repair budget")
     parser.add_argument("--timeout", type=int, default=300, help="Base per-model-call timeout (s)")
@@ -1761,6 +2766,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-build", dest="build", action="store_false", help="Skip the site rebuild")
     parser.add_argument("--lean-command", help="Override checker command, e.g. 'lake env lean'")
     args = parser.parse_args(argv)
+    default_runner, default_escalation_runner = _default_fast_runner_specs()
+    runner = args.runner or default_runner
+    escalation_runner = args.escalation_runner or (runner if args.runner else default_escalation_runner)
 
     if args.max_trials < 1:
         raise SystemExit("--max-trials must be at least 1")
@@ -1774,7 +2782,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     telemetry.record(
         "formalize_config",
-        runner=args.runner,
+        runner=runner,
+        escalation_runner=escalation_runner,
+        runner_was_auto=args.runner is None,
+        escalation_runner_was_auto=args.escalation_runner is None,
         max_trials=args.max_trials,
         timeout_s=args.timeout,
         hard_timeout_s=args.hard_timeout,
@@ -1810,6 +2821,12 @@ def main(argv: list[str] | None = None) -> int:
     print_result(validation)
     if not validation.ok:
         return finish(1, "blueprint_validation_failed")
+    node_blocks = _node_tex_blocks(validation.nodes)
+    for label, node in validation.nodes.items():
+        telemetry.record(
+            "node_features",
+            **node_structural_features(label, node.kind, node_blocks.get(label, ""), len(node.uses)),
+        )
 
     blueprint_source = _read_blueprint_source(args.name)
     print("==> Searching local Lean libraries once for this run", flush=True)
@@ -1819,7 +2836,8 @@ def main(argv: list[str] | None = None) -> int:
 
     ctx = Ctx(
         name=args.name,
-        runner_spec=args.runner,
+        runner_spec=runner,
+        escalation_runner_spec=escalation_runner,
         base_effort=args.reasoning_effort,
         escalation_effort=args.escalation_effort,
         base_timeout=args.timeout,
@@ -1848,7 +2866,8 @@ def main(argv: list[str] | None = None) -> int:
     report_lines = [
         f"# Statements-First Formalization: `{args.name}`",
         "",
-        f"- runner: `{args.runner}` (base effort `{args.reasoning_effort}`, escalation `{args.escalation_effort}`)",
+        f"- base runner: `{runner}` (effort `{args.reasoning_effort}`)",
+        f"- escalation runner: `{escalation_runner}` (effort `{args.escalation_effort}`)",
         f"- timeouts: `{args.timeout}s` base / `{args.hard_timeout}s` escalated",
         f"- section size: `{args.section_size}`; proof batch: `{args.proof_batch_size}`; workers: `{args.workers}`",
         f"- blueprint repair budget: `{args.max_trials}`",
@@ -1859,6 +2878,7 @@ def main(argv: list[str] | None = None) -> int:
     repair_trials = 0
     noop_repairs = 0
     escalation_note = ""
+    stuck_sections: list[SectionStuckState] = []
     started = time.monotonic()
     try:
         while True:
@@ -1871,6 +2891,8 @@ def main(argv: list[str] | None = None) -> int:
             evidence_for_repair: str | None = None
             repair_labels: list[str] = []
             repair_helpers: list[str] = []
+            repair_section_labels: list[str] = []
+            phase1_repair = False
 
             if pending:
                 print(
@@ -1880,11 +2902,13 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 try:
                     sections = _run_phase1(ctx, sections, pending)
-                    _save_state(args.name, sections, ctx.stmt_fps)
+                    _save_state(args.name, sections, ctx.stmt_fps, ctx.contract_fps)
                 except RepairRequest as request:
                     evidence_for_repair = request.evidence
                     repair_labels = request.labels
                     repair_helpers = request.decomposition_helpers
+                    repair_section_labels = request.section_labels
+                    phase1_repair = True
 
             if evidence_for_repair is None:
                 unproved_sections = []
@@ -1910,7 +2934,7 @@ def main(argv: list[str] | None = None) -> int:
                         ]
                         for future in concurrent.futures.as_completed(futures):
                             outcomes.append(future.result())
-                    _save_state(args.name, sections, ctx.stmt_fps)
+                    _save_state(args.name, sections, ctx.stmt_fps, ctx.contract_fps)
                     failed: dict[str, str] = {}
                     helpers: list[str] = []
                     for outcome in outcomes:
@@ -1935,6 +2959,7 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         repair_labels = sorted(failed)
                         repair_helpers = helpers
+                        repair_section_labels = repair_labels
 
             if evidence_for_repair is None:
                 proved = _proved_labels(sections)
@@ -1957,6 +2982,14 @@ def main(argv: list[str] | None = None) -> int:
                         if final_attempt.ok
                         else []
                     )
+                    _record(
+                        ctx.telemetry,
+                        "final_check_result",
+                        lean_ok=final_attempt.ok,
+                        coverage_ok=not coverage_issues,
+                        coverage_issues=coverage_issues,
+                        output_tail=final_attempt.output[-4000:] if not final_attempt.ok else "",
+                    )
                     if final_attempt.ok and not coverage_issues:
                         published = _publish_lean_text(args.name, final_code)
                         report_lines += [
@@ -1978,10 +3011,12 @@ def main(argv: list[str] | None = None) -> int:
                         + "\n".join(coverage_issues)
                     )
                     repair_labels = sorted(required - proved) or sorted(required)
+                    repair_section_labels = repair_labels
                 else:
                     # Shouldn't happen: no failures reported but nodes unproved.
                     evidence_for_repair = "Internal inconsistency: unproved nodes without failure evidence: " + ", ".join(sorted(required - proved))
                     repair_labels = sorted(required - proved)
+                    repair_section_labels = repair_labels
 
             # --- blueprint repair path (the ONLY route that edits the blueprint)
             if repair_trials >= args.max_trials:
@@ -1998,32 +3033,90 @@ def main(argv: list[str] | None = None) -> int:
                 print("Frozen statements and accepted proofs are kept; rerun with --continue.")
                 return finish(1, "max_trials_exhausted", unresolved=repair_labels)
 
+            stuck_state: SectionStuckState | None = None
+            use_section_normalization = False
+            if phase1_repair and repair_section_labels:
+                stuck_state = _stuck_state_for(stuck_sections, repair_section_labels)
+                use_section_normalization = (
+                    stuck_state.repairs >= SECTION_NORMALIZATION_REPAIR_TRIGGER
+                    and not stuck_state.normalized
+                )
+
             repair_trials += 1
             note = escalation_note
             if repair_helpers:
                 note = _decomposition_note(repair_labels, repair_helpers)
-            changed = _repair_blueprint(
-                ctx,
-                evidence_for_repair,
-                repair_labels,
-                trial=repair_trials,
-                max_trials=args.max_trials,
-                escalation_note=note,
-                repair_runner_agent=args.runner.partition(":")[0] in {"codex", "claude-code"},
-            )
-            report_lines.append(
-                f"- repair {repair_trials}: {len(changed)} node statement(s) changed "
-                f"for `{', '.join(repair_labels[:8])}`"
-            )
+            action = "normalization" if use_section_normalization else "repair"
+            if use_section_normalization and stuck_state is not None:
+                try:
+                    changed = _normalize_stuck_section(
+                        ctx,
+                        evidence_for_repair,
+                        repair_section_labels,
+                        trial=repair_trials,
+                        max_trials=args.max_trials,
+                        repair_runner_agent=escalation_runner.partition(":")[0] in {"codex", "claude-code"},
+                    )
+                    stuck_state.normalized = True
+                    report_lines.append(
+                        f"- section normalization {repair_trials}: {len(changed)} node contract(s) changed "
+                        f"for `{', '.join(repair_section_labels[:8])}`"
+                    )
+                except SectionNormalizationRejected as exc:
+                    stuck_state.normalized = True
+                    action = "repair"
+                    fallback_note = (
+                        f"Constrained section normalization was rolled back automatically: {exc}. "
+                        "Do a narrower repair/decomposition now. Edit only the listed failing "
+                        "node contracts unless a new helper node is strictly required by their "
+                        "dependency-closed proof structure."
+                    )
+                    report_lines.append(
+                        f"- section normalization {repair_trials}: rejected and rolled back ({exc}); "
+                        "falling back to targeted repair"
+                    )
+                    changed = _repair_blueprint(
+                        ctx,
+                        evidence_for_repair,
+                        repair_labels,
+                        trial=repair_trials,
+                        max_trials=args.max_trials,
+                        escalation_note=fallback_note,
+                        repair_runner_agent=escalation_runner.partition(":")[0] in {"codex", "claude-code"},
+                    )
+                    report_lines.append(
+                        f"- fallback repair {repair_trials}: {len(changed)} node statement(s) changed "
+                        f"for `{', '.join(repair_labels[:8])}`"
+                    )
+                    stuck_state.repairs += 1
+                    stuck_state.repairs_after_normalization += 1
+            else:
+                changed = _repair_blueprint(
+                    ctx,
+                    evidence_for_repair,
+                    repair_labels,
+                    trial=repair_trials,
+                    max_trials=args.max_trials,
+                    escalation_note=note,
+                    repair_runner_agent=escalation_runner.partition(":")[0] in {"codex", "claude-code"},
+                )
+                report_lines.append(
+                    f"- repair {repair_trials}: {len(changed)} node statement(s) changed "
+                    f"for `{', '.join(repair_labels[:8])}`"
+                )
+                if stuck_state is not None:
+                    stuck_state.repairs += 1
+                    if stuck_state.normalized:
+                        stuck_state.repairs_after_normalization += 1
             if changed:
                 noop_repairs = 0
                 escalation_note = ""
                 sections, invalidated = _invalidate_after_repair(
                     ctx, sections, changed, lean_command
                 )
-                _save_state(args.name, sections, ctx.stmt_fps)
+                _save_state(args.name, sections, ctx.stmt_fps, ctx.contract_fps)
                 print(
-                    f"  repair changed {len(changed)} statement(s); invalidated "
+                    f"  {action} changed {len(changed)} statement(s); invalidated "
                     f"{len(invalidated)} node(s); kept {len(sections)} skeleton section(s)",
                     flush=True,
                 )

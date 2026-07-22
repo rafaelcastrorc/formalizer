@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import base64
 import atexit
+import contextlib
 import errno
 import json
 import mimetypes
@@ -27,8 +28,12 @@ import tempfile
 import threading
 import time
 import webbrowser
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from model_runners.api import choose_model, list_anthropic_model_ids, list_openai_model_ids
+from model_runners.cli import choose_codex_base_model, choose_codex_escalation_model, list_codex_model_ids
 
 from lean_preflight import check_lean_environment, default_lean_command
 
@@ -42,8 +47,73 @@ UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="auto-blueprint-webui-"))
 
 RUNNER_BACKENDS = ["claude-code", "codex", "anthropic", "openai", "mock"]
 REASONING_EFFORTS = ["", "low", "medium", "high", "xhigh"]
+MODEL_SUGGESTIONS = {
+    "anthropic": [],
+    "claude-code": ["haiku", "sonnet", "opus"],
+    "codex": [],
+    "mock": [],
+    "openai": [],
+}
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+@lru_cache(maxsize=1)
+def model_suggestions() -> dict:
+    suggestions = {backend: list(models) for backend, models in MODEL_SUGGESTIONS.items()}
+    with contextlib.suppress(Exception):
+        suggestions["openai"] = list_openai_model_ids(timeout=4)
+    with contextlib.suppress(Exception):
+        suggestions["anthropic"] = list_anthropic_model_ids(timeout=4)
+    with contextlib.suppress(Exception):
+        suggestions["codex"] = list_codex_model_ids(timeout=4)
+    return suggestions
+
+
+def fast_runner_defaults() -> dict:
+    """Resolved Web UI preset for the fast pipeline's two-tier model policy."""
+    suggestions = model_suggestions()
+    if os.environ.get("OPENAI_API_KEY"):
+        openai_models = suggestions.get("openai", [])
+        return {
+            "base": {
+                "backend": "openai",
+                "model": choose_model(openai_models, prefer=("mini", "nano")),
+                "effort": "",
+            },
+            "escalation": {
+                "backend": "openai",
+                "model": choose_model(openai_models, prefer=("gpt", "o"), avoid=("mini", "nano")),
+                "effort": "",
+            },
+            "source": "OPENAI_API_KEY",
+        }
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        anthropic_models = suggestions.get("anthropic", [])
+        return {
+            "base": {
+                "backend": "anthropic",
+                "model": choose_model(anthropic_models, prefer=("haiku",)),
+                "effort": "",
+            },
+            "escalation": {
+                "backend": "anthropic",
+                "model": choose_model(anthropic_models, prefer=("sonnet", "opus"), avoid=("haiku",)),
+                "effort": "",
+            },
+            "source": "ANTHROPIC_API_KEY",
+        }
+    return {
+        "base": {
+            "backend": "codex",
+            "model": choose_codex_base_model(suggestions.get("codex", [])),
+            "effort": "medium",
+        },
+        "escalation": {
+            "backend": "codex",
+            "model": choose_codex_escalation_model(suggestions.get("codex", [])),
+            "effort": "high",
+        },
+        "source": "local Codex fallback",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -480,23 +550,32 @@ def start_job(action: str, cmd: list[str]) -> tuple[bool, str]:
 # Command construction from form parameters.
 # ---------------------------------------------------------------------------
 
-def runner_spec(p: dict) -> str:
-    backend = p.get("runner_backend", "claude-code")
+def runner_spec_from(p: dict, backend_key: str, model_key: str, default_backend: str = "claude-code") -> str:
+    backend = p.get(backend_key, default_backend)
     if backend not in RUNNER_BACKENDS:
         raise ValueError(f"unknown runner backend: {backend}")
-    model = (p.get("runner_model") or "").strip()
+    model = (p.get(model_key) or "").strip()
     return f"{backend}:{model}" if model else backend
+
+
+def runner_spec(p: dict) -> str:
+    return runner_spec_from(p, "runner_backend", "runner_model")
+
+
+def effort_arg(p: dict, effort_key: str, backend_key: str, flag: str) -> list[str]:
+    effort = (p.get(effort_key) or "").strip()
+    if not effort:
+        return []
+    if p.get(backend_key) != "codex":
+        raise ValueError(f"{flag} is only supported for the codex runner")
+    if effort not in REASONING_EFFORTS:
+        raise ValueError(f"unknown reasoning effort: {effort}")
+    return [flag, effort]
 
 
 def common_runner_args(p: dict) -> list[str]:
     args = ["--runner", runner_spec(p)]
-    effort = (p.get("reasoning_effort") or "").strip()
-    if effort:
-        if p.get("runner_backend") != "codex":
-            raise ValueError("reasoning effort is only supported for the codex runner")
-        if effort not in REASONING_EFFORTS:
-            raise ValueError(f"unknown reasoning effort: {effort}")
-        args += ["--reasoning-effort", effort]
+    args += effort_arg(p, "reasoning_effort", "runner_backend", "--reasoning-effort")
     timeout = str(p.get("timeout") or "").strip()
     if timeout:
         if not timeout.isdigit() or int(timeout) < 1:
@@ -552,6 +631,20 @@ def build_command(action: str, p: dict) -> list[str]:
                 if not workers.isdigit() or int(workers) < 1:
                     raise ValueError("workers must be a positive number")
                 cmd += ["--workers", workers]
+            escalation_runner = runner_spec_from(
+                p,
+                "escalation_runner_backend",
+                "escalation_runner_model",
+                default_backend=(p.get("runner_backend") or "claude-code"),
+            )
+            if escalation_runner != runner_spec(p):
+                cmd += ["--escalation-runner", escalation_runner]
+            cmd += effort_arg(
+                p,
+                "escalation_reasoning_effort",
+                "escalation_runner_backend",
+                "--escalation-effort",
+            )
         hard_timeout = positive_int_field(p, "hard_timeout", "hard-node timeout")
         if hard_timeout:
             base_timeout = int(str(p.get("timeout") or "300").strip() or "300")
@@ -684,6 +777,8 @@ class Handler(BaseHTTPRequestHandler):
                 "blueprints": list_blueprints(),
                 "backends": RUNNER_BACKENDS,
                 "efforts": [e for e in REASONING_EFFORTS if e],
+                "model_suggestions": model_suggestions(),
+                "runner_defaults": fast_runner_defaults(),
                 "job": CURRENT_JOB.snapshot(0) if CURRENT_JOB else adopted,
             })
         elif path == "/api/lean/status":
@@ -877,7 +972,7 @@ const TABS = [
   {id:'validate', label:'Validate'},
   {id:'build',    label:'Build site'},
 ];
-let state = {blueprints: [], backends: [], efforts: []};
+let state = {blueprints: [], backends: [], efforts: [], model_suggestions: {}, runner_defaults: {}};
 let active = 'generate';
 let offset = 0;
 let jobWasRunning = false;
@@ -1062,10 +1157,44 @@ function renderStages(job){
 
 renderProgress();
 
-function runnerFields(baseTimeout='3600', includeHard=false){
-  const opts = state.backends.map(b=>`<option ${b==='claude-code'?'selected':''}>${b}</option>`).join('');
+function modelList(id, backend){
+  const names = (state.model_suggestions && state.model_suggestions[backend]) || [];
+  return `<datalist id="${id}">${names.map(m=>`<option value="${esc(m)}"></option>`).join('')}</datalist>`;
+}
+
+function runnerBlock(prefix, title, defaultBackend='claude-code', defaultEffort='', defaultModel=''){
+  const backendId = `${prefix}_backend`;
+  const modelId = `${prefix}_model`;
+  const effortId = `${prefix}_effort`;
+  const listId = `${prefix}_models`;
+  const opts = state.backends.map(b=>`<option ${b===defaultBackend?'selected':''}>${b}</option>`).join('');
   const effs = ['<option value="">(default)</option>']
-    .concat(state.efforts.map(e=>`<option>${e}</option>`)).join('');
+    .concat(state.efforts.map(e=>`<option ${e===defaultEffort?'selected':''}>${e}</option>`)).join('');
+  return `
+    <div class="row">
+      <div><label>${title} runner</label>
+        <select id="${backendId}" onchange="runnerChanged('${prefix}')">${opts}</select></div>
+      <div><label>${title} model (optional)</label>
+        <input type="text" id="${modelId}" list="${listId}" value="${esc(defaultModel)}" placeholder="blank = runner default">
+        ${modelList(listId, defaultBackend)}</div>
+    </div>
+    <div class="row">
+      <div><label>${title} reasoning effort (codex only)</label>
+        <select id="${effortId}" disabled>${effs}</select></div>
+      <div><label>${title} model policy</label>
+        <div class="hint">${title === 'Base' ? 'Normal batched calls use this.' : 'Singleton retries and blueprint repair use this.'}</div></div>
+    </div>`;
+}
+
+function runnerDefault(tier, key, fallback){
+  const d = (state.runner_defaults && state.runner_defaults[tier]) || {};
+  return d[key] || fallback;
+}
+
+function runnerFields(baseTimeout='3600', includeHard=false, opts={}){
+  const backend = opts.defaultBackend || 'claude-code';
+  const effort = opts.defaultEffort || '';
+  const model = opts.defaultModel || '';
   const hard = includeHard ? `
     <div class="row">
       <div><label>Hard-node model-call timeout (seconds)</label>
@@ -1074,18 +1203,23 @@ function runnerFields(baseTimeout='3600', includeHard=false){
         <div class="hint">Base applies to every model call; hard chunks may use the longer value.</div></div>
     </div>` : '';
   return `
+    ${runnerBlock('f', 'Base', backend, effort, model)}
     <div class="row">
-      <div><label>Runner</label>
-        <select id="f_backend" onchange="effortToggle()">${opts}</select></div>
-      <div><label>Model (optional)</label>
-        <input type="text" id="f_model" placeholder="e.g. claude-fable-5"></div>
-    </div>
-    <div class="row">
-      <div><label>Reasoning effort (codex only)</label>
-        <select id="f_effort" disabled>${effs}</select></div>
       <div><label>Base model-call timeout (seconds)</label>
         <input type="number" id="f_timeout" value="${baseTimeout}" min="1"></div>
+      <div></div>
     </div>${hard}`;
+}
+
+function escalationRunnerFields(){
+  return `
+    ${runnerBlock(
+      'f_escalation',
+      'Escalation',
+      runnerDefault('escalation', 'backend', 'codex'),
+      runnerDefault('escalation', 'effort', 'high'),
+      runnerDefault('escalation', 'model', 'gpt-5.5')
+    )}`;
 }
 
 function paperField(required){
@@ -1119,6 +1253,7 @@ const FORMS = {
     <label>Blueprint</label>
     <select id="f_name">${bpSelect()}</select>
     <div class="check"><input type="checkbox" id="f_fast" checked><label for="f_fast">Fast statements-first pipeline (recommended; uncheck for the legacy per-chunk loop)</label></div>
+    <div class="hint">Model preset: ${esc((state.runner_defaults && state.runner_defaults.source) || 'local Codex fallback')}.</div>
     <label>Parallel proof workers (fast pipeline only)</label>
     <input type="number" id="f_workers" value="3" min="1">
     <label>Max blueprint-repair trials</label>
@@ -1128,7 +1263,12 @@ const FORMS = {
     </div>
     <div class="check"><input type="checkbox" id="f_continue" checked><label for="f_continue">Continue from accepted generated chunks</label></div>
     ${paperField(false)}
-    ${runnerFields('300', true)}
+    ${runnerFields('300', true, {
+      defaultBackend: runnerDefault('base', 'backend', 'codex'),
+      defaultEffort: runnerDefault('base', 'effort', 'medium'),
+      defaultModel: runnerDefault('base', 'model', 'gpt-5')
+    })}
+    <div id="fastEscalationFields">${escalationRunnerFields()}</div>
     <label>Lean command override (optional)</label>
     <input type="text" id="f_leancmd" placeholder="lake env lean">`,
   validate: () => `
@@ -1150,6 +1290,9 @@ function renderForm(){
   el('form').innerHTML = FORMS[active]();
   el('error').textContent = '';
   effortToggle();
+  const fast = el('f_fast');
+  if (fast) fast.onchange = toggleFastFields;
+  toggleFastFields();
   const drop = el('drop');
   if (drop){
     const input = document.createElement('input');
@@ -1165,9 +1308,30 @@ function renderForm(){
     if (active === 'refine') setTimeout(checkLean, 0);
 }
 
+function updateModelList(prefix){
+  const backend = el(`${prefix}_backend`);
+  const list = el(`${prefix}_models`);
+  if (!backend || !list) return;
+  const names = (state.model_suggestions && state.model_suggestions[backend.value]) || [];
+  list.innerHTML = names.map(m=>`<option value="${esc(m)}"></option>`).join('');
+}
+
+function runnerChanged(prefix){
+  updateModelList(prefix);
+  effortToggle();
+}
+
 function effortToggle(){
-  const b = el('f_backend'), eff = el('f_effort');
-  if (b && eff) eff.disabled = b.value !== 'codex';
+  [['f_backend','f_effort'], ['f_escalation_backend','f_escalation_effort']].forEach(([bid,eid])=>{
+    const b = el(bid), eff = el(eid);
+    if (b && eff) eff.disabled = b.value !== 'codex';
+  });
+}
+
+function toggleFastFields(){
+  const fast = el('f_fast');
+  const box = el('fastEscalationFields');
+  if (box && fast) box.style.display = fast.checked ? '' : 'none';
 }
 
 async function upload(file){
@@ -1187,7 +1351,10 @@ function params(){
   const c = id => { const n = el(id); return !!(n && n.checked); };
   const common = {
     runner_backend: v('f_backend'), runner_model: v('f_model'),
+    escalation_runner_backend: v('f_escalation_backend'),
+    escalation_runner_model: v('f_escalation_model'),
     reasoning_effort: el('f_effort') && !el('f_effort').disabled ? v('f_effort') : '',
+    escalation_reasoning_effort: el('f_escalation_effort') && !el('f_escalation_effort').disabled ? v('f_escalation_effort') : '',
     timeout: v('f_timeout'),
     hard_timeout: v('f_hard_timeout'),
   };
