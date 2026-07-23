@@ -13,39 +13,19 @@
 \newtheorem{proposition}[theorem]{Proposition}
 \newtheorem{lemma}[theorem]{Lemma}
 \newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{conjecture}[theorem]{Conjecture}
 
 \theoremstyle{definition}
 \newtheorem{definition}[theorem]{Definition}
-\newtheorem{assumption}[theorem]{Assumption}
-\newtheorem{conjecture}[theorem]{Conjecture}
-\newtheorem{construction}[theorem]{Construction}
 
-% --- Notation macros shared by all nodes -----------------------------------
-\newcommand{\softmax}{\operatorname{softmax}}
-\newcommand{\BOW}{\operatorname{BOW}}
-\newcommand{\TF}{\mathsf{TF}}
-\newcommand{\OV}{\mathsf{OV}}
-\newcommand{\MinIP}{\mathsf{Min\text{-}IP}}
-\newcommand{\MaxIP}{\mathsf{Max\text{-}IP}}
-\newcommand{\MSD}{\mathsf{MSD}}
-\newcommand{\LSD}{\mathsf{LSD}}
-\newcommand{\SAT}{\mathsf{SAT}}
-\newcommand{\TSQAlg}[1]{\mathsf{TSQAlg}(#1)}
-\newcommand{\NoTSQAlg}[1]{\mathsf{NoTSQAlg}(#1)}
-\newcommand{\ReducesTo}[2]{#1 \preceq_{\mathrm{tsq}} #2}
-\newcommand{\SubquadEquiv}[2]{#1 \equiv_{\mathrm{tsq}} #2}
-\newcommand{\AtLeastHard}[2]{#1 \succeq_{\mathrm{tsq}} #2}
-\newcommand{\AttentionSolves}[1]{\mathsf{AttentionSolves}(#1)}
-\newcommand{\logn}{\operatorname{logn}}
-\newcommand{\logDim}{\operatorname{logDim}}
-\newcommand{\polylogDim}{\operatorname{polylogDim}}
-\newcommand{\msdHardDim}{\operatorname{msdHardDim}}
-\newcommand{\mildMsdGamma}{\operatorname{mildMsdGamma}}
-\newcommand{\msdHardGammaAllowed}{\operatorname{msdHardGammaAllowed}}
-\newcommand{\inner}[2]{\langle #1, #2 \rangle}
-\newcommand{\norm}[1]{\lVert #1 \rVert}
-\newcommand{\cossim}[2]{\dfrac{\inner{#1}{#2}}{\norm{#1}\cdot\norm{#2}}}
 \newcommand{\R}{\mathbb{R}}
 \newcommand{\N}{\mathbb{N}}
-\newcommand{\eps}{\varepsilon}
-\newcommand{\bigO}{O}
+\newcommand{\ip}[2]{\left\langle #1,#2 \right\rangle}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\softmax}{\operatorname{softmax}}
+\newcommand{\poly}{\operatorname{poly}}
+\newcommand{\MSD}{\operatorname{MSD}}
+\newcommand{\LSD}{\operatorname{LSD}}
+\newcommand{\OV}{\operatorname{OV}}
+\newcommand{\MinIP}{\operatorname{Min\mbox{-}IP}}
+\newcommand{\MaxIP}{\operatorname{Max\mbox{-}IP}}

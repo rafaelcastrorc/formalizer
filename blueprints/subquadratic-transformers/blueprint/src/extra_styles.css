@@ -23,3 +23,20 @@ div.corollary_thmcontent {
 div.proof_content {
 	border-left: .08rem solid grey;
 }
+
+/* "Back to all blueprints" link injected into every page header by
+ * scripts/build.py (plasTeX itself knows nothing about the landing page). */
+.bp-home-link {
+	display: inline-block;
+	margin-right: .75rem;
+	padding: .2rem .6rem;
+	font-size: .85rem;
+	font-weight: 600;
+	color: #2563eb;
+	text-decoration: none;
+	border: 1px solid #cdd5df;
+	border-radius: .4rem;
+	background: #fff;
+	vertical-align: middle;
+}
+.bp-home-link:hover { background: #f0f4ff; border-color: #2563eb; }

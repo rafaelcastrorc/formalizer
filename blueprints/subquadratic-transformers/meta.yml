@@ -2,7 +2,7 @@
 # used as the URL subpath (the blueprint is published at site/<name>/).
 name: subquadratic-transformers
 title: "Fundamental Limitations on Subquadratic Alternatives to Transformers"
-description: "SETH-based lower bounds show document-similarity tasks solved by simple transformers cannot be solved by truly subquadratic alternatives."
+description: "Blueprint for SETH-based lower bounds for document-similarity tasks and one-head transformer constructions solving their decision versions."
 build_pdf: false        # if true, also build + link a PDF (requires TeX in CI)
 home: "https://arxiv.org/abs/2410.04271"                # optional URL shown as a "home" link on the landing card
 github: ""              # optional repo URL shown as a "GitHub" link on the landing card
