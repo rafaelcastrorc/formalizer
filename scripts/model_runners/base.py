@@ -77,6 +77,10 @@ class RunResult:
     mode: str = ""
     duration_s: float = 0.0
     raw: object = None
+    # Backend conversation handle for follow-up calls (claude-code / codex
+    # sessions). None when the backend has no session concept or the id could
+    # not be determined; callers must treat session reuse as best-effort.
+    session_id: str | None = None
 
 
 def load_context_file(path: str | Path) -> str:
@@ -101,10 +105,14 @@ class ModelRunner(abc.ABC):
         context_files: list[str | Path] | None = None,
         timeout: int = 3600,
         readonly: bool = False,
+        resume_session_id: str | None = None,
     ):
         self.model = model or self.default_model()
         self.timeout = timeout
         self.readonly = readonly
+        # Best-effort: backends that support conversation resume (claude-code,
+        # codex) continue this session; all other backends ignore it.
+        self.resume_session_id = resume_session_id
         self.contexts = [load_context_file(p) for p in (context_files or [])]
 
     @classmethod

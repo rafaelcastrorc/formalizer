@@ -70,7 +70,6 @@ from refine_blueprint_with_lean import (
     _api_refine_prompt,
     _compile_module_olean,
     _compose_lean_file,
-    _decl_signatures,
     _decomposition_note,
     _default_lean_command,
     _dependency_descendants,
@@ -533,10 +532,27 @@ def _skeleton_code_findings(
             )
         )
     parsed = _parse_module(code)
+    # Comment-aware preamble lint. Lean block comments (`/- ... -/`, including
+    # doc comments) span lines and nest; a continuation line of a multi-line
+    # comment is comment TEXT, not a command. Flagging it produced an
+    # unfixable false positive: the model's file was valid Lean, so identical
+    # regens looped until the round budget was exhausted.
+    comment_depth = 0
     for line in parsed.preamble:
         stripped = line.strip()
-        if stripped and not stripped.startswith(("open", "--", "/-")):
-            findings.append(SkeletonFinding(f"unexpected non-`open` preamble command: `{stripped[:80]}`"))
+        inside_comment = comment_depth > 0
+        if not inside_comment and not stripped.startswith("--"):
+            if stripped and not stripped.startswith(("open", "/-")):
+                findings.append(
+                    SkeletonFinding(f"unexpected non-`open` preamble command: `{stripped[:80]}`")
+                )
+        # Track block-comment depth. `--` starts a line comment (its content
+        # has no delimiter meaning) unless we are already inside a block
+        # comment, where `--` is plain text and `-/` still closes.
+        if inside_comment or not stripped.startswith("--"):
+            comment_depth += stripped.count("/-") - stripped.count("-/")
+            if comment_depth < 0:
+                comment_depth = 0
     for decl in parsed.decls:
         if "sorry" not in decl.text:
             continue
@@ -710,6 +726,14 @@ class Ctx:
     section_size: int
     proof_batch: int
     use_ladder: bool
+    # Run-scoped adaptive Phase-1 section size: starts at section_size, halves
+    # when a skeleton call times out (see _freeze_section), and creeps back up
+    # after consecutive clean sections (see _run_phase1). 0 = not initialized.
+    effective_section_size: int = 0
+    # Largest size at which a group froze without a timeout-shrink this run.
+    # Recovery back up to this size is fast (doubling per clean group);
+    # exploring beyond it uses the cautious rule.
+    proven_section_size: int = 0
     nodes: dict[str, Node] = field(default_factory=dict)
     stmt_blocks: dict[str, str] = field(default_factory=dict)
     tex_blocks: dict[str, str] = field(default_factory=dict)
@@ -725,7 +749,15 @@ class Ctx:
         self.contract_fps = _contract_fingerprints(nodes)
 
 
-def _make_runner(spec: str, *, timeout: int, readonly: bool, effort: str | None, with_skill: bool = False):
+def _make_runner(
+    spec: str,
+    *,
+    timeout: int,
+    readonly: bool,
+    effort: str | None,
+    with_skill: bool = False,
+    resume_session_id: str | None = None,
+):
     kwargs = {}
     if spec.partition(":")[0] == "codex" and effort:
         kwargs["reasoning_effort"] = effort
@@ -734,6 +766,7 @@ def _make_runner(spec: str, *, timeout: int, readonly: bool, effort: str | None,
         context_files=[SKILL_PATH] if with_skill else None,
         timeout=timeout,
         readonly=readonly,
+        resume_session_id=resume_session_id,
         **kwargs,
     )
 
@@ -749,14 +782,29 @@ def _call_model(
     readonly: bool = True,
     escalated: bool = False,
     tag: str = "",
+    sessions: dict[str, str] | None = None,
 ) -> CallResult:
+    """One model call. When ``sessions`` is given (a per-lifecycle dict keyed
+    by runner spec), the call resumes that spec's backend session so follow-up
+    calls keep the context they already built (claude-code and codex support
+    this; other backends ignore it). Successful calls update the dict; failed
+    or timed-out calls drop the session so the next call starts clean."""
     runner_spec = ctx.escalation_runner_spec if escalated else ctx.runner_spec
-    runner = _make_runner(runner_spec, timeout=timeout, readonly=readonly, effort=effort)
+    resume_session_id = sessions.get(runner_spec) if sessions is not None else None
+    runner = _make_runner(
+        runner_spec,
+        timeout=timeout,
+        readonly=readonly,
+        effort=effort,
+        resume_session_id=resume_session_id,
+    )
     prompt_artifact = _store_text(ctx.telemetry, f"prompt_{purpose}", prompt)
     started = time.monotonic()
     try:
         result = runner.run(prompt, cwd=REPO_ROOT, retries=0)
     except RunnerError as exc:
+        if sessions is not None:
+            sessions.pop(runner_spec, None)
         duration = time.monotonic() - started
         _record(
             ctx.telemetry,
@@ -769,6 +817,7 @@ def _call_model(
             effort=effort or "",
             backend=runner.backend_name,
             model=runner.model,
+            resumed_session=bool(resume_session_id),
             prompt=prompt_artifact.to_event(REPO_ROOT),
             error=str(exc),
             environment_error=is_environment_error(exc),
@@ -778,6 +827,11 @@ def _call_model(
         status = "timeout" if _is_timeout_error(exc) else "error"
         _log(f"model call ({purpose}) {status}: {str(exc)[:160]}", tag=tag)
         return CallResult(status=status, error=str(exc), duration_s=duration)
+    if sessions is not None:
+        if result.session_id:
+            sessions[runner_spec] = result.session_id
+        else:
+            sessions.pop(runner_spec, None)
     response_artifact = _store_text(ctx.telemetry, f"response_{purpose}", result.text)
     _record(
         ctx.telemetry,
@@ -790,6 +844,7 @@ def _call_model(
         effort=effort or "",
         backend=result.backend,
         model=result.model,
+        resumed_session=bool(resume_session_id),
         prompt=prompt_artifact.to_event(REPO_ROOT),
         response=response_artifact.to_event(REPO_ROOT),
     )
@@ -929,6 +984,44 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
     return kept
 
 
+def _prune_stale_generated(ctx: Ctx, kept: list[Section]) -> None:
+    """Remove generated Lean artifacts not owned by a kept section.
+
+    Fresh runs rmtree the generated dir; this is the ``--continue`` analog.
+    Stale files are actively harmful, not just clutter: agent runners glob the
+    generated dir and mine old implementations (e.g. legacy ChunkNN modules
+    from the per-chunk pipeline) whose statements predate blueprint repairs —
+    burning call budget on exploration and risking stale formulations being
+    copied into new sections. Only the pipeline's own artifact patterns are
+    touched; anything else in the directory is left alone.
+    """
+    generated_dir = _generated_module_dir(ctx.name)
+    if not generated_dir.is_dir():
+        return
+    owned = {sec.path.resolve() for sec in kept}
+    owned |= {sec.path.with_suffix(".olean").resolve() for sec in kept}
+    removed: list[str] = []
+    for pattern in ("Chunk*.lean", "Chunk*.olean", "Skeleton*.lean", "Skeleton*.olean"):
+        for artifact in sorted(generated_dir.glob(pattern)):
+            if artifact.resolve() in owned:
+                continue
+            with contextlib.suppress(FileNotFoundError, OSError):
+                artifact.unlink()
+                removed.append(artifact.name)
+    if removed:
+        _log(
+            f"pruned {len(removed)} stale generated artifact(s): "
+            + ", ".join(removed[:8])
+            + ("..." if len(removed) > 8 else "")
+        )
+        _record(
+            ctx.telemetry,
+            "stale_artifacts_pruned",
+            count=len(removed),
+            files=removed,
+        )
+
+
 def _frozen_labels(sections: list[Section]) -> set[str]:
     return {label for sec in sections for label in sec.labels}
 
@@ -967,16 +1060,77 @@ def _sections_for_deps(ctx: Ctx, labels: list[str], sections: list[Section]) -> 
     return sorted(needed)
 
 
-def _accepted_signatures(sections: list[Section], modules: list[str]) -> str:
-    parts: list[str] = []
+# Terminal tactic/sorry proof on a theorem-like declaration; everything before
+# it is the statement, which is the declaration's entire interface.
+_TERMINAL_PROOF_RE = re.compile(r":=\s*(?:by\b[\s\S]*|sorry\s*)\Z")
+# Per-declaration cap for definition-kind interface text. Generated skeleton
+# bodies are one-node-sized, so this triggers rarely; it exists so one huge
+# body cannot evict whole modules from the digest budget.
+_INTERFACE_DECL_CAP = 2400
+
+FROZEN_INTERFACE_NOTE = """\
+This interface listing is generated deterministically from the frozen skeleton
+files and is COMPLETE for the modules it covers — including structure fields
+and definition bodies. Do NOT spend budget re-reading Skeleton*.lean or any
+generated Lean files to rediscover names, signatures, or fields: everything
+referenceable is below. It is an interface reference ONLY. The blueprint TeX
+is the sole mathematical source of truth, and the Lean you write exists to
+certify the blueprint — not to be self-consistent Lean on its own terms.
+Derive every statement 1-1 from the blueprint node text; use this interface
+solely to spell frozen dependencies with their exact names, types, and fields.
+If this interface ever seems to conflict with the blueprint, follow the
+blueprint and surface the mismatch — never adapt the mathematics to the Lean."""
+
+
+def _decl_interface_text(decl) -> str:
+    """One declaration's interface: full text for definition kinds (their body
+    IS their meaning), statement-only for theorem kinds (their proof is not
+    part of the interface, and in the skeleton is usually `sorry` anyway)."""
+    text = decl.text.strip()
+    if decl.kind in {"theorem", "lemma"}:
+        stripped = _TERMINAL_PROOF_RE.sub("", text).rstrip()
+        if stripped != text:
+            return stripped
+        head = text.split(":=", 1)[0].rstrip()
+        return head
+    if len(text) > _INTERFACE_DECL_CAP:
+        return text[:_INTERFACE_DECL_CAP].rstrip() + "\n-- ... body truncated; the name and signature above are frozen"
+    return text
+
+
+def _frozen_interface_digest(sections: list[Section], modules: list[str], *, budget: int = 24000) -> str:
+    """Complete, module-grouped interface digest of the frozen declarations in
+    ``modules``. Budgeting is module-granular: when over budget, the OLDEST
+    modules are dropped whole and named explicitly — never a silent mid-
+    declaration cut (a truncated structure is worse than an omitted one,
+    because the model then re-reads files to fill the gap)."""
+    blocks: list[tuple[str, str]] = []
     for sec in sections:
         if sec.module not in modules:
             continue
         try:
-            parts.append(_decl_signatures(sec.path.read_text(encoding="utf-8")))
+            code = sec.path.read_text(encoding="utf-8")
         except OSError:
             continue
-    return "\n\n".join(part for part in parts if part)
+        parts = [_decl_interface_text(decl) for decl in _lean_declarations(code).values()]
+        body = "\n\n".join(part for part in parts if part)
+        if body:
+            blocks.append((sec.module, f"-- ==== {sec.module} (frozen) ====\n{body}"))
+    total = sum(len(text) + 2 for _, text in blocks)
+    omitted: list[str] = []
+    while len(blocks) > 1 and total > budget:
+        module, text = blocks.pop(0)
+        omitted.append(module)
+        total -= len(text) + 2
+    digest = "\n\n".join(text for _, text in blocks)
+    if omitted:
+        digest = (
+            "-- NOTE: for space, interfaces of these older imported modules are omitted:\n"
+            f"-- {', '.join(omitted)}\n"
+            "-- Their declarations are still imported and frozen; any of their names used\n"
+            "-- by the modules below can be referenced as-is.\n\n" + digest
+        )
+    return digest
 
 
 # ---------------------------------------------------------------------------
@@ -1049,7 +1203,7 @@ this phase, but only to encode the SAME blueprint content correctly):
 {feedback[-14000:]}
 ```
 {previous_block}"""
-    signatures = _accepted_signatures(sections, import_modules)
+    signatures = _frozen_interface_digest(sections, import_modules, budget=24000)
     return f"""TASK: BLUEPRINT-SKELETON-SECTION
 
 Return exactly one Lean 4 file (one code block). No commentary.
@@ -1078,9 +1232,10 @@ Available imports for earlier accepted skeleton declarations:
 {chr(10).join(f'import {m}' for m in import_modules) or '-- none'}
 ```
 
-Signatures already frozen in those modules (use them; never redefine):
+Frozen Lean interface of those modules (use these exact names; never redefine).
+{FROZEN_INTERFACE_NOTE}
 ```lean
-{signatures[-14000:] or '-- none'}
+{signatures or '-- none'}
 ```
 
 Whole blueprint node graph (orientation only):
@@ -1112,7 +1267,7 @@ def _targeted_skeleton_patch_prompt(
         for finding in findings
         if finding.label in set(patch_labels) or finding.lean_name in {_lean_name(label) for label in patch_labels}
     ]
-    signatures = _accepted_signatures(sections, import_modules)
+    signatures = _frozen_interface_digest(sections, import_modules, budget=12000)
     return f"""TASK: PATCH-BLUEPRINT-SKELETON-DECLARATIONS
 
 Return exactly one Lean 4 code block. No commentary.
@@ -1144,9 +1299,9 @@ Available imports for earlier accepted skeleton declarations:
 {chr(10).join(f'import {m}' for m in import_modules) or '-- none'}
 ```
 
-Signatures already frozen in those modules:
+Frozen Lean interface of those modules (complete; do not re-read skeleton files):
 ```lean
-{signatures[-10000:] or '-- none'}
+{signatures or '-- none'}
 ```
 
 Deterministic audit findings to fix:
@@ -1267,6 +1422,7 @@ def _targeted_patch_skeleton_decls(
     findings: list[SkeletonFinding],
     *,
     timeout: int,
+    sessions: dict[str, str] | None = None,
 ) -> tuple[ParsedModule | None, str]:
     patch_labels = _patchable_skeleton_labels(findings, labels)
     if not patch_labels:
@@ -1292,6 +1448,7 @@ def _targeted_patch_skeleton_decls(
         timeout=timeout,
         effort=ctx.base_effort,
         labels=patch_labels,
+        sessions=sessions,
     )
     if result.status == "timeout":
         result = _call_model(
@@ -1302,6 +1459,7 @@ def _targeted_patch_skeleton_decls(
             effort=ctx.escalation_effort,
             labels=patch_labels,
             escalated=True,
+            sessions=sessions,
         )
     if result.status != "ok":
         return None, f"targeted declaration patch {result.status}: {result.error}"
@@ -1353,7 +1511,7 @@ def _proof_prompt(
             f"Blueprint node with proof sketch:\n```tex\n{ctx.tex_blocks.get(label, '')[:6000]}\n```"
             f"{error_block}"
         )
-    signatures = _accepted_signatures(sections, import_modules)
+    signatures = _frozen_interface_digest(sections, import_modules, budget=20000)
     single_note = (
         "\nThis is an escalated single-declaration call; think as long as needed "
         "within the budget.\n"
@@ -1389,9 +1547,11 @@ replaced by a real proof:
 
 Blueprint name: {ctx.name}
 
-Available frozen signatures (same module and imported skeleton modules):
+Frozen Lean interface (same module and imported skeleton modules; use these
+exact names — dependencies must be cited by them).
+{FROZEN_INTERFACE_NOTE}
 ```lean
-{signatures[-14000:] or '-- none'}
+{signatures or '-- none'}
 ```
 
 Target declarations:
@@ -1459,7 +1619,11 @@ def _skeleton_deterministic_audit(code: str, ctx: Ctx, labels: list[str]) -> lis
 
 
 def _model_alignment_audit(
-    ctx: Ctx, labels: list[str], code: str, *, tag: str = ""
+    ctx: Ctx,
+    labels: list[str],
+    code: str,
+    *,
+    tag: str = "",
 ) -> tuple[str, str, set[str]] | None:
     """Batched blueprint-contract audit. None means accepted.
 
@@ -1469,6 +1633,12 @@ def _model_alignment_audit(
     decls = _lean_declarations(code)
     nodes = {label: ctx.nodes[label] for label in labels}
     prompt = _statement_audit_prompt(ctx.name, nodes, ctx.tex_blocks, decls, ctx.paper_text)
+    # Judge independence: the audit NEVER shares a session with the generator
+    # or with its own earlier verdicts (no `sessions` passed — each audit is a
+    # fresh conversation seeing only the artifact and the blueprint). A judge
+    # that resumes the producer's session inherits its self-justification
+    # (rubber-stamp risk) or anchors on its own prior verdict instead of
+    # re-reading the new file. Producers share sessions; judges must not.
     result = _call_model(
         ctx,
         prompt,
@@ -1552,12 +1722,17 @@ def _freeze_section(
     path.parent.mkdir(parents=True, exist_ok=True)
     _log(f"==> Skeleton section {next_number:02d}: {len(labels)} node(s): " + ", ".join(labels[:6]) + ("..." if len(labels) > 6 else ""))
 
+    # One backend session per runner spec for this section's whole lifecycle
+    # (generation, patches, error-fix rounds, audit): follow-up calls keep the
+    # Mathlib exploration and module context instead of rebuilding it cold.
+    sessions: dict[str, str] = {}
     feedback = ""
     previous_code = ""
     audit_rounds = 0
     escalated_refusals: set[str] = set()
     force_escalated_round = force_first_escalated
     escalated_stagnation_fps: set[tuple[tuple[str, str, str, str], ...]] = set()
+    regen_signatures: set[tuple[str, tuple[tuple[str, str, str, str], ...]]] = set()
     for round_no in range(1, STATEMENT_FIX_ROUNDS + AUDIT_REGEN_ROUNDS + 2):
         use_escalated_runner = force_escalated_round
         force_escalated_round = False
@@ -1580,13 +1755,78 @@ def _freeze_section(
             effort=effort,
             labels=labels,
             escalated=use_escalated_runner,
+            sessions=sessions,
         )
         result_was_escalated = use_escalated_runner
+        if result.status == "timeout" and len(labels) > 1 and timeout < ctx.hard_timeout:
+            # First timeout on a batch is ambiguous: output-bound (too many
+            # nodes for the budget — bisection helps) or exploration-bound
+            # (context gathering costs the same at any batch size — bisection
+            # cannot help and just multiplies the waste). One retry of the
+            # SAME labels at the hard budget, same runner and effort,
+            # distinguishes the two for the price of a single call; only a
+            # second timeout justifies bisecting.
+            _log(
+                f"  section call timed out at {timeout}s; retrying the same "
+                f"{len(labels)} node(s) once at {ctx.hard_timeout}s before bisecting"
+            )
+            retry_prompt = _skeleton_prompt(
+                ctx,
+                labels,
+                sections,
+                import_modules,
+                feedback=feedback,
+                previous_code=previous_code,
+                timeout_s=ctx.hard_timeout,
+            )
+            result = _call_model(
+                ctx,
+                retry_prompt,
+                purpose="skeleton_generation",
+                timeout=ctx.hard_timeout,
+                effort=effort,
+                labels=labels,
+                escalated=use_escalated_runner,
+                sessions=sessions,
+            )
+            if result.status == "ok":
+                # The batch fits the hard budget but not the base budget, so
+                # this size would pay the base-timeout tax on every future
+                # group. Shrink mildly and pin fast recovery below the rescued
+                # size so the sizes settle where the base budget suffices.
+                rescued_size = max(1, len(labels) * 3 // 4)
+                if rescued_size < (ctx.effective_section_size or ctx.section_size):
+                    ctx.effective_section_size = rescued_size
+                    if ctx.proven_section_size:
+                        ctx.proven_section_size = min(ctx.proven_section_size, rescued_size)
+                    _log(f"  adaptive section size reduced to {rescued_size} (batch needed the hard budget)")
+                    _record(
+                        ctx.telemetry,
+                        "adaptive_section_size",
+                        size=rescued_size,
+                        reason="hard_budget_rescue",
+                        labels=labels,
+                    )
         if result.status == "timeout":
             if len(labels) > 1:
-                # Latency, not difficulty: bisect the section and recurse.
+                # Still timing out at the hard budget: output-bound after all.
+                # Bisect the section and recurse.
                 mid = len(labels) // 2
                 _log(f"  section call timed out; bisecting into {mid} + {len(labels) - mid} node(s)")
+                # This size demonstrably does not fit the base timeout, so
+                # don't make future groups rediscover that: shrink the
+                # run-scoped section size (Phase 2 already does this for
+                # proof batches).
+                if 0 < mid < (ctx.effective_section_size or ctx.section_size):
+                    ctx.effective_section_size = mid
+                    _log(f"  adaptive section size reduced to {mid} for the rest of this run")
+                    _record(
+                        ctx.telemetry,
+                        "adaptive_section_size",
+                        size=mid,
+                        reason="skeleton_timeout",
+                        labels=labels,
+                    )
                 first = _freeze_section(ctx, labels[:mid], sections, next_number)
                 combined = sections + first
                 second = _freeze_section(
@@ -1601,6 +1841,7 @@ def _freeze_section(
                 effort=ctx.escalation_effort,
                 labels=labels,
                 escalated=True,
+                sessions=sessions,
             )
             result_was_escalated = True
             if result.status == "error":
@@ -1686,6 +1927,7 @@ def _freeze_section(
                 module_code,
                 findings,
                 timeout=ctx.base_timeout if patch_round == 1 else ctx.hard_timeout,
+                sessions=sessions,
             )
             if patched is None:
                 break
@@ -1774,18 +2016,68 @@ def _freeze_section(
             if patch_note and patch_note != "not patchable":
                 feedback += f"\n\nTargeted declaration patch result: {patch_note}"
             previous_code = module_code
+            # Stagnation guard: if this round produced the SAME file failing
+            # the SAME findings as a previous round, the regen prompt is
+            # byte-identical and another round cannot make progress. Escalate
+            # once; if the escalated round is also identical, stop and say so
+            # instead of burning the remaining rounds on the same question.
+            signature = (
+                hashlib.sha256(module_code.encode("utf-8")).hexdigest(),
+                _skeleton_findings_fingerprint(findings),
+            )
+            if signature in regen_signatures:
+                if not result_was_escalated:
+                    force_escalated_round = True
+                    _log(
+                        "  regeneration is stagnant (identical file and findings); "
+                        "escalating once"
+                    )
+                    continue
+                raise RepairRequest(
+                    "Skeleton regeneration is stagnant: repeated rounds return an "
+                    "identical file failing identical deterministic findings, "
+                    "including at escalated effort. The generated Lean may actually "
+                    "be valid and the findings may reflect a harness/lint issue "
+                    "rather than a blueprint problem — verify the findings against "
+                    "the file before editing any blueprint statement:\n" + feedback,
+                    labels,
+                    section_labels=labels,
+                )
+            regen_signatures.add(signature)
             _log(f"  deterministic audit failed ({len(issues)} issue(s)); regenerating")
             continue
 
         path.write_text(module_code, encoding="utf-8")
-        ok, output = _check_lean(path, ctx.lean_command)
+        # The Lean compile (subprocess) and the model alignment audit (model
+        # call) are independent checks of the same artifact — run them
+        # concurrently and pay max() instead of sum(). Lean's verdict stays
+        # authoritative: if the file doesn't compile, the audit outcome is
+        # discarded — a non-compiling file gets compile feedback, and its
+        # audit must not count toward audit_rounds or trigger repair.
+        lean_outcome: list = []
+
+        def _lean_worker() -> None:
+            try:
+                lean_outcome.append(("result", _check_lean(path, ctx.lean_command)))
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the main thread
+                lean_outcome.append(("raised", exc))
+
+        lean_thread = threading.Thread(target=_lean_worker, daemon=True)
+        lean_thread.start()
+        try:
+            audit = _model_alignment_audit(ctx, labels, module_code)
+        finally:
+            lean_thread.join()
+        outcome_kind, payload = lean_outcome[0]
+        if outcome_kind == "raised":
+            raise payload
+        ok, output = payload
         if not ok:
             feedback = f"Lean rejected the file:\n{output[-12000:]}"
             previous_code = module_code
             _log("  lean rejected skeleton section; sending errors back")
             continue
 
-        audit = _model_alignment_audit(ctx, labels, module_code)
         if audit is not None:
             kind, reason, rejected = audit
             if kind == "blueprint":
@@ -1836,11 +2128,64 @@ def _freeze_section(
 
 def _run_phase1(ctx: Ctx, sections: list[Section], pending: set[str]) -> list[Section]:
     next_number = max((sec.number for sec in sections), default=0) + 1
-    for group in _partition_sections(ctx.nodes, pending, ctx.section_size):
+    if ctx.effective_section_size <= 0:
+        ctx.effective_section_size = ctx.section_size
+    # Same filter as _partition_sections, but sliced lazily so each group is
+    # cut at the *current* adaptive size rather than pre-chunked at the
+    # configured size: a timeout in group 1 shrinks every later group too.
+    order = [
+        label
+        for label in _topo_order(ctx.nodes)
+        if label in pending and not ctx.nodes[label].mathlibok
+    ]
+    clean_streak = 0
+    index = 0
+    while index < len(order):
+        size = max(1, min(ctx.effective_section_size, ctx.section_size))
+        group = order[index : index + size]
+        index += len(group)
+        size_before = ctx.effective_section_size
         new_sections = _freeze_section(ctx, group, sections, next_number)
         sections.extend(new_sections)
         next_number = max(sec.number for sec in sections) + 1
         _save_state(ctx.name, sections, ctx.stmt_fps, ctx.contract_fps)
+        if ctx.effective_section_size != size_before:
+            # A nested timeout shrank the run-scoped size mid-group.
+            clean_streak = 0
+            continue
+        clean_streak += 1
+        ctx.proven_section_size = max(ctx.proven_section_size, len(group))
+        recovery_target = min(ctx.proven_section_size, ctx.section_size)
+        if ctx.effective_section_size < recovery_target:
+            # Fast recovery: a bigger size already froze cleanly this run, so
+            # a post-collapse crawl (1 -> 2 -> 3 -> ...) is wasted overhead.
+            # Double back toward the proven size after every clean group.
+            grown = min(recovery_target, max(ctx.effective_section_size * 2, ctx.effective_section_size + 1))
+            _log(f"  adaptive section size recovering to {grown} (proven this run: {recovery_target})")
+            _record(
+                ctx.telemetry,
+                "adaptive_section_size",
+                size=grown,
+                reason="recovery",
+                labels=[],
+            )
+            ctx.effective_section_size = grown
+            clean_streak = 0
+        elif clean_streak >= 2 and ctx.effective_section_size < ctx.section_size:
+            grown = min(
+                ctx.section_size,
+                max(ctx.effective_section_size + 1, ctx.effective_section_size * 3 // 2),
+            )
+            _log(f"  adaptive section size grown to {grown} after {clean_streak} clean section(s)")
+            _record(
+                ctx.telemetry,
+                "adaptive_section_size",
+                size=grown,
+                reason="clean_streak",
+                labels=[],
+            )
+            ctx.effective_section_size = grown
+            clean_streak = 0
     return sections
 
 
@@ -2063,6 +2408,9 @@ def _apply_proof_batch(
 def _prove_section(ctx: Ctx, sec: Section, sections: list[Section]) -> SectionProofOutcome:
     tag = f"S{sec.number:02d}"
     outcome = SectionProofOutcome(section=sec)
+    # Per-section backend sessions (worker-thread local): proof rounds over the
+    # same file reuse the context built by earlier rounds. See _call_model.
+    sessions: dict[str, str] = {}
     parsed, index = _module_decl_texts(sec)
     sorry_labels = [
         label
@@ -2122,6 +2470,7 @@ def _prove_section(ctx: Ctx, sec: Section, sections: list[Section]) -> SectionPr
                 effort=ctx.base_effort,
                 labels=batch,
                 tag=tag,
+                sessions=sessions,
             )
             if result.status == "timeout" and len(batch) > 1:
                 # Latency: halve the batch size for the rest of this section.
@@ -2232,6 +2581,7 @@ def _prove_section(ctx: Ctx, sec: Section, sections: list[Section]) -> SectionPr
                 labels=[label],
                 escalated=True,
                 tag=tag,
+                sessions=sessions,
             )
             if result.status != "ok":
                 errors.setdefault(
@@ -2862,6 +3212,7 @@ def main(argv: list[str] | None = None) -> int:
             _state_path(args.name).unlink()
 
     sections: list[Section] = _load_state(ctx, lean_command) if args.continue_run else []
+    _prune_stale_generated(ctx, sections)
 
     report_lines = [
         f"# Statements-First Formalization: `{args.name}`",

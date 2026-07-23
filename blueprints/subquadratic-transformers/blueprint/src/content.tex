@@ -948,6 +948,36 @@
   definition of the displayed scalar-valued function.
 \end{definition}
 
+\begin{lemma}[Apply equation for the raw product-indexed Kronecker sum]
+  \label{lem:kron-inner-raw-product-sum-apply}
+  \uses{def:kron-inner-raw-product-sum}
+  For finite index sets $I,J$ and vectors $v,w:I\to\R$ and $x,y:J\to\R$,
+  \[
+    \operatorname{kronInnerRawProductSum}(v,w,x,y)
+    =
+    \sum_{p\in I\times J}
+      (v_{p_1}x_{p_2})(w_{p_1}y_{p_2}).
+  \]
+  This node owns only the unfolded apply equation for
+  Definition~\ref{def:kron-inner-raw-product-sum}. It does not mention the
+  Kronecker inner product and it does not reassociate scalar factors. A formal
+  declaration at this label is a single unfold/`rfl' theorem: after unfolding
+  Definition~\ref{def:kron-inner-raw-product-sum} the two sides are literally
+  the same finite sum.
+\end{lemma}
+\begin{proof}
+  \uses{def:kron-inner-raw-product-sum}
+  Unfold Definition~\ref{def:kron-inner-raw-product-sum}. The remaining Lean
+  goal is the reflexive finite-sum equality
+  \[
+    \sum_{p\in I\times J}(v_{p_1}x_{p_2})(w_{p_1}y_{p_2})
+    =
+    \sum_{p\in I\times J}(v_{p_1}x_{p_2})(w_{p_1}y_{p_2}),
+  \]
+  closed by `rfl' or `simpa [def_kron_inner_raw_product_sum]'. It must not be
+  left as `:= sorry'.
+\end{proof}
+
 \begin{definition}[Separated product-indexed Kronecker inner-product sum]
   \label{def:kron-inner-separated-product-sum}
   For finite index sets $I,J$ and vectors $v,w:I\to\R$ and $x,y:J\to\R$,
@@ -965,9 +995,32 @@
   displayed scalar-valued function.
 \end{definition}
 
+\begin{lemma}[Apply equation for the separated product-indexed Kronecker sum]
+  \label{lem:kron-inner-separated-product-sum-apply}
+  \uses{def:kron-inner-separated-product-sum}
+  For finite index sets $I,J$ and vectors $v,w:I\to\R$ and $x,y:J\to\R$,
+  \[
+    \operatorname{kronInnerSeparatedProductSum}(v,w,x,y)
+    =
+    \sum_{p\in I\times J}
+      (v_{p_1}w_{p_1})(x_{p_2}y_{p_2}).
+  \]
+  This node owns only the unfolded apply equation for
+  Definition~\ref{def:kron-inner-separated-product-sum}. It does not mention the
+  Kronecker inner product and it does not reindex the sum as a double sum. A
+  formal declaration at this label is a single unfold/`rfl' theorem.
+\end{lemma}
+\begin{proof}
+  \uses{def:kron-inner-separated-product-sum}
+  Unfold Definition~\ref{def:kron-inner-separated-product-sum}; the remaining
+  Lean goal is a reflexive finite-sum equality closed by `rfl' or
+  `simpa [def_kron_inner_separated_product_sum]'. It must not be left as
+  `:= sorry'.
+\end{proof}
+
 \begin{lemma}[Kronecker inner product equals the named raw product sum]
   \label{lem:kron-inner-eq-raw-product-sum}
-  \uses{def:kron-inner-raw-product-sum, lem:kron-inner-unfold-product-sum}
+  \uses{lem:kron-inner-unfold-product-sum, lem:kron-inner-raw-product-sum-apply}
   For finite index sets $I,J$ and vectors $v,w:I\to\R$ and $x,y:J\to\R$,
   \[
     \inner{v\otimes x}{w\otimes y}
@@ -980,20 +1033,28 @@
   reassociate scalar factors.
 \end{lemma}
 \begin{proof}
-  \uses{def:kron-inner-raw-product-sum, lem:kron-inner-unfold-product-sum}
+  \uses{lem:kron-inner-unfold-product-sum, lem:kron-inner-raw-product-sum-apply}
   Apply Lemma~\ref{lem:kron-inner-unfold-product-sum} to rewrite the
   Kronecker inner product as
   \[
     \sum_{p\in I\times J} (v_{p_1}x_{p_2})(w_{p_1}y_{p_2}).
   \]
-  This finite sum is exactly
-  $\operatorname{kronInnerRawProductSum}(v,w,x,y)$ by
-  Definition~\ref{def:kron-inner-raw-product-sum}.
+  Then rewrite this finite sum as
+  $\operatorname{kronInnerRawProductSum}(v,w,x,y)$ using the reverse direction
+  of Lemma~\ref{lem:kron-inner-raw-product-sum-apply}.
+
+  Both steps are explicit lemma rewrites, not definitional closures. In Lean,
+  `rw [kron_inner_unfold_product_sum]` puts the goal in the finite-sum form and
+  `rw [\leftarrow kron_inner_raw_product_sum_apply]` (or
+  `exact (kron_inner_raw_product_sum_apply ..).symm.trans ...`) rewrites the sum
+  to the named function. The generated declaration must carry out these two
+  rewrites and must not be left as `:= sorry'; an admitted placeholder does not
+  certify the equality even though it type-checks.
 \end{proof}
 
 \begin{lemma}[Named raw product sum equals the named separated product sum]
   \label{lem:kron-inner-raw-eq-separated-product-sum}
-  \uses{def:kron-inner-raw-product-sum, def:kron-inner-separated-product-sum, lem:kron-inner-product-sum-reassoc}
+  \uses{lem:kron-inner-raw-product-sum-apply, lem:kron-inner-separated-product-sum-apply, lem:kron-inner-product-sum-reassoc}
   For finite index sets $I,J$ and vectors $v,w:I\to\R$ and $x,y:J\to\R$,
   \[
     \operatorname{kronInnerRawProductSum}(v,w,x,y)
@@ -1006,10 +1067,25 @@
   product-indexed sum as a double sum.
 \end{lemma}
 \begin{proof}
-  \uses{def:kron-inner-raw-product-sum, def:kron-inner-separated-product-sum, lem:kron-inner-product-sum-reassoc}
-  Unfold Definitions~\ref{def:kron-inner-raw-product-sum} and
-  \ref{def:kron-inner-separated-product-sum}. The remaining statement is
-  exactly Lemma~\ref{lem:kron-inner-product-sum-reassoc}.
+  \uses{lem:kron-inner-raw-product-sum-apply, lem:kron-inner-separated-product-sum-apply, lem:kron-inner-product-sum-reassoc}
+  Rewrite the left-hand side by
+  Lemma~\ref{lem:kron-inner-raw-product-sum-apply}:
+  \[
+    \operatorname{kronInnerRawProductSum}(v,w,x,y)
+    =
+    \sum_{p\in I\times J}(v_{p_1}x_{p_2})(w_{p_1}y_{p_2}).
+  \]
+  Rewrite this finite sum by Lemma~\ref{lem:kron-inner-product-sum-reassoc} to
+  obtain $\sum_{p\in I\times J}(v_{p_1}w_{p_1})(x_{p_2}y_{p_2})$. Finally
+  rewrite by the reverse direction of
+  Lemma~\ref{lem:kron-inner-separated-product-sum-apply} to reach
+  $\operatorname{kronInnerSeparatedProductSum}(v,w,x,y)$.
+
+  Each of the three steps is an explicit lemma rewrite. In Lean,
+  `rw [kron_inner_raw_product_sum_apply, kron_inner_product_sum_reassoc,
+  \leftarrow kron_inner_separated_product_sum_apply]` discharges the goal. The
+  generated declaration must actually invoke these dependencies and must not be
+  left as `:= sorry'.
 \end{proof}
 
 \begin{lemma}[Kronecker inner product after summand reassociation]
@@ -1101,23 +1177,83 @@
   separated product-indexed sum to obtain the displayed iterated double sum.
 \end{proof}
 
+\begin{lemma}[Separated double sum as a product of coordinate sums]
+  \label{lem:kron-inner-double-sum-to-product}
+  \uses{lem:sum-mul-sum}
+  For finite index sets $I,J$ and vectors $v,w:I\to\R$ and $x,y:J\to\R$,
+  \[
+    \sum_{i\in I}\sum_{j\in J}(v_i w_i)(x_j y_j)
+    =
+    \left(\sum_{i\in I} v_i w_i\right)\left(\sum_{j\in J} x_j y_j\right).
+  \]
+  This node owns only the single finite-sum factorization step. It does not
+  mention inner products or Kronecker products, and it does not identify either
+  coordinate sum with an inner product. In Lean it is one reverse rewrite by
+  `Fintype.sum_mul_sum'.
+\end{lemma}
+\begin{proof}
+  \uses{lem:sum-mul-sum}
+  Apply Lemma~\ref{lem:sum-mul-sum} in the reverse direction with
+  $f(i)=v_iw_i$ and $g(j)=x_jy_j$. The single Lean step is
+  `rw [\leftarrow Fintype.sum_mul_sum]' (or `exact (Fintype.sum_mul_sum ..).symm').
+\end{proof}
+
+\begin{lemma}[Product of coordinate sums equals the product of inner products]
+  \label{lem:kron-inner-product-of-sums-eq-inner}
+  \uses{lem:inner-prod-eq-raw-coordinate-sum}
+  For finite index sets $I,J$ and vectors $v,w:I\to\R$ and $x,y:J\to\R$,
+  \[
+    \left(\sum_{i\in I} v_i w_i\right)\left(\sum_{j\in J} x_j y_j\right)
+    =
+    \inner{v}{w}\cdot\inner{x}{y}.
+  \]
+  This node owns only the identification of each raw coordinate sum with an
+  inner product, using Lemma~\ref{lem:inner-prod-eq-raw-coordinate-sum} in
+  reverse. It performs no finite-sum factorization and mentions no Kronecker
+  product. The identification of $\sum_i v_iw_i$ with $\inner{v}{w}$ is
+  \emph{not} definitional for the Mathlib inner product on Euclidean space; it
+  must be discharged by Lemma~\ref{lem:inner-prod-eq-raw-coordinate-sum} and it
+  cannot be closed by `rfl'.
+\end{lemma}
+\begin{proof}
+  \uses{lem:inner-prod-eq-raw-coordinate-sum}
+  By Lemma~\ref{lem:inner-prod-eq-raw-coordinate-sum}, applied in reverse with
+  $K=I$ and then with $K=J$,
+  \[
+    \sum_{i\in I} v_i w_i=\inner{v}{w},
+    \qquad
+    \sum_{j\in J} x_j y_j=\inner{x}{y}.
+  \]
+  Rewrite both factors accordingly; the Lean step is
+  `rw [\leftarrow inner_prod_eq_raw_coordinate_sum,
+  \leftarrow inner_prod_eq_raw_coordinate_sum]'. It must not be left as `sorry'.
+\end{proof}
+
 \begin{lemma}[Factoring the Kronecker inner-product double sum]
   \label{lem:kron-inner-double-sum-factor}
-  \uses{def:inner-prod, lem:sum-mul-sum}
+  \uses{lem:kron-inner-double-sum-to-product, lem:kron-inner-product-of-sums-eq-inner}
   For finite index sets $I,J$ and vectors $v,w:I\to\R$ and $x,y:J\to\R$,
   \[
     \sum_{i\in I}\sum_{j\in J}(v_i w_i)(x_j y_j)
     =
     \inner{v}{w}\cdot\inner{x}{y}.
   \]
-  This node owns only the final finite-sum factorization. It assumes the double
-  sum is already in separated form and does not mention Kronecker products.
+  This node is now only the final transitivity step between two separately
+  formalized helpers. Lemma~\ref{lem:kron-inner-double-sum-to-product} rewrites
+  the double sum as the product of two coordinate sums, and
+  Lemma~\ref{lem:kron-inner-product-of-sums-eq-inner} identifies that product
+  with $\inner{v}{w}\cdot\inner{x}{y}$. A formal declaration at this label
+  composes those two equations and must not perform the finite-sum
+  factorization or the inner-product identification internally.
 \end{lemma}
 \begin{proof}
-  \uses{def:inner-prod, lem:sum-mul-sum}
-  Apply Lemma~\ref{lem:sum-mul-sum} in the reverse direction with
-  $f(i)=v_iw_i$ and $g(j)=x_jy_j$. The two resulting sums are exactly
-  $\inner{v}{w}$ and $\inner{x}{y}$ by Definition~\ref{def:inner-prod}.
+  \uses{lem:kron-inner-double-sum-to-product, lem:kron-inner-product-of-sums-eq-inner}
+  First apply Lemma~\ref{lem:kron-inner-double-sum-to-product} to rewrite the
+  double sum as
+  $\left(\sum_{i\in I} v_i w_i\right)\left(\sum_{j\in J} x_j y_j\right)$. Then
+  apply Lemma~\ref{lem:kron-inner-product-of-sums-eq-inner} to identify this
+  product with $\inner{v}{w}\cdot\inner{x}{y}$. In Lean this is
+  `rw [kron_inner_double_sum_to_product, kron_inner_product_of_sums_eq_inner]'.
 \end{proof}
 
 \begin{lemma}[Multiplicativity of inner products under Kronecker product]
@@ -1216,27 +1352,20 @@
   \[
     v^{\otimes0}(\sigma)\,w^{\otimes0}(\sigma)=1 .
   \]
-  This node owns only the pointwise scalar product of the two zero-fold
-  Kronecker powers at one coordinate. It does not use singleton-ness of the
-  index type and it does not expand the inner product.
+  This node owns the full zero-fold summand evaluation as a single declaration.
+  It rewrites each coordinate factor to $1$ using
+  Lemma~\ref{lem:kron-power-zero} and then closes the residual scalar identity
+  $1\cdot1=1$ by Lemma~\ref{lem:real-one-mul-one}. It does not use
+  singleton-ness of the index type and it does not expand the inner product.
 \end{lemma}
 \begin{proof}
   \uses{def:kron-power, lem:kron-power-zero, lem:real-one-mul-one}
-  Lemma~\ref{lem:kron-power-zero} gives
-  $v^{\otimes0}(\sigma)=1$ and $w^{\otimes0}(\sigma)=1$. Substitute these two
-  coordinate values. The remaining goal is the real scalar identity
-  $1\cdot1=1$, which is exactly Lemma~\ref{lem:real-one-mul-one}.
-
-  Trial-6 failure-specific refinement: after the two coordinate rewrites, a
-  generated Lean proof is not complete until it explicitly closes the residual
-  scalar goal
-  \[
-    1*1=1.
-  \]
-  The intended final proof step is `simpa' or an application of the standard
-  `mul_one' fact recorded in Lemma~\ref{lem:real-one-mul-one}; stopping after
-  the substitutions leaves the unsolved goal reported by the disposable Lean
-  checker.
+  Lemma~\ref{lem:kron-power-zero} gives $v^{\otimes0}(\sigma)=1$ and
+  $w^{\otimes0}(\sigma)=1$. Rewrite the two coordinate factors by these
+  equations; the goal becomes the scalar identity $1\cdot1=1$, which is closed
+  by Lemma~\ref{lem:real-one-mul-one}. In Lean,
+  `rw [kron_power_zero, kron_power_zero]; exact real_one_mul_one' (or
+  `simp [kron_power_zero]'). It must not be left as `:= sorry'.
 \end{proof}
 
 \begin{definition}[Zero-fold Kronecker inner-sum index type]
@@ -2068,9 +2197,144 @@
   through the audited name reduces to the displayed fields above.
 \end{definition}
 
+\begin{definition}[Problem-size extraction function]
+  \label{def:problem-size}
+  \uses{def:problem-family}
+  For a concrete problem family $\mathcal P$
+  (Definition~\ref{def:problem-family}) this node introduces the natural-number
+  \emph{size} projection
+  \[
+    \operatorname{size}_{\mathcal P}:
+      \operatorname{Param}_{\mathcal P}\to\N
+  \]
+  which returns the size parameter $n$ on which the worst-case running time is
+  measured. It is exactly the quantity fed to the runtime function
+  $T:\N\to\R_{\ge0}$ of Definition~\ref{def:truly-subquadratic}. For every named
+  family in this blueprint the parameter tuple has $n$ as its first component,
+  and $\operatorname{size}_{\mathcal P}$ is the first projection:
+  \[
+    \operatorname{size}_{\mathcal P}(n,\ell)=n,\quad
+    \operatorname{size}_{\mathcal P}(n,\ell,t)=n,\quad
+    \operatorname{size}_{\mathcal P}(n,\ell,\gamma)=n,\quad
+    \operatorname{size}_{\mathcal P}(n_L,n_R,\ell)=n_L+n_R,
+  \]
+  and analogously for the bichromatic and additive parameter records, taking the
+  total number of input vectors. A formal declaration at this label is a single
+  function $\operatorname{Param}_{\mathcal P}\to\N$ together with the projection
+  equation
+  $\operatorname{size}_{\mathcal P}(p)=n(p)$ for each concrete family. It is not a
+  constant function, and it must return the same $n$ that the truly-subquadratic
+  bound $C\, n^{2-\eps}$ is stated over; a size function that ignores the number
+  of input vectors is rejected.
+\end{definition}
+
+\begin{definition}[Kind-indexed algorithm output type]
+  \label{def:alg-out}
+  \uses{def:problem-family}
+  For a concrete problem family $\mathcal P$, a parameter
+  $p:\operatorname{Param}_{\mathcal P}$, and an instance
+  $I:\operatorname{Inst}_{\mathcal P}(p)$, define the single dependent
+  \emph{algorithm output type}, selected by $\mathcal P.\operatorname{Kind}$:
+  \[
+    \operatorname{AlgOut}_{\mathcal P}(p,I) :=
+    \begin{cases}
+      \operatorname{Out}_{\mathcal P}(p,I)
+        & \text{if }\mathcal P.\operatorname{Kind}=\mathrm{search},\\
+      \{\mathrm{true},\mathrm{false}\}
+        & \text{if }\mathcal P.\operatorname{Kind}=\mathrm{decision},\\
+      \{\mathrm{true},\mathrm{false}\}
+        & \text{if }\mathcal P.\operatorname{Kind}=\mathrm{promise}.
+    \end{cases}
+  \]
+  Thus a search family returns a valid search output, and a decision or promise
+  family returns a Boolean. A formal declaration at this label is a single
+  function computing this type from $\mathcal P.\operatorname{Kind}$,
+  $\operatorname{Out}_{\mathcal P}$, and the Boolean type. It must be exactly the
+  displayed three-way case split; there is no separate search/decision/promise
+  output field. This node owns only the output type. It does not state any
+  correctness relation, runtime bound, or size function.
+\end{definition}
+
+\begin{definition}[Kind-indexed algorithm correctness relation]
+  \label{def:alg-correct}
+  \uses{def:problem-family, def:alg-out}
+  For a concrete problem family $\mathcal P$, a parameter
+  $p:\operatorname{Param}_{\mathcal P}$, an instance
+  $I:\operatorname{Inst}_{\mathcal P}(p)$, and a candidate output
+  $o:\operatorname{AlgOut}_{\mathcal P}(p,I)$
+  (Definition~\ref{def:alg-out}), define the single dependent
+  \emph{correctness relation}, selected by $\mathcal P.\operatorname{Kind}$:
+  \[
+    \operatorname{AlgCorrect}_{\mathcal P}(p,I,o) :=
+    \begin{cases}
+      \operatorname{ValidOut}_{\mathcal P}(p,I,o)
+        & \text{if }\mathcal P.\operatorname{Kind}=\mathrm{search},\\
+      \bigl(o=\mathrm{true}\Longleftrightarrow
+        \operatorname{Yes}_{\mathcal P}(p,I)\bigr)
+        & \text{if }\mathcal P.\operatorname{Kind}=\mathrm{decision},\\
+      \bigl(\operatorname{Yes}_{\mathcal P}(p,I)\Rightarrow
+        o=\mathrm{true}\bigr)\wedge
+      \bigl(\operatorname{No}_{\mathcal P}(p,I)\Rightarrow
+        o=\mathrm{false}\bigr)
+        & \text{if }\mathcal P.\operatorname{Kind}=\mathrm{promise}.
+    \end{cases}
+  \]
+  Thus a search algorithm proves only the concrete search output relation
+  $\operatorname{ValidOut}_{\mathcal P}$; a decision algorithm proves the Boolean
+  matches the yes-predicate; a promise algorithm proves the yes/no separation.
+  A formal declaration at this label is a single $\mathrm{Prop}$-valued function
+  computing this relation from $\mathcal P.\operatorname{Kind}$ and the concrete
+  $\operatorname{ValidOut}_{\mathcal P}$, $\operatorname{Yes}_{\mathcal P}$,
+  $\operatorname{No}_{\mathcal P}$ relations of $\mathcal P$. It must be exactly
+  the displayed three-way case split, and it must use the family's own concrete
+  relations, not an abstract tag. This node owns only the correctness relation;
+  it does not carry a runtime bound.
+\end{definition}
+
+\begin{definition}[Truly subquadratic runtime predicate for a parameter-indexed runtime]
+  \label{def:alg-runtime-tsq}
+  \uses{def:problem-family, def:problem-size, def:truly-subquadratic}
+  For a concrete problem family $\mathcal P$, a runtime function
+  \[
+    T:\operatorname{Param}_{\mathcal P}\to\R_{\ge0},
+  \]
+  and a parameter-regime predicate
+  $\operatorname{Regime}:\operatorname{Param}_{\mathcal P}\to\mathrm{Prop}$,
+  define the proposition
+  \[
+    \operatorname{IsTrulySubquadratic}_{\mathcal P}(T,\operatorname{Regime})
+  \]
+  to hold iff there exist constants $\eps>0$, $C>0$ and $n_0$ such that for
+  every in-regime parameter $p$ with
+  $\operatorname{size}_{\mathcal P}(p)\ge n_0$,
+  \[
+    T(p)\ \le\ C\cdot
+      \operatorname{size}_{\mathcal P}(p)^{\,2-\eps}\cdot
+      \operatorname{poly}(\ell(p)),
+  \]
+  where $\operatorname{size}_{\mathcal P}$ is the extraction function of
+  Definition~\ref{def:problem-size} and $\ell(p)$ is the secondary dimension
+  parameter, so that $\operatorname{poly}(\ell(p))$ records any permitted
+  polynomial-in-$\ell$ factor. The exponent $\eps$ is fixed independently of
+  $n$ and of the instance. This is exactly
+  Definition~\ref{def:truly-subquadratic} applied to the $\N$-indexed function
+  $n\mapsto \sup\{T(p):\operatorname{size}_{\mathcal P}(p)=n,\
+  \operatorname{Regime}(p)\}$, transported along
+  $\operatorname{size}_{\mathcal P}$.
+
+  A formal declaration at this label is a single $\mathrm{Prop}$-valued
+  predicate on the pair $(T,\operatorname{Regime})$. It must existentially bind
+  the exponent $\eps>0$, the constant $C>0$ and the threshold $n_0$, and the
+  displayed inequality must compare $T(p)$ against
+  $C\cdot\operatorname{size}_{\mathcal P}(p)^{2-\eps}$ up to the polynomial
+  factor. A declaration that only asserts the existence of a positive $\eps$
+  without the inequality, or that omits the size function, is vacuous and does
+  not satisfy this node.
+\end{definition}
+
 \begin{definition}[Truly subquadratic algorithm predicate]
   \label{def:tsq-alg-exists}
-  \uses{def:problem-family, def:parameter-sensitive-placeholder, def:truly-subquadratic}
+  \uses{def:problem-family, def:parameter-sensitive-placeholder, def:truly-subquadratic, def:problem-size, def:alg-out, def:alg-correct, def:alg-runtime-tsq}
   For a concrete problem family $\mathcal P$, this node introduces, or
   transparently re-exports, the auditable structure named at this label. In the
   generated Lean this declaration is `def_tsq_alg_exists'. The declaration
@@ -2092,74 +2356,66 @@
   exponent fields below. An element
   $\mathcal A:\operatorname{def\_tsq\_alg\_exists}(\mathcal P)$, equivalently
   $\mathcal A:\operatorname{TSQAlgorithm}(\mathcal P)$ when that name is a
-  transparent alias, has the following fields:
+  transparent alias, has the following fields. Each field is taken directly from
+  a separately formalized helper node, so that no field packages a construction,
+  a case-split, and a bound together:
   \begin{itemize}
     \item a parameter-regime predicate
       $\operatorname{Regime}_{\mathcal A} :
       \operatorname{Param}_{\mathcal P}\to\mathrm{Prop}$ specifying the
       asymptotic slice under discussion, such as
       $\ell=\logDim(c,n)$ or $\ell=\msdHardDim(c,n)$;
-    \item a single dependent run value, whose type is selected by
-      $\mathcal P.\operatorname{Kind}$:
-      \[
-      \operatorname{AlgOut}_{\mathcal P}(p,I) :=
-      \begin{cases}
-        \operatorname{Out}_{\mathcal P}(p,I)
-          & \text{if }\mathcal P.\operatorname{Kind}=\mathrm{search},\\
-        \{\mathrm{true},\mathrm{false}\}
-          & \text{if }\mathcal P.\operatorname{Kind}=\mathrm{decision},\\
-        \{\mathrm{true},\mathrm{false}\}
-          & \text{if }\mathcal P.\operatorname{Kind}=\mathrm{promise}.
-      \end{cases}
-      \]
-      The field is
+    \item a single dependent run value
       \[
         \operatorname{run}_{\mathcal A}(p,I):
         \operatorname{AlgOut}_{\mathcal P}(p,I)
       \]
-      for every in-regime $p$ and every instance $I$. There are not separate
-      fields called search-run, decision-run and promise-run; requiring all of
-      them for every family changes the meaning of the algorithm package.
-    \item a single dependent correctness proof, again selected by
-      $\mathcal P.\operatorname{Kind}$:
-      \[
-      \operatorname{AlgCorrect}_{\mathcal P}(p,I,o) :=
-      \begin{cases}
-        \operatorname{ValidOut}_{\mathcal P}(p,I,o)
-          & \text{if }\mathcal P.\operatorname{Kind}=\mathrm{search},\\
-        \bigl(o=\mathrm{true}\Longleftrightarrow
-          \operatorname{Yes}_{\mathcal P}(p,I)\bigr)
-          & \text{if }\mathcal P.\operatorname{Kind}=\mathrm{decision},\\
-        \bigl(\operatorname{Yes}_{\mathcal P}(p,I)\Rightarrow
-          o=\mathrm{true}\bigr)\wedge
-        \bigl(\operatorname{No}_{\mathcal P}(p,I)\Rightarrow
-          o=\mathrm{false}\bigr)
-          & \text{if }\mathcal P.\operatorname{Kind}=\mathrm{promise}.
-      \end{cases}
-      \]
-      The field is
+      for every in-regime $p$ and every instance $I$, where
+      $\operatorname{AlgOut}_{\mathcal P}$ is the kind-indexed output type of
+      Definition~\ref{def:alg-out}. There are not separate fields called
+      search-run, decision-run and promise-run; requiring all of them for every
+      family changes the meaning of the algorithm package;
+    \item a single dependent correctness proof
       \[
         \operatorname{correct}_{\mathcal A}(p,I):
         \operatorname{AlgCorrect}_{\mathcal P}
-          (p,I,\operatorname{run}_{\mathcal A}(p,I)).
+          (p,I,\operatorname{run}_{\mathcal A}(p,I)),
       \]
-      Thus a search algorithm proves only the search output relation; it does
-      not also return a Boolean or prove a decision/promise condition. A
-      decision or promise algorithm returns only a Boolean; it does not also
-      construct a search output. Implementing this node with all three runners
-      and all three correctness obligations for every $\mathcal P$ is rejected
-      as a different, stronger and semantically misaligned structure.
+      where $\operatorname{AlgCorrect}_{\mathcal P}$ is the kind-indexed
+      correctness relation of Definition~\ref{def:alg-correct}. Thus a search
+      algorithm proves only the search output relation; it does not also return
+      a Boolean or prove a decision/promise condition. A decision or promise
+      algorithm returns only a Boolean; it does not also construct a search
+      output. Implementing this node with all three runners and all three
+      correctness obligations for every $\mathcal P$ is rejected as a different,
+      stronger and semantically misaligned structure;
     \item a worst-case runtime function
       \[
         T_{\mathcal A}:\operatorname{Param}_{\mathcal P}\to\R_{\ge0}
       \]
-      bounding the run time on all instances with that parameter;
-    \item constants $\eps>0$, $C>0$ and $n_0$ proving that
-      $T_{\mathcal A}$ satisfies Definition~\ref{def:truly-subquadratic} on
-      $\operatorname{Regime}_{\mathcal A}$, including any allowed
-      $\operatorname{poly}(\ell)$ secondary factor and with $\eps$ independent
-      of $n$.
+      bounding the run time on all instances with that parameter, whose size
+      argument is the extraction function $\operatorname{size}_{\mathcal P}$ of
+      Definition~\ref{def:problem-size};
+    \item a proof
+      \[
+        \operatorname{IsTrulySubquadratic}_{\mathcal P}
+          (T_{\mathcal A},\operatorname{Regime}_{\mathcal A})
+      \]
+      in the sense of Definition~\ref{def:alg-runtime-tsq}, i.e. constants
+      $\eps>0$, $C>0$ and $n_0$ with
+      $T_{\mathcal A}(p)\le C\cdot
+        \operatorname{size}_{\mathcal P}(p)^{2-\eps}\operatorname{poly}(\ell)$
+      for all in-regime $p$ with $\operatorname{size}_{\mathcal P}(p)\ge n_0$,
+      and with $\eps$ independent of $n$.
   \end{itemize}
+  The kind-indexed output type $\operatorname{AlgOut}_{\mathcal P}$, the
+  kind-indexed correctness relation $\operatorname{AlgCorrect}_{\mathcal P}$, the
+  size function $\operatorname{size}_{\mathcal P}$, and the truly-subquadratic
+  runtime predicate $\operatorname{IsTrulySubquadratic}_{\mathcal P}$ are the
+  four separate nodes Definitions~\ref{def:alg-out}, \ref{def:alg-correct},
+  \ref{def:problem-size} and \ref{def:alg-runtime-tsq}. A formal declaration at
+  this label uses those helper declarations and does not re-derive their
+  case-splits or the subquadratic bound internally.
   After this structure is defined, the notation
   \[
     \TSQAlg{\mathcal P}
@@ -2180,11 +2436,12 @@
   would not itself expose the regime, run, correctness, runtime function, and
   truly-subquadratic bound data. A reducible type alias to an existing
   `TSQAlgorithm P' structure is acceptable only if these projections are
-  available after unfolding `def_tsq_alg_exists'. If an implementation uses helper
-  definitions such as `AlgOut' and `AlgCorrect', this node must define them,
-  import them transparently, or unfold them at this label, and the structure
-  must have exactly one kind-indexed run field and exactly one kind-indexed
-  correctness field as above.
+  available after unfolding `def_tsq_alg_exists'. The helper definitions
+  `AlgOut', `AlgCorrect', `size', and `IsTrulySubquadratic' are the separate
+  nodes Definitions~\ref{def:alg-out}, \ref{def:alg-correct},
+  \ref{def:problem-size} and \ref{def:alg-runtime-tsq}; this node imports them
+  transparently, and the structure must have exactly one kind-indexed run field
+  and exactly one kind-indexed correctness field built from them as above.
 \end{definition}
 
 \begin{definition}[Truly subquadratic lower-bound predicate]
@@ -3029,14 +3286,9 @@
   only a parameter tag named $\MSD$ omits the search relation and is not aligned
   with this definition.
 
-  The declaration audited at this label is a self-contained data package
-  `def_msd' (for example a structure value `MSDProblemData'), not
-  `def_parameter_sensitive_placeholder', not a call to that placeholder, and not
-  a bare `ConcreteProblemFamily' value whose concrete score and optimum are only
-  hidden in external helpers. The package may contain a field
-  `family : ConcreteProblemFamily' for use by later algorithmic nodes, but the
-  audited declaration itself must also expose the concrete fields and projection
-  equations below, under these names or transparent equivalents:
+  The declaration audited at this label must be a self-contained concrete data
+  package exposing the following fields and projection equations, under these
+  names or transparent equivalents:
   \[
   \begin{array}{ll}
     \operatorname{MSDParam} &= \{(n,\ell): n,\ell\in\N,\ n\ge2,\ \ell\ge1\},\\
@@ -3055,37 +3307,12 @@
       \operatorname{MSDScore}(V,i,j)=\operatorname{MSDOpt}(V).
   \end{array}
   \]
-  In field form, the package must contain at least
-  \[
-  \begin{array}{ll}
-    \operatorname{param} &: \mathrm{Type},\\
-    \operatorname{inst} &: \operatorname{param}\to\mathrm{Type},\\
-    \operatorname{out} &: \prod_p \operatorname{inst}(p)\to\mathrm{Type},\\
-    \operatorname{score} &: \prod_{p,V}
-      \operatorname{out}(p,V)\to\R,\\
-    \operatorname{opt} &: \prod_{p,V}\R,\\
-    \operatorname{validOut} &: \prod_{p,V}
-      \operatorname{out}(p,V)\to\mathrm{Prop},\\
-    \operatorname{family} &: \operatorname{ConcreteProblemFamily},
-  \end{array}
-  \]
-  together with equations identifying these fields with `MSDParam',
-  `MSDInst', `MSDOut', `MSDScore', `MSDOpt', and `MSDValidOut' as displayed
-  above, and equations saying that `family.Param', `family.Inst',
-  `family.Out', and `family.ValidOut' are exactly the package's own
-  `param', `inst', `out', and `validOut'. The maximum in `MSDOpt' is over
-  distinct pairs only; the diagonal is not part of the search space.
-
-  If the implementation packages these names into a `ConcreteProblemFamily',
-  that family must be a projection of the data package audited at this label and
-  the listed equations must unfold from the package. Merely providing abstract
-  declarations named `MSDParam', `MSDInst', `MSDOut' and `MSDValidOut', then
-  storing them in a family record without the score/opt equations above, is
-  rejected. The distinct-pair output type and the maximum-cosine validity
-  relation are the content of the node. A Lean declaration whose body or main
-  proof term is `def_parameter_sensitive_placeholder', a wrapper around it, an
-  opaque family tag, `Unit', or a proposition ending in `True' does not satisfy
-  this definition.
+  The package must also carry a field
+  $\operatorname{family}:\operatorname{ConcreteProblemFamily}$ whose
+  $\operatorname{Param}$, $\operatorname{Inst}$, $\operatorname{Out}$ and
+  $\operatorname{ValidOut}$ projections are exactly the fields above. The maximum
+  is over distinct pairs only. A bare family tag, an opaque wrapper, `Unit', or a
+  proposition ending in `True' does not satisfy this definition.
 \end{definition}
 
 \begin{definition}[$\gamma$-MSD, Definition 2.11]
@@ -3107,10 +3334,9 @@
   the maximum over distinct pairs, and the returned pair; it cannot replace the
   problem by an uninterpreted family tag.
 
-  The audited declaration is a self-contained data package `def_gamma_msd', not
-  `def_parameter_sensitive_placeholder' and not a wrapper around the exact MSD
-  family. It must expose a concrete family with parameter $(n,\ell,\gamma)$ and
-  the following equations:
+  The audited declaration must be a self-contained concrete data package
+  exposing a family with parameter $(n,\ell,\gamma)$ and the following
+  equations:
   \[
   \begin{array}{ll}
     \operatorname{GammaMSDParam}
@@ -3131,24 +3357,13 @@
       \cossim{v_i}{v_j}\le M_V .
   \end{array}
   \]
-  In field form, `def_gamma_msd' contains at least
-  `param', `inst', `out', `score', `opt', `validOut', and
-  `family : ConcreteProblemFamily', plus transparent equations identifying all
-  of these projections with the displayed `GammaMSD...' objects and with the
-  search fields of `family'. The `validOut' field must mention the parameter
-  $\gamma$ directly and must include both inequalities
+  The package must carry a field
+  $\operatorname{family}:\operatorname{ConcreteProblemFamily}$ whose projections
+  are exactly the fields above. The $\operatorname{ValidOut}$ relation must
+  mention the parameter $\gamma$ directly and include both inequalities
   $\gamma^{-1}M_V\le\cossim{v_i}{v_j}$ and
-  $\cossim{v_i}{v_j}\le M_V$. The theorem/projection
-  `GammaMSDValidOut_iff' must be available from the audited declaration itself;
-  it may not be supplied only by an unrelated external identifier.
-
-  The factor $\gamma$ is a parameter of the family, not metadata outside the
-  problem. A declaration that uses abstract components or proves only exact
-  maximality does not satisfy this node; the two approximation inequalities
-  above must be the visible `ValidOut' relation. A declaration whose audited
-  body is `def_parameter_sensitive_placeholder', a delegated placeholder-style
-  family wrapper, an exact-MSD relation with $\gamma$ ignored, `Unit', or a
-  proof ending in `True' is rejected.
+  $\cossim{v_i}{v_j}\le M_V$; proving only exact maximality (with $\gamma$
+  ignored), or using a tag, `Unit', or a proof ending in `True', is rejected.
 \end{definition}
 
 \begin{definition}[MSD decision version, $\MSD_{n,\ell,t}$, Definition 2.12]
@@ -3165,11 +3380,8 @@
   The threshold $t$ and the nonzero-binary input promise are part of the
   definition. This node is a concrete Boolean relation, not a placeholder tag.
 
-  The declaration audited here is a self-contained data package `def_msd_dec',
-  not `def_parameter_sensitive_placeholder', not an opaque `MSDThreshold' tag,
-  and not a family wrapper whose threshold predicates live only in external
-  identifiers. It must expose the concrete decision family
-  $\operatorname{MSDThreshold}$ with parameter $(n,\ell,t)$:
+  The declaration audited here must be a self-contained concrete data package
+  exposing the decision family with parameter $(n,\ell,t)$:
   \[
   \begin{array}{ll}
     \operatorname{MSDDecParam}
@@ -3188,31 +3400,13 @@
         \cossim{v_i}{v_j}<t.
   \end{array}
   \]
-  In field form, `def_msd_dec' contains at least
-  \[
-  \begin{array}{ll}
-    \operatorname{param} &: \mathrm{Type},\\
-    \operatorname{inst} &: \operatorname{param}\to\mathrm{Type},\\
-    \operatorname{yes} &: \prod_p \operatorname{inst}(p)\to\mathrm{Prop},\\
-    \operatorname{no} &: \prod_p \operatorname{inst}(p)\to\mathrm{Prop},\\
-    \operatorname{family} &: \operatorname{ConcreteProblemFamily},
-  \end{array}
-  \]
-  plus transparent projection equations identifying `param', `inst', `yes' and
-  `no' with the displayed `MSDDecParam', `MSDDecInst', `MSDDecYes' and
-  `MSDDecNo', and identifying `family.Param', `family.Inst', `family.Yes' and
-  `family.No' with those same fields. The yes and no predicates themselves must
-  contain the threshold range condition $0\le t\le1$. In particular,
-  `MSDDecYes_iff' and `MSDDecNo_iff' must be recoverable by projecting from the
-  declaration audited at this label.
-
-  `MSDDecYes' and `MSDDecNo' may be helper names only if their definitions are
-  transparent at this label and reduce to the displayed predicates. A family
-  record containing opaque predicates with those names, or a trivial output
-  relation, does not formalize Definition~2.12. A Lean declaration whose body is
-  `def_parameter_sensitive_placeholder', a placeholder-style family wrapper,
-  `Unit', or a proposition ending in `True' is rejected even if external helper
-  declarations elsewhere state the right cosine-threshold predicates.
+  The package must carry a field
+  $\operatorname{family}:\operatorname{ConcreteProblemFamily}$ whose
+  $\operatorname{Param}$, $\operatorname{Inst}$, $\operatorname{Yes}$ and
+  $\operatorname{No}$ projections are exactly the fields above. The yes and no
+  predicates must contain the threshold range condition $0\le t\le1$ and the
+  displayed cosine-threshold relations. A tag, `Unit', or a proposition ending
+  in `True' does not formalize Definition~2.12.
 \end{definition}
 
 \begin{definition}[Least Similar Document, $\LSD_{n,\ell}$, Definition A.14]
