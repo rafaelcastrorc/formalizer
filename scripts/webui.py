@@ -631,6 +631,11 @@ def build_command(action: str, p: dict) -> list[str]:
                 if not workers.isdigit() or int(workers) < 1:
                     raise ValueError("workers must be a positive number")
                 cmd += ["--workers", workers]
+            section_size = str(p.get("section_size") or "").strip()
+            if section_size:
+                if not section_size.isdigit() or int(section_size) < 1:
+                    raise ValueError("section size must be a positive number")
+                cmd += ["--section-size", section_size]
             escalation_runner = runner_spec_from(
                 p,
                 "escalation_runner_backend",
@@ -1256,6 +1261,8 @@ const FORMS = {
     <div class="hint">Model preset: ${esc((state.runner_defaults && state.runner_defaults.source) || 'local Codex fallback')}.</div>
     <label>Parallel proof workers (fast pipeline only)</label>
     <input type="number" id="f_workers" value="3" min="1">
+    <label>Skeleton section size (fast pipeline only; statements per Phase-1 call — shrinks automatically on timeouts)</label>
+    <input type="number" id="f_section_size" value="24" min="1">
     <label>Max blueprint-repair trials</label>
     <input type="number" id="f_trials" value="8" min="1">
     <div class="leanbox" id="leanStatus">Lean setup not checked.
@@ -1365,6 +1372,7 @@ function params(){
     return {action:'refine', name:v('f_name'), max_trials:v('f_trials'),
             paper:v('f_paper'), lean_command:v('f_leancmd'),
             continue_run:c('f_continue'), fast:c('f_fast'), workers:v('f_workers'),
+            section_size:v('f_section_size'),
             ...common};
   const names = [...document.querySelectorAll('.bpcheck:checked')].map(n=>n.value);
   if (active === 'validate') return {action:'validate', names};

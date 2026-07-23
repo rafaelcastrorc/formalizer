@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -150,6 +151,22 @@ class ClaudeCodeRunner(ModelRunner):
         if system:
             cmd += ["--append-system-prompt", system]
 
+        if self.resume_session_id:
+            try:
+                return self._invoke(cmd + ["--resume", self.resume_session_id], prompt, cwd)
+            except RunnerError as exc:
+                if "timed out" in str(exc):
+                    raise
+                # Session may have expired or belong to another model; resume
+                # is best-effort, so fall back to a fresh conversation.
+                print(
+                    f"  [claude] resume of session {self.resume_session_id[:8]}... failed "
+                    f"({str(exc)[:120]}); starting fresh",
+                    flush=True,
+                )
+        return self._invoke(cmd, prompt, cwd)
+
+    def _invoke(self, cmd: list[str], prompt: str, cwd: Path | None) -> RunResult:
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -206,6 +223,7 @@ class ClaudeCodeRunner(ModelRunner):
 
         result_event: dict | None = None
         final_text = ""
+        session_id: str | None = None
         try:
             for line in proc.stdout:
                 line = line.strip()
@@ -217,6 +235,8 @@ class ClaudeCodeRunner(ModelRunner):
                     continue
                 last_output[0] = time.monotonic()
                 etype = event.get("type")
+                if isinstance(event.get("session_id"), str):
+                    session_id = event["session_id"]
                 if etype == "system" and event.get("subtype") == "init":
                     print(f"  [claude] session started (model {event.get('model', '?')})", flush=True)
                 elif etype == "assistant":
@@ -245,7 +265,7 @@ class ClaudeCodeRunner(ModelRunner):
             raise RunnerError("claude CLI returned empty output")
         elapsed = int(time.monotonic() - start)
         print(f"  [claude] finished in {elapsed // 60}m{elapsed % 60:02d}s", flush=True)
-        return RunResult(text=final_text, raw=result_event)
+        return RunResult(text=final_text, raw=result_event, session_id=session_id)
 
 
 class CodexRunner(ModelRunner):
@@ -265,27 +285,43 @@ class CodexRunner(ModelRunner):
         self.sandbox = "read-only" if self.readonly else sandbox
         self.reasoning_effort = reasoning_effort
 
+    # `codex exec` prints a "session id: <uuid>" banner line; that id is what
+    # `codex exec resume <id>` accepts.
+    _SESSION_ID_RE = re.compile(r"session id:\s*([0-9a-fA-F][0-9a-fA-F-]{7,63})", re.IGNORECASE)
+
     def _run_impl(self, prompt: str, system: str, cwd: Path | None) -> RunResult:
         exe = _which_or_app("codex", CODEX_APP_CLI)
         if not exe:
             raise RunnerError("`codex` CLI not found on PATH or in /Applications/Codex.app")
         full_prompt = f"<system>\n{system}\n</system>\n\n{prompt}" if system else prompt
-        with tempfile.NamedTemporaryFile("r", suffix=".md", delete=False) as tmp:
-            output_path = Path(tmp.name)
-        cmd = [
-            exe,
-            "exec",
+        flags = [
             "--sandbox",
             self.sandbox,
             "--skip-git-repo-check",
-            "--output-last-message",
-            str(output_path),
         ]
         if self.model:
-            cmd += ["--model", self.model]
+            flags += ["--model", self.model]
         if self.reasoning_effort:
-            cmd += ["-c", f'model_reasoning_effort="{self.reasoning_effort}"']
-        cmd += ["-"]
+            flags += ["-c", f'model_reasoning_effort="{self.reasoning_effort}"']
+        if self.resume_session_id:
+            try:
+                return self._invoke([exe, "exec", "resume", self.resume_session_id, *flags], full_prompt, cwd)
+            except RunnerError as exc:
+                if "timed out" in str(exc):
+                    raise
+                # Resume is best-effort: the session may be gone, or this codex
+                # CLI may predate `exec resume`. Fall back to a fresh call.
+                print(
+                    f"  ! codex resume of session {self.resume_session_id[:8]}... failed "
+                    f"({str(exc)[:120]}); starting fresh",
+                    flush=True,
+                )
+        return self._invoke([exe, "exec", *flags], full_prompt, cwd)
+
+    def _invoke(self, cmd: list[str], full_prompt: str, cwd: Path | None) -> RunResult:
+        with tempfile.NamedTemporaryFile("r", suffix=".md", delete=False) as tmp:
+            output_path = Path(tmp.name)
+        cmd = [*cmd, "--output-last-message", str(output_path), "-"]
         try:
             print("  launching Codex CLI; live output follows if Codex emits any", flush=True)
             proc = subprocess.Popen(
@@ -305,7 +341,8 @@ class CodexRunner(ModelRunner):
                 text = (stdout or "").strip()
             if not text:
                 raise RunnerError("codex CLI returned empty output")
-            return RunResult(text=text)
+            match = self._SESSION_ID_RE.search(stdout or "")
+            return RunResult(text=text, session_id=match.group(1) if match else None)
         except subprocess.TimeoutExpired as exc:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
