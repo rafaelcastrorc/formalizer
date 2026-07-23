@@ -1788,8 +1788,12 @@ def _run_statement_alignment_audit(
     if not rejected_labels:
         rejected_labels = set(nodes)
 
-    classification = str(payload.get("classification") or "lean_translation_issue")
-    kind = _alignment_failure_kind(classification, formatted)
+    # Router gets the RAW classification: an absent value must engage the
+    # keyword fallback in _alignment_failure_kind, not masquerade as an
+    # explicit (and now authoritative) lean_translation_issue verdict.
+    raw_classification = str(payload.get("classification") or "")
+    classification = raw_classification or "lean_translation_issue"
+    kind = _alignment_failure_kind(raw_classification, formatted)
     if telemetry:
         issues_artifact = telemetry.store_text(
             "audit_issues",
