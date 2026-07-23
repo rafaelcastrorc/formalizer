@@ -1626,9 +1626,22 @@ BLUEPRINT_REPAIR_AUDIT_MARKERS = (
 
 
 def _alignment_failure_kind(classification: str, formatted_issues: list[str]) -> str:
-    """Route compiled-but-wrong Lean to either Lean retry or blueprint repair."""
+    """Route compiled-but-wrong Lean to either Lean retry or blueprint repair.
+
+    The auditor's structured classification is authoritative: the audit prompt
+    explicitly instructs it to answer `lean_translation_issue` only when the
+    blueprint is already concrete and the generated Lean mistranslated it.
+    Keyword-sweeping the rejection prose on top of that misfires on generic
+    critique vocabulary ("missing", "semantics", "concrete", ...) and sends
+    valid blueprints to repair — the repair agent then edits a blueprint with
+    nothing wrong in it. The marker sweep is only a fallback for replies that
+    carry no usable classification. A genuinely stuck translation still
+    reaches blueprint repair through the bounded audit-regeneration rounds.
+    """
     if classification == "blueprint_issue":
         return "blueprint"
+    if classification == "lean_translation_issue":
+        return "lean-generation"
     text = "\n".join(formatted_issues).lower()
     if any(marker.lower() in text for marker in BLUEPRINT_REPAIR_AUDIT_MARKERS):
         return "blueprint"
