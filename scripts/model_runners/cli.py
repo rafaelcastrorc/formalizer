@@ -294,18 +294,33 @@ class CodexRunner(ModelRunner):
         if not exe:
             raise RunnerError("`codex` CLI not found on PATH or in /Applications/Codex.app")
         full_prompt = f"<system>\n{system}\n</system>\n\n{prompt}" if system else prompt
-        flags = [
+        exec_flags = [
             "--sandbox",
             self.sandbox,
             "--skip-git-repo-check",
         ]
+        # `codex exec resume` does not accept every top-level `codex exec`
+        # option. In particular, this CLI rejects `--sandbox` after the
+        # `resume` subcommand with exit 2. A resumed session already carries
+        # its sandbox/config, so only pass flags that `codex exec resume --help`
+        # documents for the follow-up prompt.
+        resume_flags = [
+            "--skip-git-repo-check",
+        ]
         if self.model:
-            flags += ["--model", self.model]
+            exec_flags += ["--model", self.model]
+            resume_flags += ["--model", self.model]
         if self.reasoning_effort:
-            flags += ["-c", f'model_reasoning_effort="{self.reasoning_effort}"']
+            reasoning_flag = ["-c", f'model_reasoning_effort="{self.reasoning_effort}"']
+            exec_flags += reasoning_flag
+            resume_flags += reasoning_flag
         if self.resume_session_id:
             try:
-                return self._invoke([exe, "exec", "resume", self.resume_session_id, *flags], full_prompt, cwd)
+                return self._invoke(
+                    [exe, "exec", "resume", self.resume_session_id, *resume_flags],
+                    full_prompt,
+                    cwd,
+                )
             except RunnerError as exc:
                 if "timed out" in str(exc):
                     raise
@@ -316,7 +331,7 @@ class CodexRunner(ModelRunner):
                     f"({str(exc)[:120]}); starting fresh",
                     flush=True,
                 )
-        return self._invoke([exe, "exec", *flags], full_prompt, cwd)
+        return self._invoke([exe, "exec", *exec_flags], full_prompt, cwd)
 
     def _invoke(self, cmd: list[str], full_prompt: str, cwd: Path | None) -> RunResult:
         with tempfile.NamedTemporaryFile("r", suffix=".md", delete=False) as tmp:
@@ -335,7 +350,9 @@ class CodexRunner(ModelRunner):
             )
             stdout, _stderr = proc.communicate(input=full_prompt, timeout=self.timeout)
             if proc.returncode != 0:
-                raise RunnerError(f"codex CLI exit {proc.returncode}; see output above")
+                tail = "\n".join((stdout or "").splitlines()[-12:])
+                detail = f": {tail}" if tail else ""
+                raise RunnerError(f"codex CLI exit {proc.returncode}{detail}")
             text = output_path.read_text(encoding="utf-8").strip() if output_path.exists() else ""
             if not text:
                 text = (stdout or "").strip()

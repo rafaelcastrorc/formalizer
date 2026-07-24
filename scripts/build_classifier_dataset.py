@@ -57,6 +57,18 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
     tactic_ladder_results: list[dict[str, Any]] = []
     proof_attempt_results: list[dict[str, Any]] = []
     proof_section_results: list[dict[str, Any]] = []
+    proof_frontier_schedules: list[dict[str, Any]] = []
+    proof_schedule_graphs: list[dict[str, Any]] = []
+    proof_frontier_results: list[dict[str, Any]] = []
+    conditional_root_results: list[dict[str, Any]] = []
+    skeleton_compile_patches: list[dict[str, Any]] = []
+    skeleton_audit_patches: list[dict[str, Any]] = []
+    repair_invalidations: list[dict[str, Any]] = []
+    pipeline_progress_events: list[dict[str, Any]] = []
+    adaptive_section_events: list[dict[str, Any]] = []
+    skeleton_routing_events: list[dict[str, Any]] = []
+    repair_scope_events: list[dict[str, Any]] = []
+    deferred_recheck_events: list[dict[str, Any]] = []
     final_check_results: list[dict[str, Any]] = []
 
     for event in events:
@@ -94,6 +106,40 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
             proof_attempt_results.append(event)
         elif etype == "proof_section_result":
             proof_section_results.append(event)
+        elif etype == "proof_frontier_scheduled":
+            proof_frontier_schedules.append(event)
+        elif etype == "proof_schedule_graph":
+            proof_schedule_graphs.append(event)
+        elif etype == "proof_frontier_result":
+            proof_frontier_results.append(event)
+        elif etype == "conditional_root_proofs":
+            conditional_root_results.append(event)
+        elif etype == "skeleton_compile_patch":
+            skeleton_compile_patches.append(event)
+        elif etype == "skeleton_audit_patch":
+            skeleton_audit_patches.append(event)
+        elif etype == "repair_invalidation":
+            repair_invalidations.append(event)
+        elif etype == "pipeline_progress":
+            pipeline_progress_events.append(event)
+        elif etype == "adaptive_section_size":
+            adaptive_section_events.append(event)
+        elif etype in {
+            "skeleton_refusal_isolated",
+            "skeleton_refusal_rejected",
+            "skeleton_compile_stagnation",
+            "skeleton_semantic_stagnation",
+            "duplicate_model_exchange",
+            "singleton_compile_escalation",
+            "partial_sections_preserved",
+            "skeleton_quarantine_created",
+            "skeleton_quarantine_released",
+        }:
+            skeleton_routing_events.append(event)
+        elif etype == "blueprint_repair_scope":
+            repair_scope_events.append(event)
+        elif etype == "deferred_section_recheck":
+            deferred_recheck_events.append(event)
         elif etype == "final_check_result":
             final_check_results.append(event)
 
@@ -231,6 +277,7 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
                 "section_size": config.get("section_size"),
                 "proof_batch": config.get("proof_batch"),
                 "workers": config.get("workers"),
+                "proof_order": config.get("proof_order", "parallel"),
                 "base_effort": config.get("base_effort"),
                 "escalation_effort": config.get("escalation_effort"),
                 "continue_run": config.get("continue_run"),
@@ -352,6 +399,130 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
         if is_fast_run(row)
     ]
 
+    frontier_rows = [
+        {
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "proof_order": row.get("proof_order"),
+            "layer": row.get("layer"),
+            "labels": row.get("labels"),
+            "label_count": len(row.get("labels") or []),
+            "root_labels": row.get("root_labels"),
+            "unproved_before": row.get("unproved_before"),
+            "section_count": row.get("section_count"),
+        }
+        for row in proof_frontier_schedules
+        if is_fast_run(row)
+    ]
+
+    graph_rows = [
+        {
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "proof_order": row.get("proof_order"),
+            "reason": row.get("reason"),
+            "layers": row.get("layers"),
+            "layer_count": len(row.get("layers") or []),
+            "roots": row.get("roots"),
+            "root_count": len(row.get("roots") or []),
+            "immediate_theorem_dependencies": row.get("immediate_theorem_dependencies"),
+        }
+        for row in proof_schedule_graphs
+        if is_fast_run(row)
+    ]
+
+    frontier_result_rows = [
+        {
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "proof_order": row.get("proof_order"),
+            "layer": row.get("layer"),
+            "labels": row.get("labels"),
+            "label_count": len(row.get("labels") or []),
+            "proved_labels": row.get("proved_labels"),
+            "proved_count": len(row.get("proved_labels") or []),
+            "remaining_after": row.get("remaining_after"),
+            "status": row.get("status"),
+        }
+        for row in proof_frontier_results
+        if is_fast_run(row)
+    ]
+
+    conditional_root_rows = [
+        {
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "root_labels": row.get("root_labels"),
+            "root_count": len(row.get("root_labels") or []),
+            "admitted_dependency_labels": row.get("admitted_dependency_labels"),
+            "admitted_dependency_count": row.get("admitted_dependency_count"),
+        }
+        for row in conditional_root_results
+        if is_fast_run(row)
+    ]
+
+    compile_patch_rows = [
+        {
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "section": row.get("section"),
+            "round": row.get("round"),
+            "labels": row.get("labels"),
+            "label_count": len(row.get("labels") or []),
+            "status": row.get("status"),
+        }
+        for row in skeleton_compile_patches
+        if is_fast_run(row)
+    ]
+
+    audit_patch_rows = [
+        {
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "section": row.get("section"),
+            "round": row.get("round"),
+            "labels": row.get("labels"),
+            "label_count": len(row.get("labels") or []),
+            "status": row.get("status"),
+        }
+        for row in skeleton_audit_patches
+        if is_fast_run(row)
+    ]
+
+    invalidation_rows = [
+        {
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "proof_order": row.get("proof_order"),
+            "changed_labels": row.get("changed_labels"),
+            "changed_count": len(row.get("changed_labels") or []),
+            "invalidated_labels": row.get("invalidated_labels"),
+            "invalidated_count": row.get("invalidated_count"),
+            "kept_section_count": row.get("kept_section_count"),
+            "deferred_labels": row.get("deferred_labels"),
+            "deferred_count": row.get("deferred_count"),
+            "regeneration_labels": row.get("regeneration_labels"),
+            "regeneration_count": row.get("regeneration_count"),
+        }
+        for row in repair_invalidations
+        if is_fast_run(row)
+    ]
+
+    progress_rows = [
+        {
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "timestamp": row.get("timestamp"),
+            "verified_count": row.get("verified_count"),
+            "total_nodes": row.get("total_nodes"),
+            "repair_trials_used": row.get("repair_trials_used"),
+            "repair_trials_max": row.get("repair_trials_max"),
+            "verified_labels": row.get("verified_labels"),
+        }
+        for row in pipeline_progress_events
+        if is_fast_run(row)
+    ]
+
     final_rows = [
         {
             "run_id": row.get("run_id"),
@@ -363,6 +534,74 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
             "output_tail": row.get("output_tail"),
         }
         for row in final_check_results
+        if is_fast_run(row)
+    ]
+
+    adaptive_section_rows = [
+        {
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "previous_size": row.get("previous_size"),
+            "size": row.get("size"),
+            "reason": row.get("reason"),
+            "labels": row.get("labels"),
+            "label_count": len(row.get("labels") or []),
+        }
+        for row in adaptive_section_events
+        if is_fast_run(row)
+    ]
+
+    skeleton_routing_rows = [
+        {
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "event": row.get("event"),
+            "labels": row.get("labels"),
+            "refused_labels": row.get("refused_labels"),
+            "part_sizes": row.get("part_sizes"),
+            "reason": row.get("reason"),
+            "invalid_mathlib_refusal": row.get("invalid_mathlib_refusal"),
+            "mappings": row.get("mappings"),
+            "code_sha256": row.get("code_sha256"),
+            "lean_output_sha256": row.get("lean_output_sha256"),
+            "failing_labels": row.get("failing_labels"),
+            "lean_error_shape": row.get("lean_error_shape"),
+            "count": row.get("count"),
+            "escalated": row.get("escalated"),
+            "quarantine_records": row.get("records"),
+        }
+        for row in skeleton_routing_events
+        if is_fast_run(row)
+    ]
+
+    repair_scope_rows = [
+        {
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "labels": row.get("labels"),
+            "action": row.get("action"),
+            "changed_labels": row.get("changed_labels"),
+            "graph_distances": row.get("graph_distances"),
+            "disconnected_labels": row.get("disconnected_labels"),
+            "downstream_scope_violations": row.get("downstream_scope_violations"),
+            "added_labels": row.get("added_labels"),
+            "removed_labels": row.get("removed_labels"),
+        }
+        for row in repair_scope_events
+        if is_fast_run(row)
+    ]
+
+    deferred_recheck_rows = [
+        {
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "section": row.get("section"),
+            "labels": row.get("labels"),
+            "label_count": len(row.get("labels") or []),
+            "status": row.get("status"),
+            "compile_output_tail": row.get("compile_output_tail"),
+        }
+        for row in deferred_recheck_events
         if is_fast_run(row)
     ]
 
@@ -378,6 +617,18 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
         "fast_tactic_ladder_examples": ladder_rows,
         "fast_proof_attempt_examples": proof_attempt_rows,
         "fast_proof_section_examples": proof_section_rows,
+        "fast_proof_frontier_examples": frontier_rows,
+        "fast_proof_graph_examples": graph_rows,
+        "fast_proof_frontier_result_examples": frontier_result_rows,
+        "fast_conditional_root_examples": conditional_root_rows,
+        "fast_skeleton_compile_patch_examples": compile_patch_rows,
+        "fast_skeleton_audit_patch_examples": audit_patch_rows,
+        "fast_repair_invalidation_examples": invalidation_rows,
+        "fast_pipeline_progress_examples": progress_rows,
+        "fast_adaptive_section_examples": adaptive_section_rows,
+        "fast_skeleton_routing_examples": skeleton_routing_rows,
+        "fast_repair_scope_examples": repair_scope_rows,
+        "fast_deferred_recheck_examples": deferred_recheck_rows,
         "fast_final_check_examples": final_rows,
     }
 

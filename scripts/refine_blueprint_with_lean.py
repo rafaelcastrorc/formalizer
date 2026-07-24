@@ -1892,9 +1892,19 @@ def _run_lean(path: Path, lean_command: list[str]) -> LeanAttempt:
 
 
 def _compile_module_olean(path: Path, lean_command: list[str]) -> LeanAttempt:
-    """Compile an accepted generated module to .olean for later chunk imports."""
-    olean_path = path.with_suffix(".olean")
-    command = lean_command + ["-o", str(olean_path), str(path)]
+    """Compile an accepted generated module to the Lake import-search directory.
+
+    Generated modules live under ``AutoBlueprint/...`` and later sections import
+    them by module name. With ``lake env lean``, those imports resolve through
+    ``.lake/build/lib/lean``. A sibling ``SkeletonNN.olean`` next to the source is
+    not importable, so the real object must be written to Lake's build tree. We
+    still leave a sibling copy as a cheap marker for older resume code.
+    """
+    source_rel = path.resolve().relative_to(REPO_ROOT)
+    build_olean_path = (REPO_ROOT / ".lake" / "build" / "lib" / "lean" / source_rel).with_suffix(".olean")
+    build_olean_path.parent.mkdir(parents=True, exist_ok=True)
+    sibling_olean_path = path.with_suffix(".olean")
+    command = lean_command + ["-o", str(build_olean_path), str(path)]
     try:
         proc = subprocess.Popen(
             command,
@@ -1920,13 +1930,17 @@ def _compile_module_olean(path: Path, lean_command: list[str]) -> LeanAttempt:
             reason="Lean module object compilation timed out after 600s.",
             kind="lean-generation",
         )
-    return LeanAttempt(
+    attempt = LeanAttempt(
         ok=proc.returncode == 0,
         command=command,
         stdout=stdout or "",
         stderr=stderr or "",
         kind="lean-generation" if proc.returncode != 0 else "lean",
     )
+    if attempt.ok and build_olean_path != sibling_olean_path:
+        with contextlib.suppress(OSError):
+            shutil.copy2(build_olean_path, sibling_olean_path)
+    return attempt
 
 
 def _lean_prompt(

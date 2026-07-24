@@ -153,10 +153,24 @@ Telemetry now records data for these classifier families:
   the blueprint, which labels changed, and node counts before/after;
 - scheduling/runtime: chosen chunk, difficulty summary, timeout used, prompt
   size, model duration, timeout/error status, and final chunk outcome;
+- root-first scheduling: public-root status, theorem-dependency depth, nearest
+  theorem dependencies and consumers, scheduled frontier size, conditionally
+  accepted higher proofs, unresolved lower interfaces, and frontier outcome;
 - Lean-vs-blueprint failure: generated Lean, Lean/audit output, rejected labels,
   retry/repair/decomposition routing, and downstream invalidation;
+- skeleton repair routing: compiler-isolated declaration patches versus broad
+  regeneration, patch rounds, affected labels, and whether the section later
+  froze successfully;
 - library ranking: local candidate declaration snippets, target labels, model
   duration, Lean success/failure, and audit result.
+- adaptive Phase-1 routing: timeout-driven capacity reductions, successful
+  full-batch regrowth, persistent node quarantine, node-specific refusal
+  isolation, rejected false Mathlib dependency refusals, exact and normalized
+  compiler-failure fingerprints, and preserved partial sections;
+- repair reuse: graph distance of every changed contract from the repair
+  target, added/removed helper labels, unchanged descendants deferred for local
+  recompilation, reactivation/failure outcomes, and the nodes that ultimately
+  required new model generation.
 
 `scripts/build_classifier_dataset.py` flattens this into JSONL tables including
 `pre_decomposition_examples.jsonl`, `decision_examples.jsonl`,

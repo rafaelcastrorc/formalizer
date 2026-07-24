@@ -301,22 +301,59 @@ a 150-node paper takes tens of model calls instead of hundreds:
 1. **Phase 1 — skeleton.** Batched calls generate one Lean declaration per
    blueprint node, ~24 nodes per call, in dependency order: real bodies for
    definition nodes, `:= sorry` proofs for theorem-like nodes. Each section is
-   compiled locally, compile errors are fixed in batched rounds, and the
+   compiled locally. Lean compile errors are mapped back to their declarations
+   and patched in place before any semantic model audit is called. The
    blueprint-contract audit (deterministic coverage checks plus one batched
-   model audit per section) runs on the statements and proof obligations
-   **before** any proof effort is spent. If deterministic checks isolate only a
-   few bad declarations inside an otherwise useful section, Phase 1 asks for
+   model audit per section) therefore runs only on compiling statements and
+   proof obligations **before** any proof effort is spent. If Lean, a
+   deterministic check, or the semantic audit isolates only a few bad
+   declarations inside an otherwise useful section, Phase 1 asks for
    replacements for those declarations only, then recompiles and audits the
-   whole section again. Accepted statements are frozen: later phases can only
+   whole section again. A singleton receives at most one declaration-local
+   compile patch from the base tier and one fresh attempt plus one patch from
+   the escalation tier; it does not consume all generic section-regeneration
+   rounds. Resumed sessions are discarded between those tiers, and a repeated
+   byte-identical prompt/response exchange is detected before the pipeline
+   pays to compile and request it again. Accepted statements are frozen: later phases can only
    replace `sorry` bodies — the harness splices proofs into the frozen file
    itself, so a model cannot silently reshape a statement.
-2. **Phase 2 — proofs.** For every frozen `sorry`, a deterministic tactic
-   ladder (`rfl`/`omega`/`norm_num`/`ring`/`simp`/`aesop`) runs first at zero
-   model cost; survivors are filled by batched model calls
-   (`--proof-batch-size`, default 12 proofs per call) running in parallel
-   across sections (`--workers`); the residue escalates to singleton calls at
-   `--escalation-effort` (default `high`). Sections are independent once
-   statements are frozen, so proof order does not matter.
+   Phase 1 blueprint repairs are also scope-checked deterministically: a repair
+   may change the failing node and helper/dependency contracts needed by that
+   node, but downstream consumer contracts are rolled back and retried with
+   narrower instructions. Consumers are rechecked against the repaired
+   interface instead of being rewritten preemptively.
+   Section capacity adapts from observed latency rather than mathematical
+   guesses. A genuine batch timeout reduces later batch size; two complete
+   batches accepted at the current capacity grow it back exponentially, up to
+   `--section-size`. Routed singletons and short tail sections do not count as
+   evidence that a broad batch is safe. A `NEEDS-DECOMPOSITION` response or
+   repeated normalized Lean failure naming one node quarantines that exact
+   statement version as a singleton until it freezes. Each quarantine record
+   stores the statement fingerprint and observed failure class. A blueprint
+   repair that changes the statement automatically releases the old record, so
+   `--continue` cannot permanently degrade later sections into one-node
+   generation/audit calls. Unchanged failing statements remain isolated.
+   Quarantine and capacity are saved in `skeleton_state.json`; legacy
+   label-only quarantine is discarded because it cannot be matched safely to a
+   statement version. This preserves the existing single batched model audit
+   for each section whenever repaired nodes can rejoin a normal section. Every prompt
+   also receives an authoritative dependency table distinguishing generated
+   declarations from `\mathlibok` declarations and their settled Lean names.
+2. **Phase 2 — root-first proofs.** The default `--proof-order top-down`
+   scheduler finds theorem-like roots of the blueprint's existing `\uses`
+   graph: public results that are not proof dependencies of another theorem.
+   It proves those roots first against the exact frozen interfaces of their
+   lower theorem dependencies, whose internal skeleton proofs may still be
+   `sorry`. Definitions already have their real bodies. It then walks backward
+   through nearest theorem-dependency frontiers until every `sorry` is gone.
+   Lower-frontier prompts include the frozen statements and blueprint proof
+   contracts of the higher results that consume them, so information flows
+   downward without inventing a second graph or creating Lean import cycles.
+   At each frontier a deterministic tactic ladder
+   (`rfl`/`omega`/`norm_num`/`ring`/`simp`/`aesop`) runs first at zero model
+   cost; survivors use batched calls in parallel across owning sections, and
+   only the residue escalates to singleton calls. `--proof-order parallel`
+   preserves the previous all-sections Phase-2 scheduler.
 3. **Repair — evidence only.** A timed-out model call is treated as latency,
    never as mathematical difficulty: batches are bisected, targeted declaration
    patches are used for small skeleton failures, and singletons are retried at
@@ -332,13 +369,24 @@ a 150-node paper takes tens of model calls instead of hundreds:
    to repair after ordinary skeleton fixes, the pipeline performs one
    constrained section-normalization pass: the escalation runner may rewrite
    only that stuck section plus immediate helper nodes, the result is validated,
-   and it is rejected/rolled back if it changes too many node contracts. If the
-   section still churns after normalization, the run stops with a report rather
-   than spending the whole trial budget. Repairs invalidate downstream nodes by
-   the full per-node blueprint contract, including the proof sketch, so
-   accepted Lean is rechecked when the blueprint proof it is supposed to
-   certify changes. Invalidated declarations are pruned out of frozen sections
-   deterministically.
+   and it is rejected/rolled back if it changes too many node contracts. A
+   timeout, malformed model response, invalid edit, or rejected normalization
+   is rolled back and becomes a bounded no-op/fallback repair; it does not kill
+   the run. The formalization loop stops deliberately only when the configured
+   blueprint-repair budget is exhausted. A changed node is detected with the
+   full per-node blueprint contract, including its proof sketch. That node is
+   regenerated. Descendants whose own contracts did not change are retained as
+   deferred, untrusted cache candidates: their old `.olean` is deleted, their
+   generated imports are rebound to the repaired modules, and Lean recompiles
+   them locally. A descendant is reactivated only if that deterministic check
+   passes; otherwise it returns to Phase 1 generation. Thus proof-prose edits
+   cannot silently retain stale Lean, while an interface repair does not force
+   model regeneration of every unchanged consumer. Repair telemetry records
+   graph distance, added/removed helpers, deferred descendants, deterministic
+   recheck outcomes, and the smaller set that really required regeneration. A
+   repair that changes a contract with no path to any requested target in the
+   union of the old and new `\uses` graphs is rolled back; genuinely necessary
+   helper or consumer edits remain allowed by adding their explicit graph edge.
 
 The published contract is unchanged: `formalization.lean` contains no
 `sorry`, passes the strict correctness audit, is recompiled from scratch as a
@@ -362,14 +410,20 @@ when `--runner` is explicitly set, the CLI default is the same runner, otherwise
 it uses the stronger half of the auto preset),
 `--escalation-effort` (codex effort for escalation calls, default `high`),
 `--timeout`/`--hard-timeout` (per-call budgets, defaults 300/600 s),
-`--no-ladder`, `--no-build`, and `--continue`. For non-Codex runners,
+`--proof-order` (`top-down` by default, or `parallel` for the previous proof
+scheduler), `--no-ladder`, `--no-build`, `--continue`, and `--fresh`. For non-Codex runners,
 `--reasoning-effort`/`--escalation-effort` do not change model strength; use
 different `--runner` and `--escalation-runner` model specs instead.
-`--continue` reloads
+Continuation is the default. `--continue` states it explicitly; `--fresh` is
+required to discard generated fast-pipeline state. Continuation reloads
 `skeleton_state.json`, keeps every section whose file hash, blueprint statement
-fingerprints, and full proof-contract fingerprints still match (cascading
-invalidation through blueprint descendants), and resumes from the first stale
-node.
+fingerprints, and full proof-contract fingerprints still match. Unchanged
+descendants of a stale dependency are loaded as deferred cache candidates and
+must recompile against the regenerated dependency before becoming frozen again.
+It also restores statement-fingerprinted quarantine records and the measured
+Phase-1 capacity. Quarantine is reused only when the saved statement hash still
+matches; a repaired statement is scheduled normally and can rejoin a batched
+generation and audit section.
 
 The Web UI **Refine with Lean** tab runs this pipeline by default. Its preset
 is intentionally two-tiered:
@@ -412,21 +466,30 @@ flowchart TD
     B --> C["Plan dependency-ordered sections from the uses graph"]
     C --> D["Phase 1: generate Lean skeleton statements in batched sections"]
     D --> E["Compile skeleton section locally with theorem-like proofs as sorry"]
-    E -->|Statement compile/fix feedback| D
-    E --> F["Blueprint-contract audit before proof work"]
+    E -->|Few declaration errors| EP["Patch only compiler-identified declarations"]
+    EP --> E
+    E -->|Broad compile/fix feedback| D
+    E -->|Compiles| F["Blueprint-contract audit before proof work"]
     F --> G["Deterministic coverage and dependency checks"]
     G --> H["Read-only critic compares blueprint nodes to frozen Lean statements"]
     H -->|Statement matches blueprint| I["Freeze accepted statements"]
     H -->|Statement cannot represent blueprint faithfully| R["Author model repairs blueprint source"]
-    R --> B
-    I --> J["Phase 2: fill frozen sorry bodies"]
-    J --> K["Free deterministic tactic ladder"]
+    R --> RV["Revalidate repaired blueprint structure"]
+    RV --> RC["Mark changed contracts for regeneration; defer unchanged descendants"]
+    RC --> D
+    I --> RR["Rebind imports and recompile any deferred Lean locally"]
+    RR -->|Passes| J
+    RR -->|Fails| D
+    I --> J["Find public theorem roots in the existing uses graph"]
+    J --> K["Prove current root/dependency frontier against frozen lower interfaces"]
     K --> L["Batched proof model calls for remaining proofs"]
     L --> M["Singleton escalation for residue"]
-    M --> N["Run strict correctness audit: no sorry, axioms, vacuous True proofs"]
-    N -->|Proof failed but statement is still valid| J
-    N -->|Blueprint evidence from real Lean/audit output| R
-    N -->|All proofs accepted| O["Assemble formalization.lean"]
+    M --> N["Advance backward to the next theorem-dependency frontier"]
+    N -->|Lower theorem sorries remain| K
+    N -->|No sorries remain| V["Run strict correctness audit: no sorry, axioms, vacuous True proofs"]
+    V -->|Proof failed but statement is still valid| K
+    V -->|Blueprint evidence from real Lean/audit output| R
+    V -->|All proofs accepted| O["Assemble formalization.lean"]
     O --> P["Final from-scratch Lean check"]
     P --> Q["Publish Lean file and rebuild blueprint page"]
 ```
@@ -797,6 +860,9 @@ The telemetry is raw observation data, not guessed labels. It stores:
   sum/product counts, quantifier counts, reindexing/induction/continuity
   mentions, matrix mentions, construction mentions, and asymptotic/runtime
   mentions;
+- root-first graph features: whether a theorem is a public root, its proof
+  depth, nearest theorem dependencies, theorem consumers, each scheduled
+  frontier, and the unresolved-proof count before and after that frontier;
 - pre-refinement decomposition candidates, heuristic reasons, model
   prompt/response artifacts, changed nodes, node counts before/after, and
   whether the candidate actually changed in the repaired blueprint;
@@ -805,8 +871,17 @@ The telemetry is raw observation data, not guessed labels. It stores:
   backend, duration, status, and error if it failed;
 - Lean attempt source, Lean output, compile status, imports, and duration;
 - statement-audit outcomes, rejected labels, and routing classification;
-- blueprint-repair outcomes, changed nodes, invalidated downstream nodes, and
-  kept/dropped accepted chunks.
+- blueprint-repair outcomes, changed nodes, graph distance from repair targets,
+  downstream scope rollbacks, added/removed helpers, deferred unchanged
+  descendants, deterministic recompile outcomes, and nodes that genuinely
+  required regeneration;
+- compiler-targeted skeleton patches, conditionally accepted root proofs and
+  the exact lower dependency interfaces still admitted when they passed;
+- duplicate skeleton prompt/response exchanges and singleton compile
+  escalations, including the affected labels and normalized Lean error shape;
+- quarantine creation/release evidence, including the statement fingerprint,
+  failure class, and whether continuation released an old label-only record or
+  a blueprint edit changed the statement version.
 
 The point is to let a later training pipeline derive labels from observed
 outcomes. For example, a classifier can learn from “this decision later accepted
@@ -819,7 +894,8 @@ The first classifiers this data is meant to support are:
 - **pre-decomposition classifier**: given an original blueprint node, predict
   whether it should be split before Lean generation;
 - **scheduler classifier**: given ready dependency-frontier nodes, predict
-  whether to batch, isolate, or use the hard timeout;
+  whether to batch, isolate, use the hard timeout, or prioritize a root-first
+  frontier;
 - **Lean-vs-blueprint failure classifier**: given generated Lean and error/audit
   output, predict whether to retry Lean generation or repair the blueprint;
 - **library-candidate ranker**: given a node and local library search results,
@@ -922,6 +998,18 @@ That writes:
 .auto-blueprint/telemetry/datasets/fast_tactic_ladder_examples.jsonl
 .auto-blueprint/telemetry/datasets/fast_proof_attempt_examples.jsonl
 .auto-blueprint/telemetry/datasets/fast_proof_section_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_proof_frontier_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_proof_graph_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_proof_frontier_result_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_conditional_root_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_skeleton_compile_patch_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_skeleton_audit_patch_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_repair_invalidation_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_pipeline_progress_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_adaptive_section_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_skeleton_routing_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_repair_scope_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_deferred_recheck_examples.jsonl
 .auto-blueprint/telemetry/datasets/fast_final_check_examples.jsonl
 ```
 

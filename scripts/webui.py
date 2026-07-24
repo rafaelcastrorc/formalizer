@@ -28,7 +28,6 @@ import tempfile
 import threading
 import time
 import webbrowser
-from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -56,8 +55,25 @@ MODEL_SUGGESTIONS = {
 }
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-@lru_cache(maxsize=1)
+
+MODEL_SUGGESTION_CACHE: dict[str, object] = {"at": 0.0, "data": {}}
+MODEL_SUGGESTION_TTL_S = 30
+
+
+def _nonempty_suggestions(data: dict) -> bool:
+    return any(bool(models) for models in data.values())
+
+
 def model_suggestions() -> dict:
+    now = time.time()
+    cached = MODEL_SUGGESTION_CACHE.get("data")
+    if (
+        isinstance(cached, dict)
+        and _nonempty_suggestions(cached)
+        and now - float(MODEL_SUGGESTION_CACHE.get("at") or 0) < MODEL_SUGGESTION_TTL_S
+    ):
+        return {backend: list(models) for backend, models in cached.items()}
+
     suggestions = {backend: list(models) for backend, models in MODEL_SUGGESTIONS.items()}
     with contextlib.suppress(Exception):
         suggestions["openai"] = list_openai_model_ids(timeout=4)
@@ -65,12 +81,19 @@ def model_suggestions() -> dict:
         suggestions["anthropic"] = list_anthropic_model_ids(timeout=4)
     with contextlib.suppress(Exception):
         suggestions["codex"] = list_codex_model_ids(timeout=4)
+    if _nonempty_suggestions(suggestions):
+        MODEL_SUGGESTION_CACHE["at"] = now
+        MODEL_SUGGESTION_CACHE["data"] = suggestions
+    elif isinstance(cached, dict) and _nonempty_suggestions(cached):
+        # A transient CLI/API lookup failure should not blank an already useful
+        # dropdown. Try again on the next /api/state request.
+        return {backend: list(models) for backend, models in cached.items()}
     return suggestions
 
 
-def fast_runner_defaults() -> dict:
+def fast_runner_defaults(suggestions: dict | None = None) -> dict:
     """Resolved Web UI preset for the fast pipeline's two-tier model policy."""
-    suggestions = model_suggestions()
+    suggestions = suggestions or model_suggestions()
     if os.environ.get("OPENAI_API_KEY"):
         openai_models = suggestions.get("openai", [])
         return {
@@ -411,14 +434,26 @@ def _looks_like_previous_webui(pid: int) -> bool:
 
 def _terminate_webui_pid(pid: int, label: str) -> bool:
     print(f"==> stopping previous Auto-Blueprint UI at {label} (pid {pid})")
-    os.kill(pid, signal.SIGTERM)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
     deadline = time.time() + 5
     while time.time() < deadline:
         if not _pid_is_running(pid):
             return True
         time.sleep(0.1)
-    print(f"==> previous UI pid {pid} did not exit yet")
-    return False
+    print(f"==> previous UI pid {pid} did not exit; killing")
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        if not _pid_is_running(pid):
+            return True
+        time.sleep(0.1)
+    return not _pid_is_running(pid)
 
 
 def _pids_listening_on_port(port: int) -> list[int]:
@@ -636,6 +671,10 @@ def build_command(action: str, p: dict) -> list[str]:
                 if not section_size.isdigit() or int(section_size) < 1:
                     raise ValueError("section size must be a positive number")
                 cmd += ["--section-size", section_size]
+            proof_order = str(p.get("proof_order") or "top-down").strip()
+            if proof_order not in {"top-down", "parallel"}:
+                raise ValueError("proof order must be top-down or parallel")
+            cmd += ["--proof-order", proof_order]
             escalation_runner = runner_spec_from(
                 p,
                 "escalation_runner_backend",
@@ -777,13 +816,17 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif path == "/api/state":
-            adopted = None if CURRENT_JOB else _adopted_job_snapshot(0)
+            suggestions = model_suggestions()
+            try:
+                adopted = None if CURRENT_JOB else _adopted_job_snapshot(0)
+            except Exception:
+                adopted = None
             self.send_json({
                 "blueprints": list_blueprints(),
                 "backends": RUNNER_BACKENDS,
                 "efforts": [e for e in REASONING_EFFORTS if e],
-                "model_suggestions": model_suggestions(),
-                "runner_defaults": fast_runner_defaults(),
+                "model_suggestions": suggestions,
+                "runner_defaults": fast_runner_defaults(suggestions),
                 "job": CURRENT_JOB.snapshot(0) if CURRENT_JOB else adopted,
             })
         elif path == "/api/lean/status":
@@ -982,6 +1025,7 @@ let active = 'generate';
 let offset = 0;
 let jobWasRunning = false;
 let stageRows = [];
+let modelStateSignature = '';
 let currentStage = null;
 let fallbackStageSecond = 0;
 let progress = {};
@@ -1005,7 +1049,9 @@ function logSecond(line, jobElapsed){
 }
 
 function stripLogPrefix(line){
-  return line.replace(/^\[\+\d+s\]\s*/, '');
+  return line
+    .replace(/^\[\+\d+s\]\s*/, '')
+    .replace(/^\[[^\]]+\]\s*/, '');
 }
 
 function resetProgress(){
@@ -1061,6 +1107,14 @@ function ingestProgressLines(lines){
       progress.totalNodes = Number(m[1]);
       changed = true;
     }
+    if ((m = line.match(/==> Progress: (\d+)\/(\d+) blueprint nodes verified; repairs (\d+)\/(\d+)/))){
+      progress.acceptedNodes = Number(m[1]);
+      progress.totalNodes = Number(m[2]);
+      progress.remainingNodes = Math.max(progress.totalNodes - progress.acceptedNodes, 0);
+      progress.repairTrialsUsed = Number(m[3]);
+      progress.repairTrialsMax = Number(m[4]);
+      changed = true;
+    }
     if ((m = line.match(/blueprint repairs used (\d+)\/(\d+)/))){
       progress.repairTrialsUsed = Number(m[1]);
       progress.repairTrialsMax = Number(m[2]);
@@ -1103,6 +1157,44 @@ function stageFromLine(line){
   if (line.includes('Reading paper context') || line.includes('Reading paper from')) return 'Read paper';
   if (line.includes('Checking Lean/Lake/Mathlib setup')) return 'Lean preflight';
   if (line.includes('removed') && line.includes('stale Lean attempt')) return 'Cleanup stale attempts';
+  if ((m = line.match(/==> validate [^:]+: ok/))) return 'Validate blueprint';
+
+  // Fast statements-first pipeline.
+  if ((m = line.match(/==> Phase 1: freezing statements for (\d+) node\(s\) \((\d+) already frozen\)/))) {
+    return `Phase 1 · freeze statements (${m[2]}/${Number(m[1]) + Number(m[2])} frozen)`;
+  }
+  if ((m = line.match(/==> Skeleton section (\d+): (\d+) node\(s\)/))) {
+    return `Phase 1 · skeleton section ${m[1]} (${m[2]} nodes)`;
+  }
+  if ((m = line.match(/==> Model call: ([a-z_]+) \((\d+) node\(s\), timeout (\d+)s/))) {
+    const purpose = {
+      skeleton_generation: 'skeleton generation',
+      skeleton_declaration_patch: 'skeleton patch',
+      statement_audit: 'statement audit',
+      proof_batch: 'proof batch',
+      proof_singleton: 'singleton proof',
+      blueprint_repair: 'blueprint repair',
+      section_normalization: 'section normalization',
+    }[m[1]] || m[1].replace(/_/g, ' ');
+    return `Model · ${purpose} (${m[2]} nodes, ${m[3]}s budget)`;
+  }
+  if (line.includes('deterministic audit isolated')) return 'Phase 1 · deterministic audit patch';
+  if (line.includes('deterministic audit failed')) return 'Phase 1 · deterministic audit';
+  if (line.includes('lean rejected skeleton section')) return 'Phase 1 · Lean skeleton check';
+  if (line.includes('alignment audit rejected statements')) return 'Phase 1 · statement alignment audit';
+  if ((m = line.match(/section (\d+) frozen/))) return `Phase 1 · section ${m[1]} frozen`;
+  if ((m = line.match(/==> Phase 2: filling proofs for top-down frontier (\d+) \((\d+) node\(s\)\) with (\d+) worker\(s\)/))) {
+    return `Phase 2 · root-first frontier ${m[1]} (${m[2]} nodes, ${m[3]} workers)`;
+  }
+  if ((m = line.match(/==> Phase 2: filling proofs for (\d+) section\(s\) with (\d+) worker\(s\)/))) {
+    return `Phase 2 · fill proofs (${m[1]} sections, ${m[2]} workers)`;
+  }
+  if (line.includes('tactic ladder closed') || line.includes('tactic ladder crashed')) return 'Phase 2 · tactic ladder';
+  if (line.includes('batch timed out; reducing batch size')) return 'Phase 2 · resize proof batch';
+  if (line.includes('accepted ') && line.includes(' proof(s)')) return 'Phase 2 · proof accepted';
+  if (line.includes('Final from-scratch Lean check')) return 'Final Lean check';
+
+  // Legacy per-chunk pipeline.
   if ((m = line.match(/==> Chunk (\d+): validating blueprint/))) return `Chunk ${m[1]} · validate blueprint`;
   if (line.includes('Searching local Lean libraries')) return 'Search local Lean libraries';
   if ((m = line.match(/==> Chunk (\d+), Lean attempt (\d+)\/\d+: generating/))) {
@@ -1261,6 +1353,11 @@ const FORMS = {
     <div class="hint">Model preset: ${esc((state.runner_defaults && state.runner_defaults.source) || 'local Codex fallback')}.</div>
     <label>Parallel proof workers (fast pipeline only)</label>
     <input type="number" id="f_workers" value="3" min="1">
+    <label>Proof traversal (fast pipeline only)</label>
+    <select id="f_proof_order">
+      <option value="top-down" selected>Root-first, then dependency frontiers (recommended)</option>
+      <option value="parallel">All frozen sections in parallel (previous behavior)</option>
+    </select>
     <label>Skeleton section size (fast pipeline only; statements per Phase-1 call — shrinks automatically on timeouts)</label>
     <input type="number" id="f_section_size" value="24" min="1">
     <label>Max blueprint-repair trials</label>
@@ -1323,6 +1420,16 @@ function updateModelList(prefix){
   list.innerHTML = names.map(m=>`<option value="${esc(m)}"></option>`).join('');
 }
 
+function refreshVisibleModelLists(){
+  ['f', 'f_escalation'].forEach(updateModelList);
+  const defaults = state.runner_defaults || {};
+  [['f', 'base'], ['f_escalation', 'escalation']].forEach(([prefix, tier])=>{
+    const model = el(`${prefix}_model`);
+    const d = defaults[tier] || {};
+    if (model && !model.value && d.model) model.value = d.model;
+  });
+}
+
 function runnerChanged(prefix){
   updateModelList(prefix);
   effortToggle();
@@ -1372,7 +1479,7 @@ function params(){
     return {action:'refine', name:v('f_name'), max_trials:v('f_trials'),
             paper:v('f_paper'), lean_command:v('f_leancmd'),
             continue_run:c('f_continue'), fast:c('f_fast'), workers:v('f_workers'),
-            section_size:v('f_section_size'),
+            section_size:v('f_section_size'), proof_order:v('f_proof_order'),
             ...common};
   const names = [...document.querySelectorAll('.bpcheck:checked')].map(n=>n.value);
   if (active === 'validate') return {action:'validate', names};
@@ -1382,12 +1489,18 @@ function params(){
 async function run(){
   el('error').textContent = '';
   resetProgress();
+  const payload = params();
   if (active === 'refine') {
     progress.visible = true;
+    const maxTrials = Number(payload.max_trials);
+    if (Number.isFinite(maxTrials)) {
+      progress.repairTrialsUsed = 0;
+      progress.repairTrialsMax = maxTrials;
+    }
     renderProgress();
   }
   const r = await fetch('/api/run', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(params())});
+    body: JSON.stringify(payload)});
   const j = await r.json();
   if (j.error){ el('error').textContent = j.error; return; }
   el('log').textContent = '';
@@ -1465,6 +1578,10 @@ async function refreshState(){
   const r = await fetch('/api/state');
   const s = await r.json();
   const firstLoad = !state.backends.length;
+  const nextModelSignature = JSON.stringify({
+    suggestions: s.model_suggestions || {},
+    defaults: s.runner_defaults || {},
+  });
   state = s;
   el('bps').innerHTML = s.blueprints.map(b=>`
     <li><span class="dot ${b.built?'built':''}"></span>
@@ -1472,6 +1589,8 @@ async function refreshState(){
         ${b.built?`<a href="/site/${b.name}/" target="_blank">view</a>`:''}</li>`).join('')
     || '<li class="hint">No blueprints yet — generate one.</li>';
   if (firstLoad){ renderTabs(); renderForm(); }
+  else if (nextModelSignature !== modelStateSignature) refreshVisibleModelLists();
+  modelStateSignature = nextModelSignature;
 }
 
 refreshState().then(poll);
@@ -1499,12 +1618,12 @@ def main() -> int:
 
     if not args.keep_existing:
         _stop_previous_webui()
+        for candidate in range(args.port, args.port + 20):
+            _stop_webui_on_port(candidate)
 
     server = None
     port = args.port
     for candidate in range(args.port, args.port + 20):
-        if not args.keep_existing:
-            _stop_webui_on_port(candidate)
         try:
             server = ThreadingHTTPServer(("127.0.0.1", candidate), Handler)
             port = candidate
