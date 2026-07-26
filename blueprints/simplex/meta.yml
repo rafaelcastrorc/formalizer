@@ -2,7 +2,7 @@
 # used as the URL subpath (the blueprint is published at site/<name>/).
 name: simplex
 title: "Better Neural Network Expressivity: Subdividing the Simplex"
-description: "ReLU networks compute maxima and all CPWL functions in logarithmic base-three depth via algebraic constructions and polyhedral subdivisions."
+description: "ReLU networks with ceil(log_3(n-1))+1 hidden layers compute all CPWL functions on R^n, disproving the log_2 depth conjecture."
 build_pdf: false        # if true, also build + link a PDF (requires TeX in CI)
 home: "https://arxiv.org/abs/2505.14338"                # optional URL shown as a "home" link on the landing card
 github: ""              # optional repo URL shown as a "GitHub" link on the landing card

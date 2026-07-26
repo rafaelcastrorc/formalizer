@@ -73,13 +73,12 @@ from refine_blueprint_with_lean import (
     FORBIDDEN_BLUEPRINT_STUBS,
     PLACEHOLDER_NAME_RE,
     TeeStream,
-    _agent_refine_prompt,
     _alignment_failure_kind,
-    _api_refine_prompt,
     _compile_module_olean,
     _compose_lean_file,
     _decomposition_note,
     _default_lean_command,
+    _dependency_closure,
     _dependency_descendants,
     _deterministic_statement_audit,
     _extract_lean_code,
@@ -101,6 +100,7 @@ from refine_blueprint_with_lean import (
     _run_lean,
     _run_log_path,
     _search_local_lean_libraries,
+    _search_terms_from_blueprint,
     _statement_audit_prompt,
     _write_api_refinement,
     _write_report,
@@ -113,18 +113,50 @@ REPO_ROOT = SCRIPTS_DIR.parent
 SKILL_PATH = REPO_ROOT / ".claude" / "skills" / "paper-to-blueprint" / "SKILL.md"
 SCRATCH_DIR = REPO_ROOT / ".auto-blueprint" / "formalization"
 
-THEOREM_LIKE_KINDS = {"lemma", "proposition", "theorem", "corollary"}
+# Node kinds whose Lean form is a definition with a real body. Everything
+# else — the builtin theorem environments plus any \newtheorem-declared
+# environment a blueprint author adds (claim, fact, remark, observation, ...)
+# — is theorem-like: a Prop statement whose proof is deferred with `:= sorry`
+# in the skeleton and supplied in Phase 2. validate_blueprint accepts
+# arbitrary \newtheorem environments as node kinds, so theorem-likeness must
+# be computed by exclusion: enumerating theorem-like names made a `claim`
+# node simultaneously require a sorry-free definition (deterministic audit)
+# and a theorem (alignment audit) — an unsatisfiable contradiction.
+DEFINITION_LIKE_KINDS = {"definition", "defn", "construction", "notation", "convention", "setup"}
+
+
+def _is_theorem_like_kind(kind: str | None) -> bool:
+    return bool(kind) and kind not in DEFINITION_LIKE_KINDS
 DEFAULT_SECTION_SIZE = 24
 DEFAULT_PROOF_BATCH = 12
 DEFAULT_WORKERS = 3
 DEFAULT_PROOF_ORDER = "top-down"
-STATEMENT_FIX_ROUNDS = 3
-AUDIT_REGEN_ROUNDS = 2
+# Bounded per-section transaction: one base generation attempt plus at most
+# one escalated retry. Every stage (deterministic patch, compile patch, audit
+# correction) gets exactly one targeted fix before the attempt is spent; a
+# section that survives neither attempt routes to blueprint repair with fresh
+# attempts after the contract changes. The old 6-round nested retry maze
+# burned 7+ model calls per stuck node and still ended in the same repair.
+SKELETON_GENERATION_ATTEMPTS = 2
+# Front-loaded design pass: state the whole pending graph in one call before
+# the per-section loop runs. Statements must COMPILE leaf-first, but designing
+# each definition in isolation from the results that consume it is what
+# produced contradictory foundations (a class defined as a subset of the set a
+# theorem was meant to prove it equals). One pass that reasons root-first over
+# the whole graph both fixes that and collapses ~20 section calls into ~1-3.
+# Below the minimum the per-section loop is already cheap enough to just run.
+BULK_SKELETON_MIN_NODES = 6
+# Emission chunk. The design decisions are already fixed by the plan pass, so
+# a chunk is transcription rather than thinking; keep it near section size so
+# each call comfortably fits its budget. (A single 39-node emit-and-design
+# call blew the 600s hard budget without delivering anything.)
+BULK_SKELETON_CHUNK = 12
+# The plan pass emits ~1-2 lines per node, so the whole graph fits one call.
+DESIGN_PLAN_MAX_NODES = 120
 # One declaration-local patch is enough to tell whether the current model tier
-# can use the compiler feedback. A second failure on a singleton moves to the
-# fresh escalation tier; repeating declaration patches was responsible for
-# most of the model calls in long Phase 1 runs.
-TARGETED_DECL_PATCH_ROUNDS = 1
+# can use the compiler feedback; a second failure moves to the fresh escalated
+# attempt. Repeating declaration patches was responsible for most of the model
+# calls in long Phase 1 runs.
 TARGETED_DECL_PATCH_MAX_LABELS = 4
 SECTION_NORMALIZATION_REPAIR_TRIGGER = 1
 SECTION_NORMALIZATION_MAX_CHANGED = 16
@@ -336,7 +368,7 @@ def _top_down_proof_layers(nodes: dict[str, Node]) -> list[list[str]]:
     theorem_labels = {
         label
         for label, node in nodes.items()
-        if not node.mathlibok and node.kind in THEOREM_LIKE_KINDS
+        if not node.mathlibok and _is_theorem_like_kind(node.kind)
     }
     immediate = {
         label: _immediate_theorem_dependencies(nodes, label, theorem_labels)
@@ -692,7 +724,7 @@ def _skeleton_code_findings(
         if "sorry" not in decl.text:
             continue
         expected_kind = target_kinds.get(decl.name or "")
-        if expected_kind in THEOREM_LIKE_KINDS and _has_terminal_sorry(decl.text):
+        if _is_theorem_like_kind(expected_kind) and _has_terminal_sorry(decl.text):
             inner = _TERMINAL_SORRY_RE.sub("", decl.text)
             if re.search(r"\bsorry\b", inner):
                 findings.append(
@@ -811,6 +843,9 @@ class CallResult:
     text: str = ""
     error: str = ""
     duration_s: float = 0.0
+    # Output the backend had already emitted when a timeout killed it. Callers
+    # may salvage complete declarations from it instead of discarding the call.
+    partial_text: str = ""
 
 
 class RepairRequest(Exception):
@@ -892,6 +927,14 @@ class Ctx:
     stmt_fps: dict[str, str] = field(default_factory=dict)
     contract_fps: dict[str, str] = field(default_factory=dict)
     unavailable_imports: set[str] = field(default_factory=set)
+    # Raw library candidates behind ``library_context``; prompts slice these
+    # per target node instead of repeating the full global blob.
+    library_candidates: list = field(default_factory=list)
+    # Compact root-first interface plan for the pending graph (one or two
+    # lines per node). Produced once per Phase-1 wave and injected into every
+    # skeleton prompt so sections transcribe agreed decisions instead of
+    # re-deriving them in isolation.
+    design_plan: str = ""
 
     def refresh_nodes(self, nodes: dict[str, Node]) -> None:
         self.nodes = nodes
@@ -1039,6 +1082,13 @@ def _call_model(
             error=str(exc),
             environment_error=is_environment_error(exc),
         )
+        if is_environment_error(exc):
+            # Missing CLI, expired auth, exhausted quota: no amount of
+            # retrying, escalating, or repairing the blueprint can fix this.
+            # Propagate so the run stops with saved state instead of spinning
+            # generation -> escalation -> repair and burning the repair budget
+            # against a dead backend (observed: 33 trials in 3 seconds).
+            raise
         return CallResult(status="error", error=str(exc), duration_s=0.0)
     _log(
         f"==> Model call: {purpose} "
@@ -1052,9 +1102,40 @@ def _call_model(
     try:
         result = runner.run(prompt, cwd=REPO_ROOT, retries=0)
     except RunnerError as exc:
-        if sessions is not None:
-            sessions.pop(runner_spec, None)
         duration = time.monotonic() - started
+        status = "timeout" if _is_timeout_error(exc) else "error"
+        if is_environment_error(exc):
+            if sessions is not None:
+                sessions.pop(runner_spec, None)
+            _record(
+                ctx.telemetry,
+                "model_call",
+                purpose=purpose,
+                labels=labels,
+                status="error",
+                duration_s=duration,
+                timeout_s=timeout,
+                effort=effort or "",
+                backend=runner.backend_name,
+                model=runner.model,
+                resumed_session=bool(resume_session_id),
+                prompt=prompt_artifact.to_event(REPO_ROOT),
+                error=str(exc),
+                environment_error=True,
+            )
+            _log(f"model call ({purpose}) environment error: {str(exc)[:160]}", tag=tag)
+            raise
+        observed = getattr(runner, "observed_session_id", None)
+        captured_for_resume = bool(status == "timeout" and observed)
+        if sessions is not None:
+            if captured_for_resume:
+                # The killed CLI already persisted its transcript and printed
+                # its session id, so the retry can resume the exploration
+                # instead of restarting cold. Resume is best-effort: both
+                # runners fall back to a fresh session if the id is unusable.
+                sessions[runner_spec] = observed
+            else:
+                sessions.pop(runner_spec, None)
         _record(
             ctx.telemetry,
             "model_call",
@@ -1067,13 +1148,18 @@ def _call_model(
             backend=runner.backend_name,
             model=runner.model,
             resumed_session=bool(resume_session_id),
+            session_captured_for_resume=captured_for_resume,
             prompt=prompt_artifact.to_event(REPO_ROOT),
             error=str(exc),
             environment_error=is_environment_error(exc),
         )
-        status = "timeout" if _is_timeout_error(exc) else "error"
         _log(f"model call ({purpose}) {status}: {str(exc)[:160]}", tag=tag)
-        return CallResult(status=status, error=str(exc), duration_s=duration)
+        return CallResult(
+            status=status,
+            error=str(exc),
+            duration_s=duration,
+            partial_text=getattr(runner, "partial_text", "") if status == "timeout" else "",
+        )
     if sessions is not None:
         if result.session_id:
             sessions[runner_spec] = result.session_id
@@ -1134,6 +1220,24 @@ def _section_module(name: str, number: int) -> tuple[str, Path]:
 def _lake_olean_path(path: Path) -> Path:
     source_rel = path.resolve().relative_to(REPO_ROOT)
     return (REPO_ROOT / ".lake" / "build" / "lib" / "lean" / source_rel).with_suffix(".olean")
+
+
+def _discard_section_artifacts(path: Path) -> None:
+    """Remove the source and objects of a section that was NOT frozen.
+
+    A section file is written before Lean checks it, so an abandoned attempt
+    used to survive on disk. Later generation calls glob the generated
+    directory, find that orphan, and `import` it — resolving the import
+    against a stale `.olean` from an earlier run, which fails in ways that
+    have nothing to do with the nodes being stated. Every abandoned section
+    must leave the workspace exactly as it found it.
+    """
+    with contextlib.suppress(OSError):
+        path.unlink(missing_ok=True)
+    with contextlib.suppress(OSError, ValueError):
+        _lake_olean_path(path).unlink(missing_ok=True)
+    with contextlib.suppress(OSError):
+        path.with_suffix(".olean").unlink(missing_ok=True)
 
 
 def _save_state(
@@ -1667,12 +1771,20 @@ def _decl_interface_text(decl) -> str:
     return text
 
 
-def _frozen_interface_digest(sections: list[Section], modules: list[str], *, budget: int = 24000) -> str:
+def _frozen_interface_digest(
+    sections: list[Section],
+    modules: list[str],
+    *,
+    budget: int = 24000,
+    priority_modules: set[str] | None = None,
+) -> str:
     """Complete, module-grouped interface digest of the frozen declarations in
     ``modules``. Budgeting is module-granular: when over budget, the OLDEST
     modules are dropped whole and named explicitly — never a silent mid-
     declaration cut (a truncated structure is worse than an omitted one,
-    because the model then re-reads files to fill the gap)."""
+    because the model then re-reads files to fill the gap). Modules in
+    ``priority_modules`` (owners of the targets' direct dependencies) are
+    dropped only after every other module is gone."""
     blocks: list[tuple[str, str]] = []
     for sec in sections:
         if sec.deferred or sec.module not in modules:
@@ -1686,9 +1798,14 @@ def _frozen_interface_digest(sections: list[Section], modules: list[str], *, bud
         if body:
             blocks.append((sec.module, f"-- ==== {sec.module} (frozen) ====\n{body}"))
     total = sum(len(text) + 2 for _, text in blocks)
+    priority = priority_modules or set()
     omitted: list[str] = []
     while len(blocks) > 1 and total > budget:
-        module, text = blocks.pop(0)
+        drop_index = next(
+            (i for i, (module, _text) in enumerate(blocks) if module not in priority),
+            0,
+        )
+        module, text = blocks.pop(drop_index)
         omitted.append(module)
         total -= len(text) + 2
     digest = "\n\n".join(text for _, text in blocks)
@@ -1726,7 +1843,7 @@ def _downstream_proof_context(
     theorem_labels = {
         label
         for label, node in ctx.nodes.items()
-        if not node.mathlibok and node.kind in THEOREM_LIKE_KINDS
+        if not node.mathlibok and _is_theorem_like_kind(node.kind)
     }
     proved = _proved_labels(sections)
     consumers: set[str] = set()
@@ -1755,13 +1872,82 @@ def _downstream_proof_context(
 # Prompts
 
 
-def _common_rules(ctx: Ctx) -> str:
+def _format_library_candidates(candidates: list) -> str:
+    """Render a candidate subset in the same shape as the global search summary."""
+    lines = [
+        "- Candidate modules below were found by deterministic local search; "
+        "treat module paths as already verified."
+    ]
+    for cand in candidates:
+        rel = cand.file
+        try:
+            rel = cand.file.relative_to(REPO_ROOT)
+        except ValueError:
+            pass
+        lines.append(
+            f"- {cand.library}: `{cand.declaration}` in `{cand.module}` "
+            f"({rel}:{cand.line}, matched `{cand.matched}`)"
+        )
+        if cand.snippet:
+            lines.append("  ```lean")
+            lines.extend(f"  {line}" for line in cand.snippet.splitlines())
+            lines.append("  ```")
+    return "\n".join(lines)
+
+
+def _library_context_for(ctx: Ctx, labels: list[str], *, max_candidates: int = 12) -> str:
+    """Slice the run-global library candidates down to the ones whose matched
+    search term comes from the target nodes or their direct dependencies. The
+    global list is derived from the whole blueprint; repeating all of it in
+    every prompt is the single largest fixed prompt cost."""
+    if not ctx.library_candidates:
+        return ctx.library_context
+    subset = set(labels)
+    for label in labels:
+        node = ctx.nodes.get(label)
+        if node is not None:
+            subset.update(dep for dep in node.uses if dep in ctx.nodes)
+    subset_nodes = {label: ctx.nodes[label] for label in subset if label in ctx.nodes}
+    subset_blocks = {label: ctx.tex_blocks.get(label, "") for label in subset_nodes}
+    terms = {
+        term.lower() for term in _search_terms_from_blueprint(subset_nodes, subset_blocks)
+    }
+    chosen = [
+        cand for cand in ctx.library_candidates if cand.matched.lower() in terms
+    ][:max_candidates]
+    if not chosen:
+        chosen = ctx.library_candidates[:8]
+    return _format_library_candidates(chosen)
+
+
+def _local_node_summary(ctx: Ctx, labels: list[str]) -> str:
+    """Node-graph orientation limited to targets, direct deps, and direct
+    consumers; the whole-graph summary scaled with blueprint size, not with
+    the work in this call."""
+    target_set = set(labels)
+    nearby = set(labels)
+    for label in labels:
+        node = ctx.nodes.get(label)
+        if node is not None:
+            nearby.update(dep for dep in node.uses if dep in ctx.nodes)
+    nearby.update(
+        consumer
+        for consumer, node in ctx.nodes.items()
+        if node.uses & target_set
+    )
+    return _node_summary({label: ctx.nodes[label] for label in nearby if label in ctx.nodes})
+
+
+def _common_rules(ctx: Ctx, labels: list[str] | None = None) -> str:
     unavailable = ""
     if ctx.unavailable_imports:
         unavailable = (
             "\nUnavailable imports (no compiled .olean locally; NEVER import these):\n"
             + "\n".join(f"- {item}" for item in sorted(ctx.unavailable_imports))
         )
+    library_block = (
+        _library_context_for(ctx, labels) if labels else ctx.library_context
+    )
     return f"""Hard constraints:
 - The blueprint TeX below is the only mathematical source of truth. Formalize
   each node's statement EXACTLY as written: same objects, same hypotheses, same
@@ -1781,13 +1967,16 @@ def _common_rules(ctx: Ctx) -> str:
 - Import only the specific modules you need; never blanket `import Mathlib` or
   `import AutoBlueprint`.
 - If a node CANNOT be faithfully formalized as stated (it needs helper nodes
-  the blueprint does not have), do NOT emit weakened Lean. Return, as your
-  entire reply, one line:
+  the blueprint does not have), do NOT emit weakened Lean for it — but DO
+  still return the Lean code block with every other target node you can
+  formalize (omit only declarations that would need the refused node). After
+  the code block, add one line:
   NEEDS-DECOMPOSITION: {{"label": "<node label>", "missing_helpers": ["<each needed helper statement>"], "reason": "<why>"}}
+  If no target node can be formalized, reply with only that line.
 {unavailable}
 
 Local Lean library candidates (module paths verified by deterministic search):
-{ctx.library_context or "- none found"}
+{library_block or "- none found"}
 
 Lean API idioms:
 {LEAN_IDIOM_CHEATSHEET}"""
@@ -1825,27 +2014,51 @@ this phase, but only to encode the SAME blueprint content correctly):
 {feedback[-14000:]}
 ```
 {previous_block}"""
-    signatures = _frozen_interface_digest(sections, import_modules, budget=24000)
+    direct_deps = {
+        dep
+        for label in labels
+        for dep in ctx.nodes.get(label, Node(label, "", Path("."), 0)).uses
+    }
+    priority_modules = {
+        sec.module
+        for sec in sections
+        if not sec.deferred and set(sec.labels) & direct_deps
+    }
+    signatures = _frozen_interface_digest(
+        sections, import_modules, budget=14000, priority_modules=priority_modules
+    )
     dependency_contracts = _dependency_contract_table(ctx, labels, sections)
     return f"""TASK: BLUEPRINT-SKELETON-SECTION
 
 Return exactly one Lean 4 file (one code block). No commentary.
 
 Generate ONE declaration per target node listed below — statements only:
-- definition-kind nodes: complete `def`/`structure`/`inductive` with real
-  bodies (a definition's body IS its statement; `sorry` is forbidden there);
-- theorem-like nodes (lemma/proposition/theorem/corollary): the exact statement
-  with the proof deferred as `:= sorry`. You MAY give a full proof instead only
-  when it is a one-liner you are certain of; if unsure, use `:= sorry`.
+- definition-kind nodes (definition/defn/construction/notation/convention):
+  complete `def`/`structure`/`inductive` with real bodies (a definition's body
+  IS its statement; `sorry` is forbidden there);
+- theorem-like nodes (lemma/proposition/theorem/corollary and EVERY other
+  environment kind, e.g. claim/fact/remark): the exact statement as a
+  `theorem` ending in `:= sorry`. Do NOT attempt proofs at this phase: a
+  partial or failing tactic block is rejected deterministically and wastes
+  the whole call. The ONLY exception is a complete single-tactic closer you
+  are certain of (e.g. `:= rfl`); when in any doubt, use `:= sorry`. If a
+  proof attempt is unfinished when your budget runs short, replace it with
+  `:= sorry` before replying. Never encode a theorem-like node as a bare
+  `def : Prop`.
 - You may add a small concrete helper `def`/`instance` (e.g. a Fintype
   instance) when a statement genuinely needs it. Helpers must be complete.
 - Order declarations so nothing is used before it is declared.
 - A statement should visibly use the generated Lean declarations of the
   definition nodes it `uses`; imports of earlier skeleton modules make them
   available (do not redefine them).
-- This call has a wall-clock budget of about {timeout_s}s.
+- This call has a wall-clock budget of about {timeout_s}s. Spend AT MOST half
+  of it verifying library APIs or exploring; always leave time to emit your
+  complete Lean reply. An imperfect reply beats no reply: the Lean compiler
+  and the audits exist precisely to catch and correct mistakes, while a
+  timeout wastes the entire call and its exploration. Never end the budget
+  without having produced the requested code.
 
-{_common_rules(ctx)}
+{_common_rules(ctx, labels)}
 {feedback_block}
 
 Blueprint name: {ctx.name}
@@ -1869,8 +2082,11 @@ The ownership above is authoritative. In particular, a Mathlib-owned
 dependency is already available under its settled declaration name and is not
 a reason to return NEEDS-DECOMPOSITION.
 
-Whole blueprint node graph (orientation only):
-{_node_summary(ctx.nodes)}
+{_design_plan_block(ctx)}
+
+Nearby blueprint nodes (orientation only; targets, their direct dependencies,
+and their direct consumers):
+{_local_node_summary(ctx, labels)}
 
 Target nodes for THIS file:
 {target_text}
@@ -1898,7 +2114,21 @@ def _targeted_skeleton_patch_prompt(
         for finding in findings
         if finding.label in set(patch_labels) or finding.lean_name in {_lean_name(label) for label in patch_labels}
     ]
-    signatures = _frozen_interface_digest(sections, import_modules, budget=12000)
+    patch_direct_deps = {
+        dep
+        for label in patch_labels
+        for dep in ctx.nodes.get(label, Node(label, "", Path("."), 0)).uses
+    }
+    signatures = _frozen_interface_digest(
+        sections,
+        import_modules,
+        budget=8000,
+        priority_modules={
+            sec.module
+            for sec in sections
+            if not sec.deferred and set(sec.labels) & patch_direct_deps
+        },
+    )
     return f"""TASK: PATCH-BLUEPRINT-SKELETON-DECLARATIONS
 
 Return exactly one Lean 4 code block. No commentary.
@@ -1913,15 +2143,23 @@ Rules:
   required Lean name.
 - Definition-kind nodes must have real bodies; `sorry` is forbidden there.
 - Theorem-like nodes may end with terminal `:= sorry`.
+- If a finding concerns a partial or failing proof on a theorem-like node,
+  replace that proof with terminal `:= sorry` — do not try to complete it;
+  proofs are a later phase.
 - The replacement statement must still encode the same blueprint node. Do not
   weaken, abstract away, or replace it with `True`.
 - If a replacement must use another blueprint node listed in `uses`, visibly
   mention that node's generated Lean name.
 - You may include a small complete helper declaration immediately before a
   replacement only if the replacement genuinely needs it.
-- This call has a wall-clock budget of about {timeout_s}s.
+- This call has a wall-clock budget of about {timeout_s}s. Spend AT MOST half
+  of it verifying library APIs or exploring; always leave time to emit your
+  complete Lean reply. An imperfect reply beats no reply: the Lean compiler
+  and the audits exist precisely to catch and correct mistakes, while a
+  timeout wastes the entire call and its exploration. Never end the budget
+  without having produced the requested code.
 
-{_common_rules(ctx)}
+{_common_rules(ctx, patch_labels)}
 
 Blueprint name: {ctx.name}
 
@@ -1934,6 +2172,8 @@ Frozen Lean interface of those modules (complete; do not re-read skeleton files)
 ```lean
 {signatures or '-- none'}
 ```
+
+{_design_plan_block(ctx, budget=4000)}
 
 Deterministic audit findings to fix:
 ```text
@@ -2054,6 +2294,7 @@ def _targeted_patch_skeleton_decls(
     *,
     timeout: int,
     sessions: dict[str, str] | None = None,
+    escalated: bool = False,
 ) -> tuple[ParsedModule | None, str]:
     patch_labels = _patchable_skeleton_labels(findings, labels)
     if not patch_labels:
@@ -2077,11 +2318,12 @@ def _targeted_patch_skeleton_decls(
         prompt,
         purpose="skeleton_declaration_patch",
         timeout=timeout,
-        effort=ctx.base_effort,
+        effort=ctx.escalation_effort if escalated else ctx.base_effort,
         labels=patch_labels,
+        escalated=escalated,
         sessions=sessions,
     )
-    if result.status == "timeout":
+    if result.status == "timeout" and not escalated:
         result = _call_model(
             ctx,
             prompt,
@@ -2175,9 +2417,14 @@ replaced by a real proof:
 - You may add `import` lines for tactic modules you need.
 - Dependency lemmas may still be `sorry`-proved in the skeleton; using their
   statements is exactly how the blueprint dependency graph is supposed to work.
-- This call has a wall-clock budget of about {timeout_s}s.
+- This call has a wall-clock budget of about {timeout_s}s. Spend AT MOST half
+  of it verifying library APIs or exploring; always leave time to emit your
+  complete Lean reply. An imperfect reply beats no reply: the Lean compiler
+  and the audits exist precisely to catch and correct mistakes, while a
+  timeout wastes the entire call and its exploration. Never end the budget
+  without having produced the requested code.
 {single_note}
-{_common_rules(ctx)}
+{_common_rules(ctx, [label for label, _decl in targets])}
 
 Blueprint name: {ctx.name}
 
@@ -2222,7 +2469,7 @@ def _skeleton_deterministic_findings(code: str, ctx: Ctx, labels: list[str]) -> 
                 )
             )
             continue
-        if node.kind == "definition" and decl.kind in {"theorem", "lemma"}:
+        if node.kind in DEFINITION_LIKE_KINDS and decl.kind in {"theorem", "lemma"}:
             findings.append(
                 SkeletonFinding(
                     f"{label} is a definition but generated `{decl.kind} {decl.name}`",
@@ -2230,7 +2477,7 @@ def _skeleton_deterministic_findings(code: str, ctx: Ctx, labels: list[str]) -> 
                     lean_name=lean_name,
                 )
             )
-        if node.kind in THEOREM_LIKE_KINDS and decl.kind in {"structure", "inductive", "class"}:
+        if _is_theorem_like_kind(node.kind) and decl.kind in {"structure", "inductive", "class"}:
             findings.append(
                 SkeletonFinding(
                     f"{label} is theorem-like but generated `{decl.kind} {decl.name}`",
@@ -2270,7 +2517,9 @@ def _model_alignment_audit(
     """
     decls = _lean_declarations(code)
     nodes = {label: ctx.nodes[label] for label in labels}
-    prompt = _statement_audit_prompt(ctx.name, nodes, ctx.tex_blocks, decls, ctx.paper_text)
+    prompt = _statement_audit_prompt(
+        ctx.name, nodes, ctx.tex_blocks, decls, ctx.paper_text, skeleton_phase=True
+    )
     # Judge independence: the audit NEVER shares a session with the generator
     # or with its own earlier verdicts (no `sessions` passed — each audit is a
     # fresh conversation seeing only the artifact and the blueprint). A judge
@@ -2340,27 +2589,617 @@ def _model_alignment_audit(
 # Phase 1: skeleton
 
 
+class _SectionNumberAllocator:
+    """Thread-safe monotonically increasing skeleton section numbers.
+
+    Recursive splits each claim a fresh number; gaps from abandoned attempts
+    are fine — state loading and final assembly key on relative order only,
+    and a dependency always freezes (and therefore allocates) before its
+    consumers are scheduled, so the number-sorted assembly order stays
+    dependency-safe.
+    """
+
+    def __init__(self, start: int):
+        self._next = start
+        self._lock = threading.Lock()
+
+    def __call__(self) -> int:
+        with self._lock:
+            number = self._next
+            self._next += 1
+            return number
+
+
+def _design_plan_block(ctx: Ctx, *, budget: int = 9000) -> str:
+    """Render the agreed interface plan for injection into skeleton prompts."""
+    if not ctx.design_plan:
+        return ""
+    return (
+        "Agreed interface plan for this wave (decided root-first over the whole\n"
+        "pending graph; follow these names and shapes):\n```text\n"
+        + ctx.design_plan[:budget]
+        + "\n```\n"
+    )
+
+
+def _blueprint_roots(nodes: dict[str, Node], labels: Iterable[str]) -> list[str]:
+    """Theorem-like labels nothing else depends on: the paper's public results."""
+    label_set = set(labels)
+    consumed = {dep for label in nodes for dep in nodes[label].uses}
+    return [
+        label
+        for label in label_set
+        if _is_theorem_like_kind(nodes[label].kind) and label not in consumed
+    ]
+
+
+def _design_plan_prompt(
+    ctx: Ctx,
+    labels: list[str],
+    sections: list[Section],
+    import_modules: list[str],
+    *,
+    timeout_s: int,
+) -> str:
+    """Ask for the interface plan only — no bodies, no proofs.
+
+    Deciding the vocabulary root-first is cheap reasoning; writing every
+    declaration is not. Splitting them keeps this call small enough to always
+    land, and the resulting plan is short enough to inject into every later
+    skeleton prompt, so all sections share one coherent design instead of each
+    re-deriving it.
+    """
+    roots = _blueprint_roots(ctx.nodes, labels)
+    root_text = "\n\n".join(
+        f"### ROOT {label} ({ctx.nodes[label].kind}; Lean name `{_lean_name(label)}`)\n"
+        f"```tex\n{ctx.stmt_blocks.get(label, '')[:2500]}\n```"
+        for label in roots[:12]
+    )
+    target_text = "\n\n".join(
+        f"## {label} ({ctx.nodes[label].kind}; Lean name `{_lean_name(label)}`; "
+        f"uses [{', '.join(sorted(ctx.nodes[label].uses)) or 'none'}])\n"
+        f"```tex\n{ctx.stmt_blocks.get(label, '')[:1200]}\n```"
+        for label in labels
+    )
+    signatures = _frozen_interface_digest(sections, import_modules, budget=10000)
+    return f"""TASK: BLUEPRINT-SKELETON-DESIGN-PLAN
+
+Return a PLAN only. No proofs, no definition bodies, no code block per node —
+one compact block of Lean-ish signature lines. Do NOT write the full file.
+
+You are fixing the shared vocabulary for a Lean skeleton before it is written
+section by section. Reason ROOT-FIRST: start from the public results under
+"Root obligations", decide what each needs in order to be a NON-TRIVIAL,
+faithful claim, and let that determine the shape of every definition beneath
+it. The declarations themselves will be emitted later in dependency order.
+
+Hard design rule: a definition must never assume the conclusion of a theorem
+that depends on it. If a root asserts `X = Y` or `X ⊆ Y`, then `X` and `Y`
+must be defined independently — folding the relation into either definition
+makes the root vacuous.
+
+Output format — exactly one line per target node, in dependency order:
+  <lean-name> : <intended Lean type/signature>   -- <=12-word note on intent
+Then, if the statements need shared scaffolding, a short `HELPERS:` list in
+the same one-line form (structures, abbreviations, instances).
+Finally a `DECISIONS:` list of at most 5 lines recording any choice a writer
+could otherwise get wrong (e.g. "ReLU_{{n,k}} is defined by network depth
+alone; CPWL membership is NOT part of it — thm:cpwl-depth must prove it").
+
+Keep the whole reply under ~120 lines. This call has a budget of about
+{timeout_s}s; it is a planning call, so do not verify every Mathlib API now —
+note the intended type and move on.
+
+{_common_rules(ctx, labels)}
+
+Blueprint name: {ctx.name}
+
+Frozen Lean interface already available (do not redesign these):
+```lean
+{signatures or '-- none'}
+```
+
+Root obligations — design everything below to serve these:
+{root_text or '- (no unconsumed theorem-like roots in this batch)'}
+
+Target nodes to plan ({len(labels)} node(s), dependency order):
+{target_text}
+"""
+
+
+def _bulk_skeleton_prompt(
+    ctx: Ctx,
+    labels: list[str],
+    sections: list[Section],
+    import_modules: list[str],
+    *,
+    timeout_s: int,
+) -> str:
+    """Emit one chunk of the skeleton against the already-agreed design plan.
+
+    Statements are compiled leaf-first (Lean cannot elaborate a reference to a
+    declaration that does not exist yet), but they were *designed* root-first
+    by the plan pass, so this call is transcription rather than design.
+    """
+    roots = _blueprint_roots(ctx.nodes, labels)
+    root_text = "\n\n".join(
+        f"### ROOT {label} ({ctx.nodes[label].kind}; Lean name `{_lean_name(label)}`)\n"
+        f"```tex\n{ctx.stmt_blocks.get(label, '')[:3000]}\n```"
+        for label in roots[:12]
+    )
+    target_text = "\n\n".join(
+        f"## {label} ({ctx.nodes[label].kind}; Lean name `{_lean_name(label)}`; "
+        f"uses [{', '.join(sorted(ctx.nodes[label].uses)) or 'none'}])\n"
+        f"```tex\n{ctx.stmt_blocks.get(label, '')[:2500]}\n```"
+        for label in labels
+    )
+    signatures = _frozen_interface_digest(sections, import_modules, budget=14000)
+    dependency_contracts = _dependency_contract_table(ctx, labels, sections)
+    return f"""TASK: BLUEPRINT-SKELETON-SECTION
+
+Return exactly one Lean 4 file (one code block). No commentary.
+
+Emit the statement of EVERY target node below — statements only, no proofs.
+The interface plan above already fixed the design decisions: follow it, and
+emit declarations in dependency order so nothing is referenced before it is
+declared. This call is transcription, not redesign; deviate from the plan
+only where it is impossible to compile, and keep the deviation minimal.
+
+Per-node rules:
+- definition-kind nodes (definition/defn/construction/notation/convention):
+  complete `def`/`structure`/`inductive` with real bodies; `sorry` is
+  forbidden there.
+- theorem-like nodes (lemma/proposition/theorem/corollary and EVERY other
+  environment kind, e.g. claim/fact/remark): the exact statement as a
+  `theorem` ending in `:= sorry`. Do NOT attempt proofs in this pass.
+- Give each blueprint node exactly the Lean name listed for it.
+- You may add small complete shared helper declarations (an abbreviation, a
+  Fintype instance, a structure the statements need); place each immediately
+  before the first declaration that uses it.
+- Emit a declaration for EVERY target node listed. Coverage is checked
+  deterministically.
+- This call has a wall-clock budget of about {timeout_s}s. Spend AT MOST half
+  of it verifying library APIs; always leave time to emit the complete file.
+  An imperfect file beats no file: the compiler and the audits exist to catch
+  mistakes, while a timeout wastes the entire pass.
+
+{_common_rules(ctx, labels)}
+
+Blueprint name: {ctx.name}
+
+Available imports for earlier accepted skeleton declarations:
+```lean
+{chr(10).join(f'import {m}' for m in import_modules) or '-- none'}
+```
+
+Frozen Lean interface of those modules (use these exact names; never redefine).
+{FROZEN_INTERFACE_NOTE}
+```lean
+{signatures or '-- none'}
+```
+
+Resolved direct dependency contracts (generated deterministically):
+```text
+{dependency_contracts}
+```
+
+{_design_plan_block(ctx)}
+
+Root obligations these statements must serve:
+{root_text or '- (no unconsumed theorem-like roots in this batch)'}
+
+Target nodes for THIS file ({len(labels)} node(s), listed in dependency order):
+{target_text}
+"""
+
+
+def _delivered_decl_texts(
+    parsed: ParsedModule, part_labels: list[str], all_target_names: set[str]
+) -> list[str] | None:
+    """Select the delivered declarations belonging to one routed part.
+
+    Unowned declarations (local helpers) are attributed to the next owned
+    declaration following them in file order, matching the prompt rule that a
+    helper appears immediately before the declaration that needs it. Returns
+    None unless every part label has a delivered declaration.
+    """
+    part_names = {_lean_name(label) for label in part_labels}
+    chosen: list[str] = []
+    pending: list[str] = []
+    seen: set[str] = set()
+    for decl in parsed.decls:
+        name = decl.name or ""
+        if name in all_target_names:
+            if name in part_names:
+                chosen.extend(pending)
+                chosen.append(decl.text)
+                seen.add(name)
+            pending = []
+        else:
+            pending.append(decl.text)
+    if not part_names <= seen:
+        return None
+    return chosen
+
+
+def _salvage_timeout_declarations(
+    ctx: Ctx, labels: list[str], partial_text: str
+) -> tuple[ParsedModule, list[str]] | None:
+    """Recover complete target declarations from a timed-out call's output.
+
+    Timeouts are the largest single category of wasted model time, and the
+    output is usually not empty — the backend had already streamed part or all
+    of the file when the watchdog killed it. Anything syntactically complete
+    for a target label is worth keeping; the caller still puts it through every
+    normal gate, so a bad salvage costs a Lean check, not correctness.
+    """
+    if not partial_text or "```" not in partial_text:
+        return None
+    try:
+        code = _extract_lean_code(partial_text)
+    except ValueError:
+        return None
+    if not code.strip():
+        return None
+    try:
+        parsed = _parse_module(code)
+    except Exception:
+        return None
+    delivered_names = {decl.name for decl in parsed.decls if decl.name}
+    delivered = [label for label in labels if _lean_name(label) in delivered_names]
+    if not delivered:
+        return None
+    return parsed, delivered
+
+
+def _freeze_section_from_code(
+    ctx: Ctx,
+    labels: list[str],
+    sections: list[Section],
+    alloc: _SectionNumberAllocator,
+    decl_texts: list[str],
+    imports: list[str],
+    preamble: list[str],
+    *,
+    origin: str = "delivered code",
+    allow_patch: bool = False,
+) -> list[Section] | None:
+    """Try to freeze one section from declarations the model already delivered
+    (a design-pass chunk, or the healthy remainder beside a refusal/compile
+    isolation). Same gates as fresh code — deterministic checks, Lean,
+    alignment audit, .olean.
+
+    With ``allow_patch`` the section gets the same single targeted patch the
+    normal path gets before being abandoned; without it, any failure returns
+    None and the caller regenerates. Discarding a whole delivered file because
+    one declaration needs a fix is exactly the rollback-at-95% waste this
+    pipeline avoids elsewhere, so callers whose delivered code IS the product
+    (the design pass) pass allow_patch=True.
+    Raises RepairRequest when the audit blames the blueprint."""
+    import_modules = _sections_for_deps(ctx, labels, sections)
+    target_kinds = {_lean_name(label): ctx.nodes[label].kind for label in labels}
+    label_by_lean_name = {_lean_name(label): label for label in labels}
+    next_number = alloc()
+    module, path = _section_module(ctx.name, next_number)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _log(
+        f"==> Skeleton section {next_number:02d}: {len(labels)} node(s) from "
+        f"{origin}: " + ", ".join(labels[:6]) + ("..." if len(labels) > 6 else "")
+    )
+    missing_imports = _missing_olean_imports(imports)
+    if missing_imports:
+        ctx.unavailable_imports.update(missing_imports)
+        imports = [item for item in imports if item not in set(missing_imports)]
+    all_imports = [f"import {m}" for m in import_modules] + imports
+    module_code, _ranges = _compose_module(all_imports, preamble, decl_texts)
+    parsed = _parse_module(module_code)
+    for decl in parsed.decls:
+        if _is_theorem_like_kind(target_kinds.get(decl.name or "")) and _has_terminal_sorry(decl.text):
+            decl.text = _normalize_terminal_sorry(decl.text)
+    module_code, _ranges = _compose_module(
+        all_imports, parsed.preamble, [decl.text for decl in parsed.decls]
+    )
+    sessions: dict[str, str] = {}
+    findings = _skeleton_code_findings(module_code, target_kinds, label_by_lean_name)
+    findings += _skeleton_deterministic_findings(module_code, ctx, labels)
+    if findings and allow_patch:
+        _log(
+            f"  {origin} has {len(findings)} deterministic issue(s); patching in place"
+        )
+        patched, _note = _targeted_patch_skeleton_decls(
+            ctx, labels, sections, import_modules, parsed, module_code, findings,
+            timeout=ctx.base_timeout, sessions=sessions,
+        )
+        if patched is not None:
+            parsed = patched
+            for decl in parsed.decls:
+                if _is_theorem_like_kind(target_kinds.get(decl.name or "")) and _has_terminal_sorry(decl.text):
+                    decl.text = _normalize_terminal_sorry(decl.text)
+            module_code, _ranges = _compose_module(
+                all_imports, parsed.preamble, [decl.text for decl in parsed.decls]
+            )
+            findings = _skeleton_code_findings(module_code, target_kinds, label_by_lean_name)
+            findings += _skeleton_deterministic_findings(module_code, ctx, labels)
+    if findings:
+        _log(
+            f"  delivered code failed deterministic checks ({len(findings)} "
+            "issue(s)); regenerating the part"
+        )
+        _record(ctx.telemetry, "delivered_code_reuse", labels=labels, status="deterministic_rejected")
+        _discard_section_artifacts(path)
+        return None
+    path.write_text(module_code, encoding="utf-8")
+    ok, output = _check_lean(path, ctx.lean_command)
+    if not ok and allow_patch:
+        compile_findings = _lean_compile_findings(parsed, labels, _ranges, output, path.name)
+        if _patchable_skeleton_labels(compile_findings, labels):
+            _log(f"  {origin} failed Lean; patching the isolated declaration(s)")
+            patched, _note = _targeted_patch_skeleton_decls(
+                ctx, labels, sections, import_modules, parsed, module_code,
+                compile_findings, timeout=ctx.base_timeout, sessions=sessions,
+            )
+            if patched is not None:
+                parsed = patched
+                for decl in parsed.decls:
+                    if _is_theorem_like_kind(target_kinds.get(decl.name or "")) and _has_terminal_sorry(decl.text):
+                        decl.text = _normalize_terminal_sorry(decl.text)
+                module_code, _ranges = _compose_module(
+                    all_imports, parsed.preamble, [decl.text for decl in parsed.decls]
+                )
+                post = _skeleton_code_findings(module_code, target_kinds, label_by_lean_name)
+                post += _skeleton_deterministic_findings(module_code, ctx, labels)
+                if not post:
+                    path.write_text(module_code, encoding="utf-8")
+                    ok, output = _check_lean(path, ctx.lean_command)
+    if not ok:
+        _log("  delivered code failed Lean; regenerating the part")
+        _record(ctx.telemetry, "delivered_code_reuse", labels=labels, status="lean_rejected")
+        _discard_section_artifacts(path)
+        return None
+    audit = _model_alignment_audit(ctx, labels, module_code, tag="delivered")
+    if audit is not None:
+        kind, reason, rejected = audit
+        if kind == "blueprint":
+            _discard_section_artifacts(path)
+            raise RepairRequest(reason, sorted(rejected), section_labels=labels)
+        _log("  delivered code rejected by alignment audit; regenerating the part")
+        _record(ctx.telemetry, "delivered_code_reuse", labels=labels, status="audit_rejected")
+        _discard_section_artifacts(path)
+        return None
+    object_attempt = _compile_module_olean(path, ctx.lean_command)
+    if not object_attempt.ok:
+        _record(ctx.telemetry, "delivered_code_reuse", labels=labels, status="olean_failed")
+        _discard_section_artifacts(path)
+        return None
+    _log(f"  section {next_number:02d} frozen ({len(parsed.decls)} declaration(s)) from {origin}")
+    _record(
+        ctx.telemetry,
+        "skeleton_section_frozen",
+        section=next_number,
+        labels=labels,
+        decls=len(parsed.decls),
+        source="delivered",
+    )
+    _note_frozen_section(ctx, labels)
+    return [
+        Section(
+            number=next_number,
+            labels=list(labels),
+            path=path,
+            module=module,
+            import_modules=import_modules,
+        )
+    ]
+
+
+def _bulk_skeleton_pass(
+    ctx: Ctx,
+    order: list[str],
+    sections: list[Section],
+    alloc: _SectionNumberAllocator,
+) -> tuple[list[Section], set[str]]:
+    """One cheap design pass that states the whole pending graph at once.
+
+    Returns ``(frozen_sections, covered_labels)``. Every declaration still
+    goes through the normal gates (deterministic checks, Lean, alignment
+    audit, .olean) via ``_freeze_section_from_code``; whatever the pass fails
+    to deliver or freeze is simply left to the per-section loop, so the worst
+    case is the previous behaviour plus one call.
+    """
+    if len(order) < BULK_SKELETON_MIN_NODES:
+        return [], set()
+    import_modules = _sections_for_deps(ctx, order, sections)
+    # Stage 1: fix the shared vocabulary root-first. Small output, so it lands
+    # reliably, and the plan then guides every emission chunk AND the
+    # per-section fallback loop.
+    if not ctx.design_plan:
+        plan_labels = order[:DESIGN_PLAN_MAX_NODES]
+        _log(
+            f"==> Skeleton design plan: fixing the interface for {len(plan_labels)} "
+            "pending node(s), root-first"
+        )
+        plan_result = _call_model(
+            ctx,
+            _design_plan_prompt(
+                ctx, plan_labels, sections, import_modules, timeout_s=ctx.base_timeout
+            ),
+            purpose="skeleton_design_plan",
+            timeout=ctx.base_timeout,
+            effort=ctx.base_effort,
+            labels=plan_labels,
+        )
+        if plan_result.status == "ok" and plan_result.text.strip():
+            ctx.design_plan = _extract_lean_code(plan_result.text) or plan_result.text.strip()
+            _record(
+                ctx.telemetry,
+                "skeleton_design_plan",
+                labels=plan_labels,
+                chars=len(ctx.design_plan),
+            )
+            _log(f"  design plan fixed ({len(ctx.design_plan)} chars); guiding all sections")
+        else:
+            _log(
+                f"  design plan {plan_result.status}; sections continue without a "
+                "shared plan"
+            )
+    # Stage 2: transcribe the plan in section-sized chunks.
+    frozen: list[Section] = []
+    covered: set[str] = set()
+    chunk_sessions: dict[str, str] = {}
+    for start in range(0, len(order), BULK_SKELETON_CHUNK):
+        chunk = order[start : start + BULK_SKELETON_CHUNK]
+        _log(
+            f"==> Skeleton design pass: stating {len(chunk)} node(s) in one call "
+            f"({len(order) - start - len(chunk)} node(s) after this chunk)"
+        )
+        prompt = _bulk_skeleton_prompt(
+            ctx, chunk, sections + frozen, import_modules, timeout_s=ctx.base_timeout
+        )
+        result = _call_model(
+            ctx,
+            prompt,
+            purpose="skeleton_design_pass",
+            timeout=ctx.base_timeout,
+            effort=ctx.base_effort,
+            labels=chunk,
+            sessions=chunk_sessions,
+        )
+        if result.status == "timeout":
+            # Same ladder the section loop gets: one retry at the hard budget,
+            # resuming the timed-out session so its work is not re-paid.
+            _log(
+                f"  design pass timed out at {ctx.base_timeout}s; retrying once at "
+                f"{ctx.hard_timeout}s"
+            )
+            result = _call_model(
+                ctx,
+                prompt,
+                purpose="skeleton_design_pass",
+                timeout=ctx.hard_timeout,
+                effort=ctx.base_effort,
+                labels=chunk,
+                sessions=chunk_sessions,
+            )
+        if result.status != "ok":
+            _log(f"  design pass {result.status}; falling back to per-section generation")
+            break
+        if _parse_decomposition_refusal(result.text) is not None:
+            _log("  design pass returned a decomposition refusal; leaving it to the section loop")
+            break
+        try:
+            parsed = _parse_module(_extract_lean_code(result.text))
+        except ValueError:
+            _log("  design pass returned no Lean code; falling back")
+            break
+        delivered_names = {decl.name for decl in parsed.decls if decl.name}
+        delivered_labels = [
+            label for label in chunk if _lean_name(label) in delivered_names
+        ]
+        _log(
+            f"  design pass delivered {len(delivered_labels)}/{len(chunk)} target "
+            f"declaration(s); verifying them section by section"
+        )
+        if not delivered_labels:
+            break
+        # Freeze the chunk as ONE section. The model authored it as a single
+        # coherent file, so splitting it strands shared helper declarations in
+        # whichever part happened to precede them and breaks cross-part
+        # references — the chunk is already section-sized by construction.
+        added = _freeze_section_from_code(
+            ctx,
+            delivered_labels,
+            sections + frozen,
+            alloc,
+            [decl.text for decl in parsed.decls],
+            list(parsed.imports),
+            list(parsed.preamble),
+            origin="design pass",
+            allow_patch=True,
+        )
+        if added is not None:
+            frozen.extend(added)
+            covered.update(delivered_labels)
+            _save_ctx_state(ctx, sections + frozen)
+    if frozen:
+        _record(
+            ctx.telemetry,
+            "skeleton_design_pass",
+            requested=len(order),
+            frozen_labels=sorted(covered),
+            frozen_count=len(covered),
+            sections=len(frozen),
+        )
+        _log(
+            f"  design pass froze {len(covered)}/{len(order)} node(s) in "
+            f"{len(frozen)} section(s); the rest continue through the normal loop"
+        )
+    return frozen, covered
+
+
 def _freeze_parts(
     ctx: Ctx,
     parts: list[list[str]],
     sections: list[Section],
-    next_number: int,
+    alloc: _SectionNumberAllocator,
+    *,
+    delivered: ParsedModule | None = None,
+    delivered_exclude: set[str] | None = None,
 ) -> list[Section]:
-    """Freeze ordered subgroups and carry partial success through repairs."""
+    """Freeze ordered subgroups and carry partial success through repairs.
+
+    ``delivered`` carries declarations the model already produced in the call
+    that triggered this split; parts fully covered by them (and not in
+    ``delivered_exclude``, e.g. the refused or compile-failing labels) try a
+    no-generation freeze first and fall back to normal generation."""
     frozen: list[Section] = []
     combined = list(sections)
+    exclude = delivered_exclude or set()
+    all_target_names = {_lean_name(label) for part in parts for label in part}
+    if exclude:
+        # A refused/failing part usually ends in RepairRequest, which aborts
+        # the remaining parts. Freeze every part that does not depend on the
+        # excluded labels first (relative order preserved), so delivered work
+        # lands before the refusal bubbles up to repair.
+        def _depends_on_excluded(part: list[str]) -> bool:
+            return any(
+                label in exclude or exclude & _transitive_dependencies(ctx.nodes, label)
+                for label in part
+            )
+
+        independent = [part for part in parts if not _depends_on_excluded(part)]
+        dependent = [part for part in parts if _depends_on_excluded(part)]
+        parts = independent + dependent
     try:
         for part in parts:
             if not part:
                 continue
-            added = _freeze_section(
-                ctx,
-                part,
-                combined,
-                next_number + len(frozen),
-            )
+            added: list[Section] | None = None
+            if delivered is not None and not (set(part) & exclude):
+                decl_texts = _delivered_decl_texts(delivered, part, all_target_names)
+                if decl_texts:
+                    added = _freeze_section_from_code(
+                        ctx,
+                        part,
+                        combined,
+                        alloc,
+                        decl_texts,
+                        list(delivered.imports),
+                        list(delivered.preamble),
+                    )
+            if added is None:
+                added = _freeze_section(
+                    ctx,
+                    part,
+                    combined,
+                    alloc,
+                )
             frozen.extend(added)
             combined.extend(added)
+            # Persist each frozen part (and any scheduler change it caused):
+            # a later part can raise RepairRequest or the process can die, and
+            # unsaved frozen parts were being pruned as stale artifacts on the
+            # next --continue.
+            _save_ctx_state(ctx, combined)
     except RepairRequest as request:
         request.frozen_sections = frozen + request.frozen_sections
         raise
@@ -2419,11 +3258,19 @@ def _freeze_section(
     ctx: Ctx,
     labels: list[str],
     sections: list[Section],
-    next_number: int,
+    alloc: _SectionNumberAllocator,
     *,
     force_first_escalated: bool = False,
 ) -> list[Section]:
     """Generate, compile-fix, audit, and freeze one section (possibly bisected).
+
+    Bounded transaction per statement version: attempt 1 (base tier) and, only
+    when a stage reports a fixable failure, attempt 2 (escalated tier). Each
+    attempt is generate -> deterministic checks (one targeted patch) -> Lean
+    compile (one targeted patch) -> alignment audit (one escalated targeted
+    correction + one re-audit). Anything the second attempt cannot land raises
+    RepairRequest; the timeout ladder (retry at hard budget, bisect, escalate)
+    and failing-subset isolation are unchanged.
 
     Returns the newly frozen Section objects (appended by the caller). Raises
     RepairRequest when the blueprint itself must change first.
@@ -2431,849 +3278,659 @@ def _freeze_section(
     import_modules = _sections_for_deps(ctx, labels, sections)
     target_kinds = {_lean_name(label): ctx.nodes[label].kind for label in labels}
     label_by_lean_name = {_lean_name(label): label for label in labels}
+    next_number = alloc()
     module, path = _section_module(ctx.name, next_number)
     path.parent.mkdir(parents=True, exist_ok=True)
     _log(f"==> Skeleton section {next_number:02d}: {len(labels)} node(s): " + ", ".join(labels[:6]) + ("..." if len(labels) > 6 else ""))
 
-    # One backend session per runner spec for this section's whole lifecycle
-    # (generation, patches, error-fix rounds, audit): follow-up calls keep the
-    # Mathlib exploration and module context instead of rebuilding it cold.
-    sessions: dict[str, str] = {}
-    feedback = ""
-    previous_code = ""
-    audit_rounds = 0
-    escalated_refusals: set[str] = set()
-    force_escalated_round = force_first_escalated
-    escalated_stagnation_fps: set[tuple[tuple[str, str, str, str], ...]] = set()
-    regen_signatures: set[tuple[str, tuple[tuple[str, str, str, str], ...]]] = set()
-    compile_regen_signatures: set[tuple[str, str]] = set()
-    compile_stagnation_escalated = False
-    semantic_compile_failures: dict[tuple[tuple[str, ...], str], int] = {}
-    semantic_stagnation_escalated: set[tuple[tuple[str, ...], str]] = set()
-    completed_exchanges: set[tuple[str, str, str]] = set()
-    invalid_mathlib_refusal_count = 0
-    for round_no in range(1, STATEMENT_FIX_ROUNDS + AUDIT_REGEN_ROUNDS + 2):
-        use_escalated_runner = force_escalated_round
-        force_escalated_round = False
-        effort = ctx.escalation_effort if use_escalated_runner else ctx.base_effort
-        timeout = ctx.hard_timeout if use_escalated_runner or round_no > 1 else ctx.base_timeout
-        prompt = _skeleton_prompt(
-            ctx,
-            labels,
-            sections,
-            import_modules,
-            feedback=feedback,
-            previous_code=previous_code,
-            timeout_s=timeout,
-        )
-        result = _call_model(
-            ctx,
-            prompt,
-            purpose="skeleton_generation",
-            timeout=timeout,
-            effort=effort,
-            labels=labels,
-            escalated=use_escalated_runner,
-            sessions=sessions,
-        )
-        result_was_escalated = use_escalated_runner
-        if result.status == "timeout" and len(labels) > 1 and timeout < ctx.hard_timeout:
-            # First timeout on a batch is ambiguous: output-bound (too many
-            # nodes for the budget — bisection helps) or exploration-bound
-            # (context gathering costs the same at any batch size — bisection
-            # cannot help and just multiplies the waste). One retry of the
-            # SAME labels at the hard budget, same runner and effort,
-            # distinguishes the two for the price of a single call; only a
-            # second timeout justifies bisecting.
-            _log(
-                f"  section call timed out at {timeout}s; retrying the same "
-                f"{len(labels)} node(s) once at {ctx.hard_timeout}s before bisecting"
-            )
-            retry_prompt = _skeleton_prompt(
+    froze = False
+    try:
+        # One backend session per runner spec for this section's whole lifecycle
+        # (generation, patches, error-fix rounds, audit): follow-up calls keep the
+        # Mathlib exploration and module context instead of rebuilding it cold.
+        sessions: dict[str, str] = {}
+        feedback = ""
+        previous_code = ""
+        escalated_refusals: set[str] = set()
+        force_escalated_round = force_first_escalated
+        completed_exchanges: set[tuple[str, str, str]] = set()
+        invalid_mathlib_refusal_count = 0
+        for attempt in range(1, SKELETON_GENERATION_ATTEMPTS + 1):
+            use_escalated_runner = force_escalated_round or attempt > 1
+            force_escalated_round = False
+            effort = ctx.escalation_effort if use_escalated_runner else ctx.base_effort
+            timeout = ctx.hard_timeout if use_escalated_runner else ctx.base_timeout
+            prompt = _skeleton_prompt(
                 ctx,
                 labels,
                 sections,
                 import_modules,
                 feedback=feedback,
                 previous_code=previous_code,
-                timeout_s=ctx.hard_timeout,
+                timeout_s=timeout,
             )
             result = _call_model(
                 ctx,
-                retry_prompt,
+                prompt,
                 purpose="skeleton_generation",
-                timeout=ctx.hard_timeout,
+                timeout=timeout,
                 effort=effort,
                 labels=labels,
                 escalated=use_escalated_runner,
                 sessions=sessions,
             )
-            if result.status == "ok":
-                # The batch fits the hard budget but not the base budget, so
-                # this size would pay the base-timeout tax on every future
-                # group. Shrink mildly and pin fast recovery below the rescued
-                # size so the sizes settle where the base budget suffices.
-                rescued_size = max(1, len(labels) * 3 // 4)
-                if rescued_size < (ctx.effective_section_size or ctx.section_size):
-                    ctx.effective_section_size = rescued_size
-                    ctx.section_clean_streak = 0
-                    if ctx.proven_section_size:
-                        ctx.proven_section_size = min(ctx.proven_section_size, rescued_size)
-                    _log(f"  adaptive section size reduced to {rescued_size} (batch needed the hard budget)")
-                    _record(
-                        ctx.telemetry,
-                        "adaptive_section_size",
-                        size=rescued_size,
-                        reason="hard_budget_rescue",
-                        labels=labels,
-                    )
-        if result.status == "timeout":
-            if len(labels) > 1:
-                # Still timing out at the hard budget: output-bound after all.
-                # Bisect the section and recurse.
-                mid = len(labels) // 2
-                _log(f"  section call timed out; bisecting into {mid} + {len(labels) - mid} node(s)")
-                # This size demonstrably does not fit the base timeout, so
-                # don't make future groups rediscover that: shrink the
-                # run-scoped section size (Phase 2 already does this for
-                # proof batches).
-                if 0 < mid < (ctx.effective_section_size or ctx.section_size):
-                    ctx.effective_section_size = mid
-                    ctx.section_clean_streak = 0
-                    _log(f"  adaptive section size reduced to {mid} for the rest of this run")
-                    _record(
-                        ctx.telemetry,
-                        "adaptive_section_size",
-                        size=mid,
-                        reason="skeleton_timeout",
-                        labels=labels,
-                    )
-                return _freeze_parts(
-                    ctx,
-                    [labels[:mid], labels[mid:]],
-                    sections,
-                    next_number,
-                )
-            result = _call_model(
-                ctx,
-                prompt,
-                purpose="skeleton_generation",
-                timeout=ctx.hard_timeout,
-                effort=ctx.escalation_effort,
-                labels=labels,
-                escalated=True,
-                sessions=sessions,
-            )
-            result_was_escalated = True
-            if result.status == "error":
-                feedback = f"model call failed: {result.error}"
-                continue
+            result_was_escalated = use_escalated_runner
             if result.status == "timeout":
-                # Two full timeout budgets on a single-statement call is the one
-                # place a timeout counts as evidence: the node cannot even be
-                # *stated* within a generous budget.
-                raise RepairRequest(
-                    "Statement generation for this node timed out twice, including at "
-                    "escalated effort; the node is likely too large or underspecified "
-                    "to state as one declaration. Decompose it into smaller nodes.",
-                    labels,
-                    section_labels=labels,
-                )
-        elif result.status == "error":
-            feedback = f"model call failed: {result.error}"
-            continue
-
-        # A resumed CLI session can replay its previous final answer when it is
-        # given the same correction prompt. The response is then guaranteed to
-        # recreate the same candidate, so compiling and asking again only burns
-        # another model call. Escalate once from a duplicate base exchange; a
-        # duplicate escalation is genuine generation stagnation.
-        exchange = (
-            ctx.escalation_runner_spec if result_was_escalated else ctx.runner_spec,
-            hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-            hashlib.sha256(result.text.encode("utf-8")).hexdigest(),
-        )
-        if exchange in completed_exchanges:
-            _record(
-                ctx.telemetry,
-                "duplicate_model_exchange",
-                purpose="skeleton_generation",
-                labels=labels,
-                escalated=result_was_escalated,
-                prompt_sha256=exchange[1],
-                response_sha256=exchange[2],
-            )
-            sessions.pop(exchange[0], None)
-            if not result_was_escalated:
-                force_escalated_round = True
-                feedback = (
-                    "The base generator replayed a byte-identical response to "
-                    "the same compiler-feedback prompt. Start fresh at the "
-                    "escalation tier and produce a materially corrected Lean "
-                    "declaration."
-                )
-                _log(
-                    "  duplicate skeleton response detected; skipping the "
-                    "redundant compile and escalating once"
-                )
-                continue
-            raise RepairRequest(
-                "Skeleton generation repeated a byte-identical response to the "
-                "same correction prompt at escalated effort. The current node "
-                "needs a different formal interface or explicit helper "
-                "decomposition; do not weaken its mathematical claim.",
-                labels,
-                section_labels=labels,
-            )
-        completed_exchanges.add(exchange)
-
-        refusal = _parse_decomposition_refusal(result.text)
-        if refusal is not None:
-            refused = [refusal["label"]] if refusal["label"] in labels else list(labels)
-            invalid_mappings = _invalid_mathlib_refusal_mappings(ctx, refusal)
-            if invalid_mappings:
-                invalid_mathlib_refusal_count += 1
-                mapping_text = ", ".join(
-                    f"`{generated}` is Mathlib-owned as `{actual}`"
-                    for generated, actual in sorted(invalid_mappings.items())
-                )
-                _log(
-                    "  rejected false Mathlib dependency refusal for "
-                    + ", ".join(refused)
-                    + f": {mapping_text}"
-                )
-                _record(
-                    ctx.telemetry,
-                    "skeleton_refusal_rejected",
-                    labels=labels,
-                    refused_labels=refused,
-                    reason="mathlib_dependency_already_settled",
-                    attempt=invalid_mathlib_refusal_count,
-                    mappings=invalid_mappings,
-                    refusal_reason=refusal.get("reason", ""),
-                )
-            if len(labels) > 1 and len(refused) < len(labels):
-                # The response identified a node-specific problem. Isolate
-                # exactly that node while preserving dependency order; it says
-                # nothing about how many unrelated nodes fit in one call.
-                _quarantine_labels(ctx, refused, "model_refusal")
-                parts = _parts_around_labels(labels, refused)
-                _log(
-                    "  skeleton generator isolated "
-                    + ", ".join(refused)
-                    + "; preserving global section size and routing "
-                    + " + ".join(str(len(part)) for part in parts)
-                    + " node(s)"
-                )
-                _record(
-                    ctx.telemetry,
-                    "skeleton_refusal_isolated",
-                    labels=labels,
-                    refused_labels=refused,
-                    part_sizes=[len(part) for part in parts],
-                    invalid_mathlib_refusal=bool(invalid_mappings),
-                    missing_helpers=refusal.get("missing_helpers") or [],
-                    refusal_reason=refusal.get("reason", ""),
-                )
-                return _freeze_parts(ctx, parts, sections, next_number)
-            if invalid_mappings:
-                # A singleton refusal based on a nonexistent generated name is
-                # not blueprint-repair evidence. Correct it in-context and use
-                # the escalation runner once before normal fix rounds continue.
-                feedback = (
-                    "Your NEEDS-DECOMPOSITION response was invalid because its "
-                    "supposedly missing helpers are settled Mathlib dependencies: "
-                    + mapping_text
-                    + ". Use those exact external declarations and generate the "
-                    "requested blueprint statement without changing its meaning."
-                )
-                previous_code = ""
-                if not result_was_escalated:
-                    force_escalated_round = True
-                continue
-            refusal_key = ",".join(refused)
-            if not result_was_escalated and refusal_key not in escalated_refusals:
-                escalated_refusals.add(refusal_key)
-                force_escalated_round = True
-                missing = refusal.get("missing_helpers") or []
-                feedback = (
-                    "The base skeleton generator returned NEEDS-DECOMPOSITION. "
-                    "Treat that as a statement-generation claim, not blueprint "
-                    "repair evidence yet. Before editing the blueprint, make an "
-                    "escalated attempt to state the same blueprint node(s) inside "
-                    "this section. You may introduce small complete local helper "
-                    "declarations in this same Lean file when needed, but you must "
-                    "not weaken the blueprint statement.\n\n"
-                    f"Refused label(s): {', '.join(refused)}\n"
-                    f"Reason: {refusal['reason']}\n"
-                    f"Requested helper(s): {', '.join(missing) or '(none)'}"
-                )
-                previous_code = ""
-                _log(
-                    "  skeleton generator requested decomposition for "
-                    + ", ".join(refused)
-                    + "; escalating statement generation before blueprint repair"
-                )
-                continue
-            raise RepairRequest(
-                "The escalated statement generator determined node(s) cannot be "
-                "stated 1-1 as written.\n"
-                f"Reason: {refusal['reason']}",
-                refused,
-                decomposition_helpers=refusal["missing_helpers"],
-                section_labels=labels,
-            )
-
-        code = _extract_lean_code(result.text)
-        parsed = _parse_module(code)
-        missing_imports = _missing_olean_imports(parsed.imports)
-        if missing_imports:
-            ctx.unavailable_imports.update(missing_imports)
-            parsed.imports = [item for item in parsed.imports if item not in set(missing_imports)]
-        # Normalize `:= by sorry` to the canonical terminal form.
-        for decl in parsed.decls:
-            if target_kinds.get(decl.name or "") in THEOREM_LIKE_KINDS and _has_terminal_sorry(decl.text):
-                decl.text = _normalize_terminal_sorry(decl.text)
-        all_imports = [f"import {m}" for m in import_modules] + parsed.imports
-        module_code, _ranges = _compose_module(all_imports, parsed.preamble, [d.text for d in parsed.decls])
-
-        findings = _skeleton_code_findings(module_code, target_kinds, label_by_lean_name)
-        findings += _skeleton_deterministic_findings(module_code, ctx, labels)
-        patch_note = ""
-        patch_round = 0
-        while findings and patch_round < TARGETED_DECL_PATCH_ROUNDS:
-            before_patch_fp = _skeleton_findings_fingerprint(findings)
-            patch_round += 1
-            patched, patch_note = _targeted_patch_skeleton_decls(
-                ctx,
-                labels,
-                sections,
-                import_modules,
-                parsed,
-                module_code,
-                findings,
-                timeout=ctx.base_timeout if patch_round == 1 else ctx.hard_timeout,
-                sessions=sessions,
-            )
-            if patched is None:
-                break
-            parsed = patched
-            all_imports = [f"import {m}" for m in import_modules] + parsed.imports
-            module_code, _ranges = _compose_module(
-                all_imports, parsed.preamble, [d.text for d in parsed.decls]
-            )
-            findings = _skeleton_code_findings(module_code, target_kinds, label_by_lean_name)
-            findings += _skeleton_deterministic_findings(module_code, ctx, labels)
-            if findings:
-                after_patch_fp = _skeleton_findings_fingerprint(findings)
-                if after_patch_fp == before_patch_fp:
-                    patch_labels = _patchable_skeleton_labels(findings, labels)
-                    support_labels = _dependency_closed_subset(ctx, labels, patch_labels)
+                # A timed-out request is NEVER re-issued unchanged at a larger
+                # budget: that pattern cost 300s + 600s before any subdivision,
+                # and timeouts are the largest category of wasted model time.
+                # Instead: keep whatever the backend already emitted, then split.
+                salvage = _salvage_timeout_declarations(ctx, labels, result.partial_text)
+                if salvage is not None:
+                    parsed_partial, delivered = salvage
+                    _log(
+                        f"  call timed out but had already emitted "
+                        f"{len(delivered)}/{len(labels)} target declaration(s); "
+                        "verifying the salvage instead of discarding the call"
+                    )
                     _record(
                         ctx.telemetry,
-                        "skeleton_stagnation_detected",
+                        "timeout_salvage",
                         labels=labels,
-                        patch_labels=patch_labels,
-                        support_labels=support_labels,
-                        failure_classes=sorted(
-                            {
-                                _skeleton_finding_class(finding.message)
-                                for finding in findings
-                            }
-                        ),
+                        salvaged_labels=delivered,
+                        salvaged_count=len(delivered),
                     )
-                    if support_labels and len(support_labels) < len(labels):
-                        _log(
-                            "  targeted patch made no deterministic progress; "
-                            "retrying dependency-closed subset with escalation: "
-                            + ", ".join(support_labels)
-                        )
-                        first = _freeze_section(
-                            ctx,
-                            support_labels,
-                            sections,
-                            next_number,
-                            force_first_escalated=True,
-                        )
-                        combined = sections + first
-                        support_set = set(support_labels)
-                        remaining = [label for label in labels if label not in support_set]
+                    added = _freeze_section_from_code(
+                        ctx,
+                        delivered,
+                        sections,
+                        alloc,
+                        [decl.text for decl in parsed_partial.decls],
+                        list(parsed_partial.imports),
+                        list(parsed_partial.preamble),
+                        origin="timeout salvage",
+                        allow_patch=True,
+                    )
+                    if added:
+                        # NOTE: deliberately do not set `froze` — the salvage
+                        # allocated its own section number, so this attempt's
+                        # `path` is still an orphan and must be discarded by
+                        # the finally.
+                        remaining = [
+                            label for label in labels if label not in set(delivered)
+                        ]
                         if not remaining:
-                            return first
+                            return added
                         try:
-                            second = _freeze_section(
-                                ctx,
-                                remaining,
-                                combined,
-                                next_number + len(first),
-                            )
+                            rest = _freeze_section(ctx, remaining, sections + added, alloc)
                         except RepairRequest as request:
-                            request.frozen_sections = first + request.frozen_sections
+                            request.frozen_sections = added + request.frozen_sections
                             raise
-                        return first + second
-                    if after_patch_fp not in escalated_stagnation_fps and not result_was_escalated:
-                        escalated_stagnation_fps.add(after_patch_fp)
-                        force_escalated_round = True
-                        feedback = (
-                            "Targeted declaration patch made no deterministic "
-                            "progress. Regenerate this same section once with "
-                            "escalated effort, paying special attention to these "
-                            "unchanged audit findings:\n"
-                            + _format_skeleton_findings(findings)[-10000:]
+                        return added + rest
+                # Nothing salvageable: subdivide rather than re-ask the same
+                # question with a bigger stopwatch.
+                if len(labels) > 1:
+                    mid = len(labels) // 2
+                    _log(f"  section call timed out; bisecting into {mid} + {len(labels) - mid} node(s)")
+                    # This size demonstrably does not fit the base timeout, so
+                    # don't make future groups rediscover that: shrink the
+                    # run-scoped section size (Phase 2 already does this for
+                    # proof batches).
+                    if 0 < mid < (ctx.effective_section_size or ctx.section_size):
+                        ctx.effective_section_size = mid
+                        ctx.section_clean_streak = 0
+                        _log(f"  adaptive section size reduced to {mid} for the rest of this run")
+                        _record(
+                            ctx.telemetry,
+                            "adaptive_section_size",
+                            size=mid,
+                            reason="skeleton_timeout",
+                            labels=labels,
                         )
-                        previous_code = module_code
-                        _log(
-                            "  targeted patch made no deterministic progress; "
-                            "escalating the same section once"
-                        )
-                        break
+                        _save_ctx_state(ctx, sections)
+                    return _freeze_parts(
+                        ctx,
+                        [labels[:mid], labels[mid:]],
+                        sections,
+                        alloc,
+                    )
+                result = _call_model(
+                    ctx,
+                    prompt,
+                    purpose="skeleton_generation",
+                    timeout=ctx.hard_timeout,
+                    effort=ctx.escalation_effort,
+                    labels=labels,
+                    escalated=True,
+                    sessions=sessions,
+                )
+                result_was_escalated = True
+                if result.status == "error":
+                    feedback = f"model call failed: {result.error}"
+                    continue
+                if result.status == "timeout":
+                    # Two full timeout budgets on a single-statement call is the one
+                    # place a timeout counts as evidence: the node cannot even be
+                    # *stated* within a generous budget.
                     raise RepairRequest(
-                        "Targeted skeleton declaration patch made no "
-                        "deterministic progress on the same audit failures.\n"
-                        + _format_skeleton_findings(findings)[-10000:],
-                        patch_labels or labels,
+                        "Statement generation for this node timed out twice, including at "
+                        "escalated effort; the node is likely too large or underspecified "
+                        "to state as one declaration. Decompose it into smaller nodes.",
+                        labels,
                         section_labels=labels,
                     )
-                _log(
-                    "  targeted declaration patch still has "
-                    + f"{len(findings)} deterministic issue(s)"
-                )
-        if force_escalated_round:
-            continue
-        issues = [finding.message for finding in findings]
-        if issues:
-            feedback = _format_skeleton_findings(findings)
-            if patch_note and patch_note != "not patchable":
-                feedback += f"\n\nTargeted declaration patch result: {patch_note}"
-            previous_code = module_code
-            # Stagnation guard: if this round produced the SAME file failing
-            # the SAME findings as a previous round, the regen prompt is
-            # byte-identical and another round cannot make progress. Escalate
-            # once; if the escalated round is also identical, stop and say so
-            # instead of burning the remaining rounds on the same question.
-            signature = (
-                hashlib.sha256(module_code.encode("utf-8")).hexdigest(),
-                _skeleton_findings_fingerprint(findings),
+            elif result.status == "error":
+                feedback = f"model call failed: {result.error}"
+                continue
+
+            # A resumed CLI session can replay its previous final answer when it is
+            # given the same correction prompt. The response is then guaranteed to
+            # recreate the same candidate, so compiling and asking again only burns
+            # another model call. Escalate once from a duplicate base exchange; a
+            # duplicate escalation is genuine generation stagnation.
+            exchange = (
+                ctx.escalation_runner_spec if result_was_escalated else ctx.runner_spec,
+                hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                hashlib.sha256(result.text.encode("utf-8")).hexdigest(),
             )
-            if signature in regen_signatures:
+            if exchange in completed_exchanges:
+                _record(
+                    ctx.telemetry,
+                    "duplicate_model_exchange",
+                    purpose="skeleton_generation",
+                    labels=labels,
+                    escalated=result_was_escalated,
+                    prompt_sha256=exchange[1],
+                    response_sha256=exchange[2],
+                )
+                sessions.pop(exchange[0], None)
                 if not result_was_escalated:
                     force_escalated_round = True
+                    feedback = (
+                        "The base generator replayed a byte-identical response to "
+                        "the same compiler-feedback prompt. Start fresh at the "
+                        "escalation tier and produce a materially corrected Lean "
+                        "declaration."
+                    )
                     _log(
-                        "  regeneration is stagnant (identical file and findings); "
-                        "escalating once"
+                        "  duplicate skeleton response detected; skipping the "
+                        "redundant compile and escalating once"
                     )
                     continue
                 raise RepairRequest(
-                    "Skeleton regeneration is stagnant: repeated rounds return an "
-                    "identical file failing identical deterministic findings, "
-                    "including at escalated effort. The generated Lean may actually "
-                    "be valid and the findings may reflect a harness/lint issue "
-                    "rather than a blueprint problem — verify the findings against "
-                    "the file before editing any blueprint statement:\n" + feedback,
+                    "Skeleton generation repeated a byte-identical response to the "
+                    "same correction prompt at escalated effort. The current node "
+                    "needs a different formal interface or explicit helper "
+                    "decomposition; do not weaken its mathematical claim.",
                     labels,
                     section_labels=labels,
                 )
-            regen_signatures.add(signature)
-            _log(f"  deterministic audit failed ({len(issues)} issue(s)); regenerating")
-            continue
+            completed_exchanges.add(exchange)
 
-        # Compile before paying for a semantic model audit. Most failed
-        # candidates in long runs are ordinary Lean encoding errors; auditing
-        # those files spends money without producing an acceptable artifact.
-        # When Lean identifies a small set of declarations, patch only those
-        # declarations and preserve the rest of the generated section.
-        compile_failed = False
-        compile_patch_round = 0
-        while True:
-            path.write_text(module_code, encoding="utf-8")
-            ok, output = _check_lean(path, ctx.lean_command)
-            if ok:
-                break
-            compile_findings = _lean_compile_findings(
-                parsed, labels, _ranges, output, path.name
-            )
-            patch_labels = _patchable_skeleton_labels(compile_findings, labels)
-            if not patch_labels and len(labels) == 1:
-                # With one target declaration, any local compile error belongs
-                # to that declaration or its local helpers even when Lean's
-                # source range cannot be mapped precisely.
-                patch_labels = list(labels)
-            if (
-                not patch_labels
-                or compile_patch_round >= TARGETED_DECL_PATCH_ROUNDS
-            ):
-                feedback = f"Lean rejected the file:\n{output[-12000:]}"
-                previous_code = module_code
-                failure_labels = tuple(sorted(patch_labels or labels))
-                if len(labels) == 1:
-                    # Do not spend the remaining generic regeneration rounds on
-                    # one declaration. The prompt is self-contained, so discard
-                    # the anchored producer session and give the stronger tier
-                    # one fresh attempt. If that attempt also fails after its
-                    # targeted patch, Phase 1 has exhausted Lean-side evidence
-                    # for this exact contract and may route it onward.
-                    sessions.pop(
-                        ctx.escalation_runner_spec
-                        if result_was_escalated
-                        else ctx.runner_spec,
-                        None,
+            refusal = _parse_decomposition_refusal(result.text)
+            if refusal is not None:
+                refused = [refusal["label"]] if refusal["label"] in labels else list(labels)
+                invalid_mappings = _invalid_mathlib_refusal_mappings(ctx, refusal)
+                if invalid_mappings:
+                    invalid_mathlib_refusal_count += 1
+                    mapping_text = ", ".join(
+                        f"`{generated}` is Mathlib-owned as `{actual}`"
+                        for generated, actual in sorted(invalid_mappings.items())
                     )
-                    if not result_was_escalated:
-                        force_escalated_round = True
-                        compile_failed = True
-                        _record(
-                            ctx.telemetry,
-                            "singleton_compile_escalation",
-                            labels=labels,
-                            lean_error_shape=_lean_error_shape(output),
-                            base_patch_rounds=compile_patch_round,
-                        )
-                        _log(
-                            "  singleton still fails after one targeted compile "
-                            "patch; starting one fresh escalated attempt"
-                        )
-                        break
-                    raise RepairRequest(
-                        "A singleton statement still does not compile after one "
-                        "base generation/patch and one fresh escalated "
-                        "generation/patch. Further Lean variants are not useful; "
-                        "repair or decompose the formal interface without "
-                        "weakening the blueprint claim.\n"
-                        + feedback,
-                        list(failure_labels),
-                        section_labels=labels,
+                    _log(
+                        "  rejected false Mathlib dependency refusal for "
+                        + ", ".join(refused)
+                        + f": {mapping_text}"
                     )
-                semantic_signature = (failure_labels, _lean_error_shape(output))
-                semantic_compile_failures[semantic_signature] = (
-                    semantic_compile_failures.get(semantic_signature, 0) + 1
-                )
-                if semantic_compile_failures[semantic_signature] >= 2:
-                    _quarantine_labels(ctx, failure_labels, "lean_compile_failure")
                     _record(
                         ctx.telemetry,
-                        "skeleton_semantic_stagnation",
+                        "skeleton_refusal_rejected",
                         labels=labels,
-                        failing_labels=list(failure_labels),
-                        lean_error_shape=semantic_signature[1],
-                        count=semantic_compile_failures[semantic_signature],
-                        escalated=result_was_escalated,
+                        refused_labels=refused,
+                        reason="mathlib_dependency_already_settled",
+                        attempt=invalid_mathlib_refusal_count,
+                        mappings=invalid_mappings,
+                        refusal_reason=refusal.get("reason", ""),
                     )
-                    if (
-                        len(labels) > 1
-                        and set(failure_labels) < set(labels)
-                    ):
+                if len(labels) > 1 and len(refused) < len(labels):
+                    # The response identified a node-specific problem. Isolate
+                    # exactly that node while preserving dependency order; it says
+                    # nothing about how many unrelated nodes fit in one call.
+                    _quarantine_labels(ctx, refused, "model_refusal")
+                    parts = _parts_around_labels(labels, refused)
+                    _log(
+                        "  skeleton generator isolated "
+                        + ", ".join(refused)
+                        + "; preserving global section size and routing "
+                        + " + ".join(str(len(part)) for part in parts)
+                        + " node(s)"
+                    )
+                    _record(
+                        ctx.telemetry,
+                        "skeleton_refusal_isolated",
+                        labels=labels,
+                        refused_labels=refused,
+                        part_sizes=[len(part) for part in parts],
+                        invalid_mathlib_refusal=bool(invalid_mappings),
+                        missing_helpers=refusal.get("missing_helpers") or [],
+                        refusal_reason=refusal.get("reason", ""),
+                    )
+                    delivered = None
+                    if "```" in result.text:
+                        delivered_code = _extract_lean_code(result.text)
+                        if delivered_code.strip():
+                            candidate = _parse_module(delivered_code)
+                            if candidate.decls:
+                                delivered = candidate
+                                _log(
+                                    f"  refusal reply also delivered {len(candidate.decls)} "
+                                    "declaration(s); reusing them for the healthy parts"
+                                )
+                    return _freeze_parts(
+                        ctx,
+                        parts,
+                        sections,
+                        alloc,
+                        delivered=delivered,
+                        delivered_exclude=set(refused),
+                    )
+                if invalid_mappings:
+                    # A singleton refusal based on a nonexistent generated name is
+                    # not blueprint-repair evidence. Correct it in-context and use
+                    # the escalation runner once before normal fix rounds continue.
+                    feedback = (
+                        "Your NEEDS-DECOMPOSITION response was invalid because its "
+                        "supposedly missing helpers are settled Mathlib dependencies: "
+                        + mapping_text
+                        + ". Use those exact external declarations and generate the "
+                        "requested blueprint statement without changing its meaning."
+                    )
+                    previous_code = ""
+                    if not result_was_escalated:
+                        force_escalated_round = True
+                    continue
+                refusal_key = ",".join(refused)
+                if not result_was_escalated and refusal_key not in escalated_refusals:
+                    escalated_refusals.add(refusal_key)
+                    force_escalated_round = True
+                    missing = refusal.get("missing_helpers") or []
+                    feedback = (
+                        "The base skeleton generator returned NEEDS-DECOMPOSITION. "
+                        "Treat that as a statement-generation claim, not blueprint "
+                        "repair evidence yet. Before editing the blueprint, make an "
+                        "escalated attempt to state the same blueprint node(s) inside "
+                        "this section. You may introduce small complete local helper "
+                        "declarations in this same Lean file when needed, but you must "
+                        "not weaken the blueprint statement.\n\n"
+                        f"Refused label(s): {', '.join(refused)}\n"
+                        f"Reason: {refusal['reason']}\n"
+                        f"Requested helper(s): {', '.join(missing) or '(none)'}"
+                    )
+                    previous_code = ""
+                    _log(
+                        "  skeleton generator requested decomposition for "
+                        + ", ".join(refused)
+                        + "; escalating statement generation before blueprint repair"
+                    )
+                    continue
+                raise RepairRequest(
+                    "The escalated statement generator determined node(s) cannot be "
+                    "stated 1-1 as written.\n"
+                    f"Reason: {refusal['reason']}",
+                    refused,
+                    decomposition_helpers=refusal["missing_helpers"],
+                    section_labels=labels,
+                )
+
+            code = _extract_lean_code(result.text)
+            parsed = _parse_module(code)
+            missing_imports = _missing_olean_imports(parsed.imports)
+            if missing_imports:
+                ctx.unavailable_imports.update(missing_imports)
+                parsed.imports = [item for item in parsed.imports if item not in set(missing_imports)]
+            # Normalize `:= by sorry` to the canonical terminal form.
+            for decl in parsed.decls:
+                if _is_theorem_like_kind(target_kinds.get(decl.name or "")) and _has_terminal_sorry(decl.text):
+                    decl.text = _normalize_terminal_sorry(decl.text)
+            all_imports = [f"import {m}" for m in import_modules] + parsed.imports
+            module_code, _ranges = _compose_module(all_imports, parsed.preamble, [d.text for d in parsed.decls])
+
+            findings = _skeleton_code_findings(module_code, target_kinds, label_by_lean_name)
+            findings += _skeleton_deterministic_findings(module_code, ctx, labels)
+            patch_note = ""
+            if findings:
+                patched, patch_note = _targeted_patch_skeleton_decls(
+                    ctx,
+                    labels,
+                    sections,
+                    import_modules,
+                    parsed,
+                    module_code,
+                    findings,
+                    timeout=ctx.base_timeout,
+                    sessions=sessions,
+                )
+                if patched is not None:
+                    parsed = patched
+                    all_imports = [f"import {m}" for m in import_modules] + parsed.imports
+                    module_code, _ranges = _compose_module(
+                        all_imports, parsed.preamble, [d.text for d in parsed.decls]
+                    )
+                    findings = _skeleton_code_findings(module_code, target_kinds, label_by_lean_name)
+                    findings += _skeleton_deterministic_findings(module_code, ctx, labels)
+            if findings:
+                feedback = _format_skeleton_findings(findings)
+                if patch_note and patch_note != "not patchable":
+                    feedback += f"\n\nTargeted declaration patch result: {patch_note}"
+                previous_code = module_code
+                if attempt < SKELETON_GENERATION_ATTEMPTS:
+                    _log(
+                        f"  deterministic audit failed ({len(findings)} issue(s)) after "
+                        "one targeted patch; regenerating once at escalated effort"
+                    )
+                    continue
+                raise RepairRequest(
+                    "Targeted skeleton declaration patch made no deterministic "
+                    "progress on the same audit failures, including at escalated "
+                    "effort.\n" + _format_skeleton_findings(findings)[-10000:],
+                    _patchable_skeleton_labels(findings, labels) or labels,
+                    section_labels=labels,
+                )
+
+            # Compile before paying for a semantic model audit. Most failed
+            # candidates in long runs are ordinary Lean encoding errors; auditing
+            # those files spends money without producing an acceptable artifact.
+            # One targeted patch on the Lean-isolated declarations, then either the
+            # failing subset is split out (one bad node must not drag its healthy
+            # batchmates into repair) or this attempt is spent.
+            path.write_text(module_code, encoding="utf-8")
+            ok, output = _check_lean(path, ctx.lean_command)
+            patch_labels: list[str] = []
+            if not ok:
+                compile_findings = _lean_compile_findings(
+                    parsed, labels, _ranges, output, path.name
+                )
+                patch_labels = _patchable_skeleton_labels(compile_findings, labels)
+                if not patch_labels and len(labels) == 1:
+                    # With one target declaration, any local compile error belongs
+                    # to that declaration or its local helpers even when Lean's
+                    # source range cannot be mapped precisely.
+                    patch_labels = list(labels)
+                patched = None
+                patch_note = "not patchable"
+                post_findings: list[SkeletonFinding] = []
+                if patch_labels:
+                    _log(
+                        "  Lean isolated compile errors in "
+                        + f"{len(patch_labels)} declaration(s); patching in place"
+                    )
+                    patched, patch_note = _targeted_patch_skeleton_decls(
+                        ctx,
+                        labels,
+                        sections,
+                        import_modules,
+                        parsed,
+                        module_code,
+                        compile_findings,
+                        timeout=ctx.base_timeout,
+                        sessions=sessions,
+                    )
+                if patched is not None:
+                    parsed = patched
+                    for decl in parsed.decls:
+                        if (
+                            _is_theorem_like_kind(target_kinds.get(decl.name or ""))
+                            and _has_terminal_sorry(decl.text)
+                        ):
+                            decl.text = _normalize_terminal_sorry(decl.text)
+                    all_imports = [f"import {m}" for m in import_modules] + parsed.imports
+                    module_code, _ranges = _compose_module(
+                        all_imports, parsed.preamble, [decl.text for decl in parsed.decls]
+                    )
+                    post_findings = _skeleton_code_findings(
+                        module_code, target_kinds, label_by_lean_name
+                    )
+                    post_findings += _skeleton_deterministic_findings(
+                        module_code, ctx, labels
+                    )
+                    if not post_findings:
+                        path.write_text(module_code, encoding="utf-8")
+                        ok, output = _check_lean(path, ctx.lean_command)
+                        if ok:
+                            _record(
+                                ctx.telemetry,
+                                "skeleton_compile_patch",
+                                section=next_number,
+                                round=1,
+                                labels=patch_labels,
+                                status="applied",
+                            )
+                if not ok:
+                    if patched is not None and post_findings:
+                        feedback = (
+                            "Targeted compile patch introduced deterministic issues:\n"
+                            + _format_skeleton_findings(post_findings)
+                        )
+                    else:
+                        feedback = f"Lean rejected the file:\n{output[-12000:]}"
+                        if patch_note != "patched":
+                            feedback += f"\n\nTargeted compile patch: {patch_note}"
+                    previous_code = module_code
+                    failure_labels = tuple(sorted(patch_labels or labels))
+                    if len(labels) > 1 and set(failure_labels) < set(labels):
+                        # Lean isolated a proper subset: split it out so the
+                        # healthy declarations freeze on their own and only the
+                        # failing nodes spend further budget.
+                        _quarantine_labels(ctx, failure_labels, "lean_compile_failure")
+                        _record(
+                            ctx.telemetry,
+                            "skeleton_compile_isolated",
+                            labels=labels,
+                            failing_labels=list(failure_labels),
+                            lean_error_shape=_lean_error_shape(output),
+                            escalated=result_was_escalated,
+                        )
                         parts = _parts_around_labels(labels, list(failure_labels))
                         _log(
-                            "  repeated Lean failure isolated "
+                            "  Lean failure isolated "
                             + ", ".join(failure_labels)
-                            + "; preserving unrelated declarations and routing "
+                            + "; reusing the already-generated declarations for the "
+                            + "unrelated parts and routing "
                             + " + ".join(str(len(part)) for part in parts)
                             + " node(s)"
                         )
                         return _freeze_parts(
-                            ctx, parts, sections, next_number
+                            ctx,
+                            parts,
+                            sections,
+                            alloc,
+                            delivered=parsed,
+                            delivered_exclude=set(failure_labels),
                         )
-                    if (
-                        semantic_signature not in semantic_stagnation_escalated
-                        and not result_was_escalated
-                    ):
-                        semantic_stagnation_escalated.add(semantic_signature)
-                        force_escalated_round = True
-                        compile_failed = True
-                        _log(
-                            "  compile repair repeats the same Lean error shape; "
-                            "escalating once instead of generating more variants"
+                    if attempt < SKELETON_GENERATION_ATTEMPTS:
+                        # The prompt is self-contained; discard the anchored
+                        # producer session and give the stronger tier one fresh
+                        # attempt.
+                        sessions.pop(
+                            ctx.escalation_runner_spec
+                            if result_was_escalated
+                            else ctx.runner_spec,
+                            None,
                         )
-                        break
-                    raise RepairRequest(
-                        "Lean statement generation repeated the same normalized "
-                        "compiler failure after isolation/escalation. Treat this "
-                        "as evidence that the current blueprint contract may omit "
-                        "a necessary formal interface; do not weaken the claim.\n"
-                        + feedback,
-                        list(failure_labels),
-                        section_labels=labels,
-                    )
-                failure_signature = _lean_failure_fingerprint(module_code, output)
-                if failure_signature in compile_regen_signatures:
-                    _record(
-                        ctx.telemetry,
-                        "skeleton_compile_stagnation",
-                        labels=labels,
-                        code_sha256=failure_signature[0],
-                        lean_output_sha256=failure_signature[1],
-                        escalated=result_was_escalated,
-                    )
-                    if not compile_stagnation_escalated and not result_was_escalated:
-                        compile_stagnation_escalated = True
-                        force_escalated_round = True
-                        compile_failed = True
-                        _log(
-                            "  compile repair is stagnant (identical file and Lean "
-                            "errors); escalating once instead of repeating"
-                        )
-                        break
-                    raise RepairRequest(
-                        "Lean generation is stagnant: repeated rounds returned the "
-                        "same generated file with the same compiler errors, including "
-                        "after targeted or escalated repair. Do not weaken the claim; "
-                        "repair the blueprint only if its current statement omits a "
-                        "necessary mathematical interface or helper.\n"
-                        + feedback,
-                        patch_labels or labels,
-                        section_labels=labels,
-                    )
-                compile_regen_signatures.add(failure_signature)
-                compile_failed = True
-                _log("  lean rejected skeleton section; sending errors back")
-                break
-            compile_patch_round += 1
-            _log(
-                "  Lean isolated compile errors in "
-                + f"{len(patch_labels)} declaration(s); patching in place"
-            )
-            patched, patch_note = _targeted_patch_skeleton_decls(
-                ctx,
-                labels,
-                sections,
-                import_modules,
-                parsed,
-                module_code,
-                compile_findings,
-                timeout=(
-                    ctx.base_timeout
-                    if compile_patch_round == 1
-                    else ctx.hard_timeout
-                ),
-                sessions=sessions,
-            )
-            if patched is None:
-                feedback = (
-                    f"Lean rejected the file:\n{output[-10000:]}\n\n"
-                    f"Targeted compile patch failed: {patch_note}"
-                )
-                previous_code = module_code
-                if len(labels) == 1:
-                    sessions.pop(
-                        ctx.escalation_runner_spec
-                        if result_was_escalated
-                        else ctx.runner_spec,
-                        None,
-                    )
-                    if not result_was_escalated:
-                        force_escalated_round = True
                         _record(
                             ctx.telemetry,
                             "singleton_compile_escalation",
                             labels=labels,
                             lean_error_shape=_lean_error_shape(output),
-                            base_patch_rounds=compile_patch_round,
-                            patch_status="failed",
+                            base_patch_rounds=1 if patch_labels else 0,
                         )
                         _log(
-                            "  singleton targeted compile patch failed; "
-                            "starting one fresh escalated attempt"
+                            "  section still fails Lean after one targeted compile "
+                            "patch; starting one fresh escalated attempt"
                         )
-                        compile_failed = True
-                        break
+                        continue
                     raise RepairRequest(
-                        "A singleton statement still does not compile after its "
-                        "escalated targeted compile patch failed. Further Lean "
-                        "variants are not useful; repair or decompose the formal "
-                        "interface without weakening the blueprint claim.\n"
-                        + feedback,
-                        labels,
+                        "A statement still does not compile after one base "
+                        "generation/patch and one fresh escalated generation/patch. "
+                        "Further Lean variants are not useful; repair or decompose "
+                        "the formal interface without weakening the blueprint "
+                        "claim.\n" + feedback,
+                        list(failure_labels),
                         section_labels=labels,
                     )
-                compile_failed = True
-                break
-            parsed = patched
-            for decl in parsed.decls:
-                if (
-                    target_kinds.get(decl.name or "") in THEOREM_LIKE_KINDS
-                    and _has_terminal_sorry(decl.text)
-                ):
-                    decl.text = _normalize_terminal_sorry(decl.text)
-            all_imports = [f"import {m}" for m in import_modules] + parsed.imports
-            module_code, _ranges = _compose_module(
-                all_imports, parsed.preamble, [decl.text for decl in parsed.decls]
-            )
-            deterministic_findings = _skeleton_code_findings(
-                module_code, target_kinds, label_by_lean_name
-            )
-            deterministic_findings += _skeleton_deterministic_findings(
-                module_code, ctx, labels
-            )
-            if deterministic_findings:
-                feedback = _format_skeleton_findings(deterministic_findings)
-                previous_code = module_code
-                if len(labels) == 1:
-                    sessions.pop(
-                        ctx.escalation_runner_spec
-                        if result_was_escalated
-                        else ctx.runner_spec,
-                        None,
+
+            # Alignment audit: one verdict, one escalated targeted correction, one
+            # re-audit. A second rejection is blueprint evidence, not a reason to
+            # generate more Lean variants.
+            audit = _model_alignment_audit(ctx, labels, module_code)
+            if audit is not None:
+                kind, reason, rejected = audit
+                if kind == "blueprint":
+                    raise RepairRequest(reason, sorted(rejected), section_labels=labels)
+                audit_findings = [
+                    SkeletonFinding(
+                        reason,
+                        label=label,
+                        lean_name=_lean_name(label),
                     )
-                    if not result_was_escalated:
-                        force_escalated_round = True
+                    for label in sorted(rejected)
+                    if label in labels
+                ]
+                patched, patch_note = _targeted_patch_skeleton_decls(
+                    ctx,
+                    labels,
+                    sections,
+                    import_modules,
+                    parsed,
+                    module_code,
+                    audit_findings,
+                    timeout=ctx.hard_timeout,
+                    sessions=sessions,
+                    escalated=True,
+                )
+                corrected = False
+                if patched is not None:
+                    parsed = patched
+                    for decl in parsed.decls:
+                        if (
+                            _is_theorem_like_kind(target_kinds.get(decl.name or ""))
+                            and _has_terminal_sorry(decl.text)
+                        ):
+                            decl.text = _normalize_terminal_sorry(decl.text)
+                    all_imports = [f"import {m}" for m in import_modules] + parsed.imports
+                    module_code, _ranges = _compose_module(
+                        all_imports, parsed.preamble, [decl.text for decl in parsed.decls]
+                    )
+                    post_patch_findings = _skeleton_code_findings(
+                        module_code, target_kinds, label_by_lean_name
+                    )
+                    post_patch_findings += _skeleton_deterministic_findings(
+                        module_code, ctx, labels
+                    )
+                    path.write_text(module_code, encoding="utf-8")
+                    post_patch_ok, post_patch_output = _check_lean(path, ctx.lean_command)
+                    if post_patch_findings or not post_patch_ok:
+                        patch_note = (
+                            "correction failed deterministic checks:\n"
+                            + _format_skeleton_findings(post_patch_findings)
+                            if post_patch_findings
+                            else "Lean rejected the corrected file:\n"
+                            + post_patch_output[-10000:]
+                        )
+                    else:
                         _record(
                             ctx.telemetry,
-                            "singleton_compile_escalation",
-                            labels=labels,
-                            lean_error_shape=_skeleton_findings_fingerprint(
-                                deterministic_findings
-                            ),
-                            base_patch_rounds=compile_patch_round,
-                            patch_status="deterministic_findings_after_patch",
+                            "skeleton_audit_patch",
+                            section=next_number,
+                            round=attempt,
+                            labels=sorted(rejected),
+                            status="applied",
                         )
+                        _log("  patched audit-rejected declarations; re-auditing the section")
+                        reaudit = _model_alignment_audit(
+                            ctx, labels, module_code, tag="post-correction"
+                        )
+                        if reaudit is None:
+                            corrected = True
+                        else:
+                            kind2, reason2, rejected2 = reaudit
+                            if kind2 == "blueprint":
+                                raise RepairRequest(
+                                    reason2, sorted(rejected2), section_labels=labels
+                                )
+                            raise RepairRequest(
+                                "Blueprint contract audit rejected the section again "
+                                "after one escalated targeted correction; the blueprint "
+                                "text likely under-determines the statement.\n" + reason2,
+                                sorted(rejected2),
+                                section_labels=labels,
+                            )
+                if not corrected:
+                    feedback = reason + f"\n\nTargeted audit correction failed: {patch_note}"
+                    previous_code = module_code
+                    if attempt < SKELETON_GENERATION_ATTEMPTS:
                         _log(
-                            "  singleton targeted compile patch introduced "
-                            "deterministic issues; starting one fresh escalated attempt"
+                            "  alignment audit correction failed; regenerating once "
+                            "at escalated effort"
                         )
-                        compile_failed = True
-                        break
+                        continue
                     raise RepairRequest(
-                        "A singleton statement still fails deterministic checks after "
-                        "its escalated targeted compile patch. Further Lean variants "
-                        "are not useful; repair or decompose the formal interface "
-                        "without weakening the blueprint claim.\n"
-                        + feedback,
-                        labels,
+                        "Blueprint contract audit kept rejecting regenerated "
+                        "statements; the blueprint text likely under-determines the "
+                        "statement.\n" + reason,
+                        sorted(rejected),
                         section_labels=labels,
                     )
-                compile_failed = True
-                break
-            _record(
-                ctx.telemetry,
-                "skeleton_compile_patch",
-                section=next_number,
-                round=compile_patch_round,
-                labels=patch_labels,
-                status="applied",
-            )
-        if compile_failed:
-            continue
 
-        audit_needs_regeneration = False
-        while True:
-            audit = _model_alignment_audit(ctx, labels, module_code)
-            if audit is None:
-                break
-            kind, reason, rejected = audit
-            if kind == "blueprint":
-                raise RepairRequest(reason, sorted(rejected), section_labels=labels)
-            audit_rounds += 1
-            if audit_rounds > AUDIT_REGEN_ROUNDS:
+            object_attempt = _compile_module_olean(path, ctx.lean_command)
+            if not object_attempt.ok:
+                feedback = f".olean compilation failed:\n{object_attempt.output[-8000:]}"
+                previous_code = module_code
+                if attempt < SKELETON_GENERATION_ATTEMPTS:
+                    continue
                 raise RepairRequest(
-                    "Blueprint contract audit kept rejecting regenerated statements; "
-                    "the blueprint text likely under-determines the statement.\n" + reason,
-                    sorted(rejected),
+                    ".olean compilation failed on both bounded attempts for this "
+                    "section.\n" + feedback,
+                    labels,
                     section_labels=labels,
                 )
-
-            audit_findings = [
-                SkeletonFinding(
-                    reason,
-                    label=label,
-                    lean_name=_lean_name(label),
-                )
-                for label in sorted(rejected)
-                if label in labels
-            ]
-            patched, patch_note = _targeted_patch_skeleton_decls(
-                ctx,
-                labels,
-                sections,
-                import_modules,
-                parsed,
-                module_code,
-                audit_findings,
-                timeout=ctx.base_timeout,
-                sessions=sessions,
-            )
-            if patched is None:
-                feedback = reason + f"\n\nTargeted audit patch failed: {patch_note}"
-                previous_code = module_code
-                audit_needs_regeneration = True
-                _log("  alignment audit patch failed; regenerating the section")
-                break
-
-            parsed = patched
-            for decl in parsed.decls:
-                if (
-                    target_kinds.get(decl.name or "") in THEOREM_LIKE_KINDS
-                    and _has_terminal_sorry(decl.text)
-                ):
-                    decl.text = _normalize_terminal_sorry(decl.text)
-            all_imports = [f"import {m}" for m in import_modules] + parsed.imports
-            module_code, _ranges = _compose_module(
-                all_imports, parsed.preamble, [decl.text for decl in parsed.decls]
-            )
-            post_patch_findings = _skeleton_code_findings(
-                module_code, target_kinds, label_by_lean_name
-            )
-            post_patch_findings += _skeleton_deterministic_findings(
-                module_code, ctx, labels
-            )
-            path.write_text(module_code, encoding="utf-8")
-            post_patch_ok, post_patch_output = _check_lean(path, ctx.lean_command)
-            if post_patch_findings or not post_patch_ok:
-                feedback = (
-                    _format_skeleton_findings(post_patch_findings)
-                    if post_patch_findings
-                    else "Lean rejected the audit-targeted patch:\n" + post_patch_output[-10000:]
-                )
-                previous_code = module_code
-                audit_needs_regeneration = True
-                _log("  audit-targeted patch did not compile cleanly; regenerating")
-                break
+            _log(f"  section {next_number:02d} frozen ({len(parsed.decls)} declaration(s))")
             _record(
                 ctx.telemetry,
-                "skeleton_audit_patch",
+                "skeleton_section_frozen",
                 section=next_number,
-                round=audit_rounds,
-                labels=sorted(rejected),
-                status="applied",
+                labels=labels,
+                decls=len(parsed.decls),
             )
-            _log("  patched audit-rejected declarations; re-auditing the section")
+            _note_frozen_section(ctx, labels)
+            froze = True
+            return [
+                Section(
+                    number=next_number,
+                    labels=list(labels),
+                    path=path,
+                    module=module,
+                    import_modules=import_modules,
+                )
+            ]
 
-        if audit_needs_regeneration:
-            continue
-
-        object_attempt = _compile_module_olean(path, ctx.lean_command)
-        if not object_attempt.ok:
-            feedback = f".olean compilation failed:\n{object_attempt.output[-8000:]}"
-            previous_code = module_code
-            continue
-        _log(f"  section {next_number:02d} frozen ({len(parsed.decls)} declaration(s))")
-        _record(
-            ctx.telemetry,
-            "skeleton_section_frozen",
-            section=next_number,
-            labels=labels,
-            decls=len(parsed.decls),
+        raise RepairRequest(
+            "Skeleton generation exhausted its bounded attempts for this section. "
+            "Last feedback:\n" + feedback,
+            labels,
+            section_labels=labels,
         )
-        _note_frozen_section(ctx, labels)
-        return [
-            Section(
-                number=next_number,
-                labels=list(labels),
-                path=path,
-                module=module,
-                import_modules=import_modules,
-            )
-        ]
-
-    raise RepairRequest(
-        "Skeleton generation exhausted its fix rounds for this section. Last feedback:\n"
-        + feedback,
-        labels,
-        section_labels=labels,
-    )
+    finally:
+        # Any exit that is not a frozen section (RepairRequest, bisect via
+        # _freeze_parts, runner error) must leave no artifact behind: a
+        # later generation call would otherwise find the orphan file and
+        # `import` it against a stale .olean.
+        if not froze:
+            _discard_section_artifacts(path)
 
 
 def _run_phase1(ctx: Ctx, sections: list[Section], pending: set[str]) -> list[Section]:
-    next_number = max((sec.number for sec in sections), default=0) + 1
+    alloc = _SectionNumberAllocator(max((sec.number for sec in sections), default=0) + 1)
     if ctx.effective_section_size <= 0:
         ctx.effective_section_size = ctx.section_size
     # Same filter as _partition_sections, but sliced lazily so each group is
@@ -3284,17 +3941,122 @@ def _run_phase1(ctx: Ctx, sections: list[Section], pending: set[str]) -> list[Se
         for label in _topo_order(ctx.nodes)
         if label in pending and not ctx.nodes[label].mathlibok
     ]
+    # One root-first design pass over everything pending, then the per-section
+    # loop handles whatever it could not deliver or freeze.
+    bulk_sections, covered = _bulk_skeleton_pass(ctx, order, sections, alloc)
+    if bulk_sections:
+        sections.extend(bulk_sections)
+        _save_ctx_state(ctx, sections)
+        order = [label for label in order if label not in covered]
     index = 0
+    # A section that needs a blueprint repair must NOT abort the wave. The
+    # failing cluster is usually a small, self-contained corner of the graph
+    # (measured: 40 of 41 pending nodes were independent of the cluster that
+    # was blocking every wave), so the repair request is parked, its labels
+    # and their dependents are skipped, and the rest of the wave proceeds.
+    # Collected requests are raised after the wave drains, so the main loop
+    # repairs against a blueprint whose independent work is already frozen.
+    deferred_requests: list[RepairRequest] = []
+    blocked: set[str] = set()
+    # _reactivate_deferred_sections rebinds `sections` to a new list, so the
+    # caller's list stops receiving this wave's work. Track what we froze by
+    # section number and hand it back through the request on the way out.
+    incoming_numbers = {sec.number for sec in sections}
     while index < len(order):
         size = max(1, min(ctx.effective_section_size, ctx.section_size))
         group = _next_phase1_group(
-            order, index, size, ctx.quarantined_labels
+            order, index, size, ctx.quarantined_labels | blocked
         )
         index += len(group)
-        new_sections = _freeze_section(ctx, group, sections, next_number)
+        group = [label for label in group if label not in blocked]
+        if not group:
+            continue
+        try:
+            new_sections = _freeze_section(ctx, group, sections, alloc)
+        except RepairRequest as request:
+            # Keep whatever the section managed to freeze before failing.
+            if request.frozen_sections:
+                already = _frozen_labels(sections)
+                keep = [
+                    sec for sec in request.frozen_sections
+                    if not (set(sec.labels) & already)
+                ]
+                sections.extend(keep)
+                request.frozen_sections = []
+            # Block only the nodes the request actually blames, plus what
+            # depends on them. Innocent section-mates are re-queued so they
+            # get their own attempt instead of inheriting the failure.
+            failing = set(request.labels) or set(request.section_labels or [])
+            blocked |= failing
+            blocked |= {
+                label
+                for label in _dependency_descendants(ctx.nodes, failing)
+                if label in ctx.nodes
+            }
+            innocent = [
+                label for label in group
+                if label not in blocked and label not in _frozen_labels(sections)
+            ]
+            if innocent:
+                order.extend(innocent)
+            _quarantine_labels(ctx, sorted(failing), "repair_pending")
+            deferred_requests.append(request)
+            remaining = sum(
+                1 for label in order[index:] if label not in blocked
+            )
+            _log(
+                f"  section needs a blueprint repair ({', '.join(sorted(failing)[:4])}"
+                f"{'...' if len(failing) > 4 else ''}); deferring it and continuing "
+                f"with {remaining} independent node(s) still in this wave"
+            )
+            _record(
+                ctx.telemetry,
+                "phase1_repair_deferred",
+                labels=sorted(failing),
+                blocked_count=len(blocked),
+                remaining_in_wave=remaining,
+            )
+            _save_ctx_state(ctx, sections)
+            continue
         sections.extend(new_sections)
-        next_number = max(sec.number for sec in sections) + 1
         _save_ctx_state(ctx, sections)
+        # Eagerly recover deferred sections as their dependencies refreeze.
+        # Reactivation is deterministic (Lean recompiles, no model calls), and
+        # a repair can leave a CHAIN of deferred sections whose first link
+        # becomes compilable mid-wave; waiting for the whole wave to finish
+        # parked a ready 26-node recovery chain for no reason.
+        sections, reactivated, dropped = _reactivate_deferred_sections(ctx, sections)
+        if reactivated or dropped:
+            _save_ctx_state(ctx, sections)
+        if dropped:
+            # A deferred section that no longer compiles returns its labels to
+            # this wave for regeneration, in topological position.
+            already = set(order)
+            order.extend(
+                label
+                for label in _topo_order(ctx.nodes)
+                if label in dropped and label not in already
+            )
+    if deferred_requests:
+        # The wave is drained: every independently-statable node is frozen.
+        # Now surface one repair for the main loop. Remaining clusters raise
+        # on the next wave, which will again finish all independent work
+        # first, so a hard corner costs its own nodes instead of the run.
+        primary = deferred_requests[0]
+        if len(deferred_requests) > 1:
+            others = sorted(
+                {label for req in deferred_requests[1:] for label in req.labels}
+            )
+            _log(
+                f"  wave drained; repairing {', '.join(primary.labels[:4])} first, "
+                f"{len(others)} other node(s) still awaiting repair"
+            )
+        # Carry this wave's frozen sections out through the exception; the
+        # caller's list may no longer be the one we appended to.
+        primary.frozen_sections = [
+            sec for sec in sections if sec.number not in incoming_numbers
+        ]
+        raise primary
     return sections
 
 
@@ -4016,6 +4778,265 @@ def _reactivate_deferred_sections(
     return retained, reactivated, dropped
 
 
+_PAPER_EXCERPT_HEAD = 2000
+_WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{3,}")
+
+
+def _paper_excerpt_for(ctx: Ctx, labels: list[str], *, budget: int = 20000) -> str:
+    """Deterministic paper slice for repair prompts: the head of the paper
+    (title/abstract) plus the paragraphs sharing the rarest terms with the
+    target nodes' TeX. Repair calls previously carried the full paper."""
+    paper = ctx.paper_text or ""
+    if len(paper) <= budget:
+        return paper
+    target_text = " ".join(ctx.tex_blocks.get(label, "") for label in labels)
+    target_tokens = set(_WORD_TOKEN_RE.findall(target_text.lower()))
+    paragraphs = [para for para in re.split(r"\n\s*\n", paper) if para.strip()]
+    freq: dict[str, int] = {}
+    para_tokens: list[set[str]] = []
+    for para in paragraphs:
+        tokens = set(_WORD_TOKEN_RE.findall(para.lower())) & target_tokens
+        para_tokens.append(tokens)
+        for token in tokens:
+            freq[token] = freq.get(token, 0) + 1
+    scored = sorted(
+        (
+            (sum(1.0 / freq[token] for token in tokens), index)
+            for index, tokens in enumerate(para_tokens)
+        ),
+        reverse=True,
+    )
+    head = paper[:_PAPER_EXCERPT_HEAD]
+    used = len(head)
+    chosen: set[int] = set()
+    for score, index in scored:
+        if score <= 0.0:
+            break
+        size = len(paragraphs[index]) + 2
+        if used + size > budget:
+            continue
+        chosen.add(index)
+        used += size
+    body = "\n\n".join(paragraphs[index] for index in sorted(chosen))
+    if not body:
+        return head
+    return f"{head}\n\n[... paper excerpted; paragraphs relevant to the failing nodes ...]\n\n{body}"
+
+
+def _repair_node_context(
+    ctx: Ctx,
+    labels: list[str],
+    *,
+    dep_budget: int = 14000,
+    consumer_budget: int = 6000,
+) -> str:
+    """Failing nodes in full, dependency-closure statements, and immediate
+    consumer statements — the slice a repair actually needs, instead of the
+    entire blueprint."""
+    target_set = {label for label in labels if label in ctx.nodes}
+    blocks: list[str] = []
+    for label in sorted(target_set):
+        node = ctx.nodes[label]
+        blocks.append(
+            f"## FAILING NODE {label} ({node.kind}; uses "
+            f"[{', '.join(sorted(node.uses)) or 'none'}])\n"
+            f"```tex\n{ctx.tex_blocks.get(label, '')[:5000]}\n```"
+        )
+    dep_blocks: list[str] = []
+    used = 0
+    for label in sorted(_dependency_closure(ctx.nodes, sorted(target_set)) - target_set):
+        piece = (
+            f"### dependency {label} ({ctx.nodes[label].kind})\n"
+            f"```tex\n{ctx.stmt_blocks.get(label, '')[:1500]}\n```"
+        )
+        if used + len(piece) > dep_budget:
+            dep_blocks.append(
+                f"### (further dependencies omitted for space, starting at {label})"
+            )
+            break
+        dep_blocks.append(piece)
+        used += len(piece)
+    consumer_blocks: list[str] = []
+    used = 0
+    consumers = sorted(
+        label
+        for label, node in ctx.nodes.items()
+        if node.uses & target_set and label not in target_set
+    )[:8]
+    for label in consumers:
+        piece = (
+            f"### immediate consumer {label} ({ctx.nodes[label].kind})\n"
+            f"```tex\n{ctx.stmt_blocks.get(label, '')[:1200]}\n```"
+        )
+        if used + len(piece) > consumer_budget:
+            break
+        consumer_blocks.append(piece)
+        used += len(piece)
+    parts = ["\n\n".join(blocks) or "(failing nodes no longer present in the blueprint)"]
+    parts.append(
+        "Dependency closure of the failing nodes (statements only):\n"
+        + ("\n\n".join(dep_blocks) or "- none")
+    )
+    parts.append(
+        "Immediate consumers of the failing nodes (statements only; their "
+        "statements must keep compiling unchanged):\n"
+        + ("\n\n".join(consumer_blocks) or "- none")
+    )
+    return "\n\n".join(parts)
+
+
+_HARNESS_CONVENTIONS_NOTE = """\
+Harness conventions (context for interpreting the evidence — do NOT spend
+budget re-reading the pipeline scripts to rediscover them):
+- Statements phase freezes every theorem-like node as `theorem ... := sorry`;
+  proofs are produced and checked in a later phase. A `sorry` proof in the
+  evidence is the designed convention, not a defect.
+- Definition-kind nodes must have complete bodies (no `sorry`).
+- The deterministic audit rejects: partial/failing tactic proofs, `sorry`
+  inside definitions or helpers, statements that do not visibly mention their
+  non-Mathlib `\\uses` dependencies, and placeholder names.
+- The fix always belongs in the blueprint TeX, never in the pipeline scripts."""
+
+
+_REPAIR_SCOPE_RULES = """\
+- Prefer ADDITIVE repairs: add new helper nodes (with explicit `\\uses{...}`
+  edges) rather than editing existing statements. Keep every node outside the
+  failing nodes listed below unchanged unless the evidence shows that node
+  itself is wrong.
+- Do not rewrite downstream consumers of the failing nodes: consumer-side
+  contract edits and edits with no dependency path to the failing nodes are
+  detected deterministically and roll the whole repair back, wasting this
+  trial. Consumers are rechecked automatically after the repaired contract
+  freezes."""
+
+
+def _fast_agent_repair_prompt(
+    ctx: Ctx,
+    labels: list[str],
+    evidence: str,
+    trial: int,
+    *,
+    escalation_note: str = "",
+    model_timeout_s: int | None = None,
+) -> str:
+    escalation_block = f"\nIMPORTANT: {escalation_note}\n" if escalation_note else ""
+    budget_block = (
+        f"\nThis repair call has a wall-clock budget of about {model_timeout_s} seconds.\n"
+        if model_timeout_s
+        else ""
+    )
+    return f"""TASK: REFINE-BLUEPRINT-FROM-LEAN-FAILURE
+
+Trial {trial} failed when Lean checked a disposable implementation generated
+from the current blueprint.
+
+You are the blueprint author. Fix the blueprint, not the Lean implementation.
+{escalation_block}
+{budget_block}
+
+The blueprint source lives at `blueprints/{ctx.name}/blueprint/src/content.tex`;
+read it from disk as needed (locate the failing nodes via their `\\label{{...}}`
+anchors) and edit it in place. Everything you must know about the failing
+nodes is already excerpted below — do not re-read the whole file into context.
+
+Rules:
+- Edit only `blueprints/{ctx.name}/blueprint/src/` and
+  `blueprints/{ctx.name}/meta.yml` if metadata is genuinely wrong.
+- Do not edit `.auto-blueprint/` Lean attempt files.
+{_REPAIR_SCOPE_RULES}
+- Do not make the theorem weaker just to satisfy Lean.
+- If Lean failed because the blueprint skipped an argument, add the missing
+  lemma/proposition/definition as a blueprint node.
+- If the statement audit says the generated Lean used abstract tags, erased
+  semantics, dropped parameters, or proved only a vacuous/too-weak behavior,
+  strengthen the blueprint itself with concrete mathematical content.
+- Definitions for new problem nodes must specify real input/output relations,
+  promises, thresholds, approximation factors, and yes/no conditions. They
+  cannot merely introduce a family tag.
+- Construction lemmas must state the actual constructed object and behavior
+  equalities/inequalities, not just existence, continuity, or a placeholder
+  predicate.
+- If a proof needs an unstated dependency, add or correct `\\uses{{...}}`.
+- If a statement is mathematically wrong compared with the paper, correct the
+  statement in the blueprint.
+- After editing, run `python scripts/validate_blueprint.py {ctx.name}`.
+
+{_HARNESS_CONVENTIONS_NOTE}
+
+{_repair_node_context(ctx, labels)}
+
+Relevant paper context (deterministic excerpt):
+<paper>
+{_paper_excerpt_for(ctx, labels)}
+</paper>
+
+Lean critic output:
+```text
+{evidence[-12000:]}
+```
+"""
+
+
+def _fast_api_repair_prompt(
+    ctx: Ctx,
+    labels: list[str],
+    evidence: str,
+    trial: int,
+    blueprint_source: str,
+    *,
+    escalation_note: str = "",
+    model_timeout_s: int | None = None,
+) -> str:
+    escalation_block = f"\nIMPORTANT: {escalation_note}\n" if escalation_note else ""
+    budget_block = (
+        f"\nThis repair call has a wall-clock budget of about {model_timeout_s} seconds.\n"
+        if model_timeout_s
+        else ""
+    )
+    return f"""TASK: REFINE-BLUEPRINT-CONTENT-TEX
+
+Trial {trial} failed when Lean checked a disposable implementation generated
+from the current blueprint.
+{escalation_block}
+{budget_block}
+
+Return exactly one JSON object:
+{{
+  "content_tex": "full replacement for blueprints/{ctx.name}/blueprint/src/content.tex",
+  "notes": "short explanation of what changed"
+}}
+
+Rules:
+- Fix the blueprint, not the Lean code.
+{_REPAIR_SCOPE_RULES}
+- Copy every node outside the failing nodes byte-for-byte from the current
+  source below.
+- Do not make the theorem weaker just to satisfy Lean.
+- Add missing intermediate blueprint nodes when the proof needs them.
+- Correct `\\uses{{...}}` whenever dependencies were missing or wrong.
+- Do not include `\\begin{{document}}` or `\\end{{document}}`.
+
+{_HARNESS_CONVENTIONS_NOTE}
+
+{_repair_node_context(ctx, labels)}
+
+Relevant paper context (deterministic excerpt):
+<paper>
+{_paper_excerpt_for(ctx, labels)}
+</paper>
+
+Current blueprint source:
+```tex
+{blueprint_source}
+```
+
+Lean critic output:
+```text
+{evidence[-12000:]}
+```
+"""
+
+
 def _repair_blueprint(
     ctx: Ctx,
     evidence: str,
@@ -4040,16 +5061,25 @@ def _repair_blueprint(
     blueprint_source = _read_blueprint_source(ctx.name)
     before_fps = dict(ctx.contract_fps)
     _log(f"==> Blueprint repair {trial}/{max_trials} for: " + ", ".join(labels[:8]))
-    prompt_builder = _agent_refine_prompt if repair_runner_agent else _api_refine_prompt
-    prompt = prompt_builder(
-        ctx.name,
-        blueprint_source,
-        evidence,
-        trial,
-        ctx.paper_text,
-        escalation_note=escalation_note,
-        model_timeout_s=ctx.hard_timeout,
-    )
+    if repair_runner_agent:
+        prompt = _fast_agent_repair_prompt(
+            ctx,
+            labels,
+            evidence,
+            trial,
+            escalation_note=escalation_note,
+            model_timeout_s=ctx.hard_timeout,
+        )
+    else:
+        prompt = _fast_api_repair_prompt(
+            ctx,
+            labels,
+            evidence,
+            trial,
+            blueprint_source,
+            escalation_note=escalation_note,
+            model_timeout_s=ctx.hard_timeout,
+        )
     prompt_artifact = _store_text(ctx.telemetry, "prompt_blueprint_repair", prompt)
     try:
         runner = _make_runner(
@@ -4083,6 +5113,8 @@ def _repair_blueprint(
             changed_count=0,
             reason=str(exc),
         )
+        if is_environment_error(exc):
+            raise
         return set()
     started = time.monotonic()
     try:
@@ -4110,6 +5142,8 @@ def _repair_blueprint(
         restored = validate_blueprint(REPO_ROOT, ctx.name)
         if restored.ok:
             ctx.refresh_nodes(restored.nodes)
+        if is_environment_error(exc):
+            raise
         if status == "timeout" and len(labels) > 1 and not is_environment_error(exc):
             mid = len(labels) // 2
             _log(
@@ -4236,7 +5270,26 @@ def _section_normalization_prompt(
         for label in section_labels
         if label in ctx.nodes
     )
-    paper_block = f"\nOriginal paper context:\n<paper>\n{ctx.paper_text}\n</paper>\n" if ctx.paper_text else ""
+    excerpt = _paper_excerpt_for(ctx, section_labels)
+    paper_block = (
+        f"\nRelevant paper context (deterministic excerpt):\n<paper>\n{excerpt}\n</paper>\n"
+        if excerpt
+        else ""
+    )
+    if api_mode:
+        source_block = f"""
+Current blueprint source:
+```tex
+{blueprint_source}
+```
+"""
+    else:
+        source_block = f"""
+The blueprint source lives at `blueprints/{ctx.name}/blueprint/src/content.tex`;
+read it from disk as needed (locate the section nodes via their `\\label{{...}}`
+anchors) and edit it in place. The section nodes are already excerpted above —
+do not re-read the whole file into context.
+"""
     base = f"""TASK: NORMALIZE-STUCK-BLUEPRINT-SECTION
 
 Phase 1 is repeatedly failing to freeze one dependency-ordered section. Do a
@@ -4259,6 +5312,8 @@ Hard constraints:
 - After editing, run `python scripts/validate_blueprint.py {ctx.name}`.
 - This call has a wall-clock budget of about {model_timeout_s}s.
 
+{_HARNESS_CONVENTIONS_NOTE}
+
 The recurring evidence is:
 ```text
 {evidence[-12000:]}
@@ -4268,10 +5323,7 @@ Section nodes to normalize:
 {section_nodes}
 
 {paper_block}
-Current blueprint source:
-```tex
-{blueprint_source}
-```
+{source_block}
 """
     if not api_mode:
         return base
@@ -4335,6 +5387,8 @@ def _normalize_stuck_section(
             changed_count=0,
             reason=str(exc),
         )
+        if is_environment_error(exc):
+            raise
         raise SectionNormalizationRejected(str(exc)) from exc
     started = time.monotonic()
     try:
@@ -4358,6 +5412,8 @@ def _normalize_stuck_section(
         restored = validate_blueprint(REPO_ROOT, ctx.name)
         if restored.ok:
             ctx.refresh_nodes(restored.nodes)
+        if is_environment_error(exc):
+            raise
         raise SectionNormalizationRejected(str(exc)) from exc
     _record(
         ctx.telemetry,
@@ -4501,7 +5557,7 @@ def _verified_node_labels(ctx: Ctx, sections: list[Section]) -> set[str]:
         for label, node in ctx.nodes.items()
         if node.mathlibok
         or label in proved
-        or (label in frozen and node.kind not in THEOREM_LIKE_KINDS)
+        or (label in frozen and not _is_theorem_like_kind(node.kind))
     }
 
 
@@ -4670,6 +5726,7 @@ def main(argv: list[str] | None = None) -> int:
         telemetry=telemetry,
         paper_text=paper_text,
         library_context=library_context,
+        library_candidates=list(library_candidates),
         section_size=args.section_size,
         proof_batch=args.proof_batch_size,
         use_ladder=args.ladder,

@@ -113,6 +113,16 @@ class ModelRunner(abc.ABC):
         # Best-effort: backends that support conversation resume (claude-code,
         # codex) continue this session; all other backends ignore it.
         self.resume_session_id = resume_session_id
+        # Session id seen during the call, even if the call later fails or
+        # times out. Both CLIs announce the id within seconds of starting and
+        # persist their transcript incrementally, so a timed-out call can be
+        # resumed by the retry instead of re-paying the exploration cold.
+        self.observed_session_id: str | None = None
+        # Whatever the backend emitted before a timeout killed it. A run that
+        # produced 8 of 12 declarations and then ran out of wall clock should
+        # contribute those 8 rather than being a total loss; timeouts are the
+        # single largest category of wasted model time.
+        self.partial_text: str = ""
         self.contexts = [load_context_file(p) for p in (context_files or [])]
 
     @classmethod
