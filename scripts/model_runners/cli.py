@@ -128,7 +128,15 @@ class ClaudeCodeRunner(ModelRunner):
         self.disallowed_tools = disallowed_tools
         if self.readonly:
             self.allowed_tools = "Read,Grep,Glob"
-            self.disallowed_tools = "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch"
+            # Also hard-block agent-spawning and harness-side tools: audits and
+            # generators kept wandering into them (Task/Agent fan-outs turned
+            # 90s audits into 5-minute ones, and a stray ReportFindings call
+            # once got parsed as the audit verdict itself).
+            self.disallowed_tools = (
+                "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,"
+                "Task,Agent,TaskCreate,TaskUpdate,TaskOutput,TodoWrite,"
+                "ToolSearch,ReportFindings,Skill,SendMessage,AskUserQuestion"
+            )
         self.max_turns = max_turns
 
     def _run_impl(self, prompt: str, system: str, cwd: Path | None) -> RunResult:
@@ -224,6 +232,10 @@ class ClaudeCodeRunner(ModelRunner):
         result_event: dict | None = None
         final_text = ""
         session_id: str | None = None
+        # Assistant text blocks stream as they are produced, so a run killed by
+        # the watchdog still leaves its emitted code here even though no
+        # `result` event ever arrives.
+        streamed_text: list[str] = []
         try:
             for line in proc.stdout:
                 line = line.strip()
@@ -237,6 +249,10 @@ class ClaudeCodeRunner(ModelRunner):
                 etype = event.get("type")
                 if isinstance(event.get("session_id"), str):
                     session_id = event["session_id"]
+                    # Keep the id reachable even when the call times out: the
+                    # init event arrives within seconds, and the retry can
+                    # resume this session instead of re-exploring cold.
+                    self.observed_session_id = session_id
                 if etype == "system" and event.get("subtype") == "init":
                     print(f"  [claude] session started (model {event.get('model', '?')})", flush=True)
                 elif etype == "assistant":
@@ -245,6 +261,8 @@ class ClaudeCodeRunner(ModelRunner):
                             desc = _describe_tool_use(block.get("name", "?"), block.get("input") or {})
                             print(f"  [claude] -> {desc}", flush=True)
                         elif block.get("type") == "text" and block.get("text", "").strip():
+                            streamed_text.append(block["text"])
+                            self.partial_text = "\n".join(streamed_text)
                             snippet = " ".join(block["text"].split())
                             print(f"  [claude] {snippet[:200]}", flush=True)
                 elif etype == "result":
@@ -359,13 +377,36 @@ class CodexRunner(ModelRunner):
             if not text:
                 raise RunnerError("codex CLI returned empty output")
             match = self._SESSION_ID_RE.search(stdout or "")
+            if match:
+                self.observed_session_id = match.group(1)
             return RunResult(text=text, session_id=match.group(1) if match else None)
         except subprocess.TimeoutExpired as exc:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            proc.communicate()
+            # Drain whatever the killed process already printed: `codex exec`
+            # emits its "session id: <uuid>" banner within the first seconds,
+            # so a timed-out call can still be resumed by the retry.
+            partial, _ = proc.communicate()
+            # TimeoutExpired.output is bytes even under text=True.
+            tail = getattr(exc, "output", None)
+            if isinstance(tail, bytes):
+                tail = tail.decode("utf-8", errors="replace")
+            banner = (partial or "") + (tail or "")
+            match = self._SESSION_ID_RE.search(banner)
+            if match:
+                self.observed_session_id = match.group(1)
+            # Keep whatever was emitted before the kill; codex may also have
+            # already written the last message to the output file.
+            self.partial_text = banner
+            if output_path.exists():
+                try:
+                    written = output_path.read_text(encoding="utf-8").strip()
+                except OSError:
+                    written = ""
+                if written:
+                    self.partial_text = written
             raise RunnerError(f"codex CLI timed out after {self.timeout}s") from exc
         finally:
             output_path.unlink(missing_ok=True)

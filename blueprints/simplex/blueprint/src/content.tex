@@ -1,0 +1,1685 @@
+% Blueprint for "Better Neural Network Expressivity: Subdividing the Simplex"
+% by E. Bakaev, F. Brunck, C. Hertrich, J. Stade, A. Yehudayoff (arXiv:2505.14338).
+%
+% Two-kind model:
+%   * settled dependencies (in Mathlib) are leaves: \mathlibok + \lean{...}, no proof;
+%   * everything else (the paper's contribution and the standard facts the paper
+%     needs but Mathlib lacks) is a full node with statement + proof and no
+%     \leanok/\mathlibok, so it renders as work to formalize.
+% Cited results whose proofs the paper does not reproduce are kept as nodes and
+% flagged \notready with a % TODO.
+
+\chapter{ReLU networks and CPWL functions}
+
+% ---------------------------------------------------------------------------
+% Basic definitions of the model. These are domain definitions specific to the
+% expressivity literature and are not in Mathlib, so they are novel nodes.
+% ---------------------------------------------------------------------------
+
+\begin{definition}[ReLU activation]
+  \label{def:relu-fn}
+  The \emph{rectified linear unit} is the function $\mathrm{ReLU} : \mathbb{R} \to
+  \mathbb{R}$ given by $\mathrm{ReLU}(x) = \max\{0, x\}$. It is applied to vectors
+  component-wise.
+\end{definition}
+
+\begin{definition}[ReLU network and hidden layers]
+  \label{def:relu-network}
+  \uses{def:relu-fn}
+  A \emph{ReLU network of depth $k+1$} is a tuple of affine transformations
+  $T^{(i)} : \mathbb{R}^{n_{i-1}} \to \mathbb{R}^{n_i}$ for $i = 1, \dots, k+1$.
+  It \emph{computes} the function
+  \[
+    T^{(k+1)} \circ \mathrm{ReLU} \circ T^{(k)} \circ \cdots \circ
+    \mathrm{ReLU} \circ T^{(2)} \circ \mathrm{ReLU} \circ T^{(1)} ,
+  \]
+  the alternating composition of the affine maps with the component-wise
+  $\mathrm{ReLU}$. The network is said to have $k$ \emph{hidden layers}.
+\end{definition}
+
+\begin{definition}[CPWL functions]
+  \label{def:cpwl}
+  A function $f : \mathbb{R}^n \to \mathbb{R}$ is \emph{continuous piecewise
+  linear} (CPWL) if it is continuous and there are finitely many polyhedral
+  pieces covering $\mathbb{R}^n$ on each of which $f$ is affine. We write
+  $\mathrm{CPWL}_n$ for the set of CPWL functions $\mathbb{R}^n \to \mathbb{R}$.
+\end{definition}
+
+\begin{definition}[Number of hidden layers of a ReLU network]
+  \label{def:network-depth}
+  \uses{def:relu-network}
+  Let $N$ be a ReLU network given by affine maps $T^{(1)}, \dots, T^{(k+1)}$
+  (Definition~\ref{def:relu-network}), i.e.\ of depth $k+1$. Its \emph{number of
+  hidden layers} $\mathrm{hid}(N) = k$ is one less than the number of affine
+  transformations. Equivalently, by recursion on the network: a network
+  consisting of a single affine map $T^{(1)}$ (which applies no
+  $\mathrm{ReLU}$) has $\mathrm{hid} = 0$, and prepending one further affine map
+  together with a component-wise $\mathrm{ReLU}$ increases $\mathrm{hid}$ by
+  $1$. This integer $k$ is the quantity referred to as ``$k$ hidden layers''
+  throughout.
+\end{definition}
+
+\begin{definition}[Depth classes $\mathrm{ReLU}_{n,k}$]
+  \label{def:relu-nk}
+  \uses{def:relu-network, def:network-depth}
+  For $n, k \geq 0$, let $\mathrm{ReLU}_{n,k}$ be the set of functions
+  $f : \mathbb{R}^n \to \mathbb{R}$ that can be computed by a ReLU network with
+  $k$ hidden layers (Definition~\ref{def:network-depth}) whose input dimension
+  is $n$ and whose output dimension is
+  $1$ (i.e.\ $n_0 = n$ and $n_{k+1} = 1$ in Definition~\ref{def:relu-network}).
+  We say $f$ is \emph{computable with $k$ hidden layers} if
+  $f \in \mathrm{ReLU}_{n,k}$. Note that this set is \emph{not} defined to be a
+  subset of $\mathrm{CPWL}_n$; that inclusion is the content of
+  Lemma~\ref{lem:relu-subset-cpwl}.
+\end{definition}
+
+\begin{definition}[Maximum function]
+  \label{def:max-n}
+  For $n \geq 1$, the function $\mathrm{MAX}_n : \mathbb{R}^n \to \mathbb{R}$ is
+  $\mathrm{MAX}_n(x_1, \dots, x_n) = \max\{x_1, \dots, x_n\}$.
+\end{definition}
+
+% ---------------------------------------------------------------------------
+% Elementary network calculus. These are the reusable "toolbox" lemmas. They
+% are folklore but not in Mathlib, so they are novel nodes with full proofs.
+% ---------------------------------------------------------------------------
+
+\begin{lemma}[Pairwise maximum in one hidden layer]
+  \label{lem:max2-one-layer}
+  \uses{def:max-n, def:relu-nk}
+  $\mathrm{MAX}_2 \in \mathrm{ReLU}_{2,1}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:relu-fn, def:relu-network}
+  For all $x_1, x_2 \in \mathbb{R}$ we have
+  $\mathrm{MAX}_2(x_1, x_2) = \max\{x_1, x_2\} = \mathrm{ReLU}(x_2 - x_1) + x_1$.
+  The right-hand side is realized by the network with first affine map
+  $T^{(1)}(x_1, x_2) = x_2 - x_1$ and second affine map $T^{(2)}(y) = y + x_1$
+  (the additive $x_1$ is an affine function of the inputs), which has one hidden
+  layer.
+\end{proof}
+
+% ---------------------------------------------------------------------------
+% Network-surgery combinators. Each states the EXACT network that is built and
+% the equality of computed functions, so the closure lemmas below reduce to a
+% single application (rather than an in-proof witness construction). These are
+% the concrete objects the closure lemmas depend on.
+% ---------------------------------------------------------------------------
+
+\begin{lemma}[Affine precomposition of a network]
+  \label{lem:network-precomp}
+  \uses{def:relu-network, def:network-depth}
+  Let $N$ be a ReLU network with input dimension $m$ and $k$ hidden layers
+  (Definition~\ref{def:network-depth}), given
+  by affine maps $T^{(1)}, \dots, T^{(k+1)}$, and suppose $N$ computes
+  $g : \mathbb{R}^m \to \mathbb{R}^{p}$. Let $A : \mathbb{R}^n \to \mathbb{R}^m$ be
+  affine. Then the network $N \circ A$ with affine maps
+  $T^{(1)} \circ A,\, T^{(2)}, \dots, T^{(k+1)}$ (only the first map is changed)
+  has input dimension $n$, still has $k$ hidden layers, and computes $g \circ A$.
+\end{lemma}
+\begin{proof}
+  \uses{def:relu-network, def:network-depth}
+  The composite $T^{(1)} \circ A$ of two affine maps is affine, so $N \circ A$ is
+  again a ReLU network with $k+1$ affine maps, hence $k$ hidden layers, and with
+  input dimension $n$. Substituting $T^{(1)} \circ A$ for $T^{(1)}$ in the
+  alternating composition of Definition~\ref{def:relu-network} gives
+  \[
+    T^{(k+1)} \circ \mathrm{ReLU} \circ \cdots \circ \mathrm{ReLU} \circ
+    (T^{(1)} \circ A)
+    = \big(T^{(k+1)} \circ \mathrm{ReLU} \circ \cdots \circ \mathrm{ReLU} \circ
+    T^{(1)}\big) \circ A = g \circ A ,
+  \]
+  since $A$ is the innermost map and no $\mathrm{ReLU}$ is applied before it.
+\end{proof}
+
+\begin{lemma}[Affine postcomposition of a network]
+  \label{lem:network-postcomp}
+  \uses{def:relu-network}
+  Let $N = (T^{(1)}, \dots, T^{(k+1)})$ be a ReLU network with $k$ hidden layers
+  computing $g : \mathbb{R}^n \to \mathbb{R}^{p}$, and let $B : \mathbb{R}^p \to
+  \mathbb{R}^{q}$ be affine. Then the network with affine maps
+  $T^{(1)}, \dots, T^{(k)},\, B \circ T^{(k+1)}$ (only the last map is changed) has
+  input dimension $n$, $k$ hidden layers, and computes $B \circ g$.
+\end{lemma}
+\begin{proof}
+  \uses{def:relu-network}
+  The composite $B \circ T^{(k+1)}$ is affine, so the modified tuple is again a
+  ReLU network with $k+1$ affine maps and $k$ hidden layers. Replacing the final
+  map $T^{(k+1)}$ by $B \circ T^{(k+1)}$ postcomposes the whole computed function
+  by $B$:
+  \[
+    (B \circ T^{(k+1)}) \circ \mathrm{ReLU} \circ \cdots \circ \mathrm{ReLU} \circ
+    T^{(1)} = B \circ \big(T^{(k+1)} \circ \mathrm{ReLU} \circ \cdots \circ
+    T^{(1)}\big) = B \circ g .
+  \]
+\end{proof}
+
+\begin{lemma}[Parallel composition of networks]
+  \label{lem:network-parallel}
+  \uses{def:relu-network, def:relu-fn}
+  Let $N_1, \dots, N_s$ be ReLU networks that share the input dimension $n$ and
+  all have the same number $k$ of hidden layers, where $N_i$ is given by affine
+  maps $T_i^{(1)}, \dots, T_i^{(k+1)}$ and computes $f_i : \mathbb{R}^n \to
+  \mathbb{R}^{p_i}$. Define affine maps $U^{(1)}, \dots, U^{(k+1)}$ by
+  \[
+    U^{(1)}(x) = \big(T_1^{(1)}(x), \dots, T_s^{(1)}(x)\big), \qquad
+    U^{(j)}(y_1, \dots, y_s) = \big(T_1^{(j)}(y_1), \dots, T_s^{(j)}(y_s)\big)
+    \quad (2 \leq j \leq k+1),
+  \]
+  where in $U^{(j)}$ for $j \geq 2$ each block $T_i^{(j)}$ acts only on the
+  coordinate block $y_i$ produced by $N_i$ (a block-diagonal, i.e.\ direct-sum,
+  map). Then the network $(U^{(1)}, \dots, U^{(k+1)})$ has input dimension $n$,
+  $k$ hidden layers, and computes the concatenation
+  $x \mapsto \big(f_1(x), \dots, f_s(x)\big) \in \mathbb{R}^{p_1 + \cdots + p_s}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:relu-network, def:relu-fn}
+  Each $U^{(j)}$ is affine: for $j = 1$ it stacks the outputs of the affine maps
+  $T_i^{(1)}$ on the shared input, and for $j \geq 2$ it is a direct sum of affine
+  maps on disjoint coordinate blocks. Because $\mathrm{ReLU}$ is applied
+  component-wise (Definition~\ref{def:relu-fn}), it commutes with the
+  block-diagonal structure: for $j \geq 2$,
+  \[
+    \mathrm{ReLU}\big(U^{(j)}(y_1, \dots, y_s)\big) =
+    \big(\mathrm{ReLU}(T_1^{(j)}(y_1)), \dots, \mathrm{ReLU}(T_s^{(j)}(y_s))\big).
+  \]
+  Hence in the alternating composition of Definition~\ref{def:relu-network} the
+  $i$-th output block evolves exactly as in $N_i$ on the shared input $x$, so it
+  equals $f_i(x)$. Therefore the network computes
+  $x \mapsto (f_1(x), \dots, f_s(x))$ with $k$ hidden layers.
+\end{proof}
+
+\begin{lemma}[Sequential composition merging the boundary maps]
+  \label{lem:network-compose-boundary}
+  \uses{def:relu-network}
+  Let $N_f = (S^{(1)}, \dots, S^{(a+1)})$ be a ReLU network with input dimension
+  $n$ and $a$ hidden layers computing $f : \mathbb{R}^n \to \mathbb{R}^m$, and let
+  $N_g = (T^{(1)}, \dots, T^{(b+1)})$ be a ReLU network with input dimension $m$
+  and $b$ hidden layers computing $g : \mathbb{R}^m \to \mathbb{R}^{p}$. Then the
+  network with affine maps
+  \[
+    S^{(1)}, \dots, S^{(a)},\ T^{(1)} \circ S^{(a+1)},\ T^{(2)}, \dots, T^{(b+1)}
+  \]
+  has input dimension $n$, exactly $a + b$ hidden layers, and computes
+  $g \circ f$.
+\end{lemma}
+\begin{proof}
+  \uses{def:relu-network}
+  In the composite $g \circ f$ the two networks meet through the affine maps
+  $S^{(a+1)}$ (the last map of $N_f$) and $T^{(1)}$ (the first map of $N_g$), with
+  no $\mathrm{ReLU}$ between them. Their composite $T^{(1)} \circ S^{(a+1)}$ is
+  affine, so replacing the adjacent pair by this single map yields a valid ReLU
+  network with $a + 1 + b$ affine maps, hence $a + b$ hidden layers. Its
+  alternating composition factors as
+  \[
+    \big(T^{(b+1)} \circ \mathrm{ReLU} \circ \cdots \circ \mathrm{ReLU} \circ
+    T^{(1)}\big) \circ \big(S^{(a+1)} \circ \mathrm{ReLU} \circ \cdots \circ
+    \mathrm{ReLU} \circ S^{(1)}\big) = g \circ f .
+  \]
+\end{proof}
+
+\begin{lemma}[Affine precomposition preserves depth]
+  \label{lem:affine-precomp-depth}
+  \uses{def:relu-nk}
+  Let $g \in \mathrm{ReLU}_{m,k}$ and let $A : \mathbb{R}^n \to \mathbb{R}^m$ be
+  affine. Then $g \circ A \in \mathrm{ReLU}_{n,k}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:relu-nk, lem:network-precomp}
+  Since $g \in \mathrm{ReLU}_{m,k}$, there is a ReLU network $N$ with $k$ hidden
+  layers, input dimension $m$, and output dimension $1$ that computes $g$
+  (Definition~\ref{def:relu-nk}). By Lemma~\ref{lem:network-precomp} the network
+  $N \circ A$ has input dimension $n$, $k$ hidden layers, output dimension $1$,
+  and computes $g \circ A$. Hence $g \circ A \in \mathrm{ReLU}_{n,k}$.
+\end{proof}
+
+\begin{lemma}[Linear combinations preserve depth]
+  \label{lem:linear-combo-depth}
+  \uses{def:relu-nk}
+  Let $f_1, \dots, f_s \in \mathrm{ReLU}_{n,k}$ and $c_1, \dots, c_s \in
+  \mathbb{R}$. Then $\sum_{i=1}^{s} c_i f_i \in \mathrm{ReLU}_{n,k}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:relu-nk, lem:network-parallel, lem:network-postcomp}
+  For each $i$, since $f_i \in \mathrm{ReLU}_{n,k}$ there is a network $N_i$ with
+  $k$ hidden layers, input dimension $n$, and output dimension $1$ computing
+  $f_i$ (Definition~\ref{def:relu-nk}). By Lemma~\ref{lem:network-parallel} their
+  parallel composition is a single network with $k$ hidden layers and input
+  dimension $n$ that computes $x \mapsto (f_1(x), \dots, f_s(x)) \in
+  \mathbb{R}^{s}$. Postcomposing its final affine map by the affine (indeed
+  linear) map $L(y_1, \dots, y_s) = \sum_{i=1}^{s} c_i y_i : \mathbb{R}^s \to
+  \mathbb{R}$, Lemma~\ref{lem:network-postcomp} yields a network with $k$ hidden
+  layers, input dimension $n$, and output dimension $1$ that computes
+  $x \mapsto \sum_{i} c_i f_i(x)$. Hence $\sum_i c_i f_i \in \mathrm{ReLU}_{n,k}$.
+\end{proof}
+
+\begin{lemma}[Composition adds hidden layers]
+  \label{lem:compose-depth}
+  \uses{def:relu-nk}
+  Suppose each component of $f : \mathbb{R}^n \to \mathbb{R}^m$ is computable with
+  $a$ hidden layers (by networks sharing the input), and $g : \mathbb{R}^m \to
+  \mathbb{R}$ is computable with $b$ hidden layers. Then $g \circ f$ is
+  computable with $a + b$ hidden layers.
+\end{lemma}
+\begin{proof}
+  \uses{def:relu-nk, lem:network-parallel, lem:network-compose-boundary}
+  Write $f = (f_1, \dots, f_m)$. Each component $f_j$ is computable with $a$
+  hidden layers by a network sharing the input $x$, so by
+  Lemma~\ref{lem:network-parallel} their parallel composition is a single network
+  $N_f$ with $a$ hidden layers, input dimension $n$, and output dimension $m$ that
+  computes $f$. Since $g$ is computable with $b$ hidden layers, there is a network
+  $N_g$ with $b$ hidden layers and input dimension $m$ computing $g$
+  (Definition~\ref{def:relu-nk}). By Lemma~\ref{lem:network-compose-boundary} the
+  sequential composition of $N_f$ and $N_g$, merging the two boundary affine maps
+  into $T^{(1)} \circ S^{(a+1)}$, has $a + b$ hidden layers and computes
+  $g \circ f$. Hence $g \circ f$ is computable with $a + b$ hidden layers.
+\end{proof}
+
+\begin{lemma}[Maxima shrink under coordinate identification]
+  \label{lem:max-restriction}
+  \uses{def:max-n, def:relu-nk}
+  Let $1 \leq n' \leq n$. Then $\mathrm{MAX}_{n'} = \mathrm{MAX}_n \circ A$ for the
+  linear map $A(x_1, \dots, x_{n'}) = (x_1, \dots, x_{n'}, x_{n'}, \dots, x_{n'})$
+  that repeats the last coordinate. Consequently, if $\mathrm{MAX}_n \in
+  \mathrm{ReLU}_{n,k}$ then $\mathrm{MAX}_{n'} \in \mathrm{ReLU}_{n',k}$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:affine-precomp-depth, def:max-n}
+  Repeating $x_{n'}$ in coordinates $n'+1, \dots, n$ does not change the maximum,
+  so $\mathrm{MAX}_n(A(x)) = \max\{x_1, \dots, x_{n'}\} = \mathrm{MAX}_{n'}(x)$.
+  The map $A$ is linear, hence affine, so the depth statement follows from
+  Lemma~\ref{lem:affine-precomp-depth}.
+\end{proof}
+
+\begin{lemma}[Maximum via a binary tree]
+  \label{lem:max-binary-tree}
+  \uses{def:max-n, def:relu-nk}
+  For $m \geq 1$, $\mathrm{MAX}_m \in \mathrm{ReLU}_{m, \lceil \log_2 m \rceil}$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:max2-one-layer, lem:compose-depth, lem:linear-combo-depth,
+    lem:affine-precomp-depth}
+  Compute the maximum by repeated pairwise maxima arranged in a balanced binary
+  tree of depth $\lceil \log_2 m \rceil$. Each internal node computes
+  $\mathrm{MAX}_2$ of two inputs, which is in $\mathrm{ReLU}_{2,1}$ by
+  Lemma~\ref{lem:max2-one-layer} (precomposed by an affine coordinate selection,
+  Lemma~\ref{lem:affine-precomp-depth}). The whole tree is a composition of
+  $\lceil \log_2 m \rceil$ layers, each layer being a parallel collection of such
+  one-hidden-layer maps (Lemma~\ref{lem:linear-combo-depth}). By
+  Lemma~\ref{lem:compose-depth} the total number of hidden layers is
+  $\lceil \log_2 m \rceil$.
+\end{proof}
+
+% ---------------------------------------------------------------------------
+% Wang--Sun representation and the previous ABMM upper bound.
+% ---------------------------------------------------------------------------
+
+\begin{lemma}[Wang--Sun representation, Eq.~(1)]
+  \label{lem:wang-sun}
+  \uses{def:cpwl, def:max-n}
+  \notready
+  For every $f \in \mathrm{CPWL}_n$ there are affine maps $A_1, \dots, A_s :
+  \mathbb{R}^n \to \mathbb{R}^{n+1}$ and signs $\sigma_1, \dots, \sigma_s \in
+  \{\pm 1\}$ such that
+  \[
+    f(x) = \sum_{i=1}^{s} \sigma_i \, \mathrm{MAX}_{n+1}(A_i(x)) .
+  \]
+\end{lemma}
+% TODO: cited from Wang and Sun [WS05]; the paper does not reproduce the proof.
+
+\begin{lemma}[Previous $\log_2$ upper bound, Arora--Basu--Mianjy--Mukherjee]
+  \label{lem:abmm-log2}
+  \uses{def:cpwl, def:relu-nk}
+  $\mathrm{CPWL}_n \subseteq \mathrm{ReLU}_{n, \lceil \log_2(n+1) \rceil}$: every
+  CPWL function on $\mathbb{R}^n$ is computable with $\lceil \log_2(n+1) \rceil$
+  hidden layers.
+\end{lemma}
+\begin{proof}
+  \uses{lem:wang-sun, lem:max-binary-tree, lem:linear-combo-depth,
+    lem:affine-precomp-depth}
+  Let $f \in \mathrm{CPWL}_n$. By Lemma~\ref{lem:wang-sun}, $f = \sum_i \sigma_i
+  \mathrm{MAX}_{n+1}(A_i(x))$. By Lemma~\ref{lem:max-binary-tree},
+  $\mathrm{MAX}_{n+1} \in \mathrm{ReLU}_{n+1, \lceil \log_2(n+1) \rceil}$, and by
+  Lemma~\ref{lem:affine-precomp-depth} each $\mathrm{MAX}_{n+1} \circ A_i$ is in
+  $\mathrm{ReLU}_{n, \lceil \log_2(n+1) \rceil}$. A signed sum of these lies in
+  the same class by Lemma~\ref{lem:linear-combo-depth}.
+\end{proof}
+
+\chapter{Computing the maximum of five numbers with two hidden layers}
+
+% ---------------------------------------------------------------------------
+% The nine terms of the representation M (Eq. (2)). Each is one explicit
+% max-of-affine expression = one Lean definition. Kept as separate granular
+% nodes; def:M combines them into a single linear combination.
+% ---------------------------------------------------------------------------
+
+\begin{definition}[Term $P_1$]
+  \label{def:p1}
+  $P_1 : \mathbb{R}^5 \to \mathbb{R}$,
+  \[
+    P_1(x) = \max\bigl(\max(2x_5, x_1 + x_2),\ \max(x_1, x_3) + \max(x_1, x_4)\bigr)
+    = \max(2x_5,\, x_1{+}x_2,\, 2x_1,\, x_1{+}x_3,\, x_1{+}x_4,\, x_3{+}x_4).
+  \]
+\end{definition}
+
+\begin{definition}[Term $P_2$]
+  \label{def:p2}
+  $P_2 : \mathbb{R}^5 \to \mathbb{R}$,
+  \[
+    P_2(x) = \max\bigl(\max(2x_5, x_1 + x_2),\ \max(x_2, x_3) + \max(x_2, x_4)\bigr)
+    = \max(2x_5,\, x_1{+}x_2,\, 2x_2,\, x_2{+}x_3,\, x_2{+}x_4,\, x_3{+}x_4).
+  \]
+\end{definition}
+
+\begin{definition}[Term $P_3$]
+  \label{def:p3}
+  $P_3 : \mathbb{R}^5 \to \mathbb{R}$,
+  \[
+    P_3(x) = \max\bigl(\max(2x_5, x_3 + x_4),\ \max(x_3, x_1) + \max(x_3, x_2)\bigr)
+    = \max(2x_5,\, x_3{+}x_4,\, 2x_3,\, x_1{+}x_3,\, x_2{+}x_3,\, x_1{+}x_2).
+  \]
+\end{definition}
+
+\begin{definition}[Term $P_4$]
+  \label{def:p4}
+  $P_4 : \mathbb{R}^5 \to \mathbb{R}$,
+  \[
+    P_4(x) = \max\bigl(\max(2x_5, x_3 + x_4),\ \max(x_4, x_1) + \max(x_4, x_2)\bigr)
+    = \max(2x_5,\, x_3{+}x_4,\, 2x_4,\, x_1{+}x_4,\, x_2{+}x_4,\, x_1{+}x_2).
+  \]
+\end{definition}
+
+\begin{definition}[Term $Q$]
+  \label{def:q}
+  $Q : \mathbb{R}^5 \to \mathbb{R}$,
+  \[
+    Q(x) = \max\bigl(2x_5,\ \max(x_1 + x_2, x_3 + x_4)\bigr)
+    = \max(2x_5,\, x_1{+}x_2,\, x_3{+}x_4).
+  \]
+\end{definition}
+
+\begin{definition}[Term $R_{13}$]
+  \label{def:r13}
+  $R_{13} : \mathbb{R}^5 \to \mathbb{R}$,
+  \[
+    R_{13}(x) = \max\bigl(\max(2x_5, x_1 + x_3),\ \max(x_1 + x_2, x_3 + x_4)\bigr)
+    = \max(2x_5,\, x_1{+}x_3,\, x_1{+}x_2,\, x_3{+}x_4).
+  \]
+\end{definition}
+
+\begin{definition}[Term $R_{14}$]
+  \label{def:r14}
+  $R_{14} : \mathbb{R}^5 \to \mathbb{R}$,
+  \[
+    R_{14}(x) = \max\bigl(\max(2x_5, x_1 + x_4),\ \max(x_1 + x_2, x_3 + x_4)\bigr)
+    = \max(2x_5,\, x_1{+}x_4,\, x_1{+}x_2,\, x_3{+}x_4).
+  \]
+\end{definition}
+
+\begin{definition}[Term $R_{23}$]
+  \label{def:r23}
+  $R_{23} : \mathbb{R}^5 \to \mathbb{R}$,
+  \[
+    R_{23}(x) = \max\bigl(\max(2x_5, x_2 + x_3),\ \max(x_1 + x_2, x_3 + x_4)\bigr)
+    = \max(2x_5,\, x_2{+}x_3,\, x_1{+}x_2,\, x_3{+}x_4).
+  \]
+\end{definition}
+
+\begin{definition}[Term $R_{24}$]
+  \label{def:r24}
+  $R_{24} : \mathbb{R}^5 \to \mathbb{R}$,
+  \[
+    R_{24}(x) = \max\bigl(\max(2x_5, x_2 + x_4),\ \max(x_1 + x_2, x_3 + x_4)\bigr)
+    = \max(2x_5,\, x_2{+}x_4,\, x_1{+}x_2,\, x_3{+}x_4).
+  \]
+\end{definition}
+
+\begin{definition}[The representation $M$, Eq.~(2)]
+  \label{def:m}
+  \uses{def:p1, def:p2, def:p3, def:p4, def:q, def:r13, def:r14, def:r23, def:r24}
+  Define $M : \mathbb{R}^5 \to \mathbb{R}$ by
+  \[
+    M(x) = \tfrac12\bigl( P_1(x) + P_2(x) + P_3(x) + P_4(x) + Q(x)
+      - R_{13}(x) - R_{14}(x) - R_{23}(x) - R_{24}(x) \bigr).
+  \]
+\end{definition}
+
+\begin{theorem}[Claim 4: $\mathrm{MAX}_5 = M$]
+  \label{claim:max5-eq-m}
+  \uses{def:max-n, def:m}
+  For all $x \in \mathbb{R}^5$, $\mathrm{MAX}_5(x) = M(x)$.
+\end{theorem}
+\begin{proof}
+  \uses{def:p1, def:p2, def:p3, def:p4, def:q, def:r13, def:r14, def:r23, def:r24,
+    def:m, def:max-n}
+  \emph{Case 1: $\mathrm{MAX}_5(x) = x_5$.} Then $x_5 \geq x_i$ for all $i$, so
+  $2x_5 \geq x_i + x_j$ for every pair $i, j$. Each of the nine terms is a
+  maximum containing the entry $2x_5$ together with pairwise sums, so each equals
+  $2x_5$. Hence
+  \[
+    M(x) = \tfrac12(2x_5 + 2x_5 + 2x_5 + 2x_5 + 2x_5 - 2x_5 - 2x_5 - 2x_5 - 2x_5)
+    = \tfrac12 (2x_5) = x_5 .
+  \]
+
+  \emph{Case 2: the maximum is not $x_5$.} The expression $M$ is invariant under
+  the following index operations, because they only permute the nine terms among
+  themselves:
+  \begin{itemize}
+    \item swapping $1 \leftrightarrow 2$: $P_1 \leftrightarrow P_2$,
+      $R_{13} \leftrightarrow R_{23}$, $R_{14} \leftrightarrow R_{24}$, the rest fixed;
+    \item swapping $3 \leftrightarrow 4$: $P_3 \leftrightarrow P_4$,
+      $R_{13} \leftrightarrow R_{14}$, $R_{23} \leftrightarrow R_{24}$, the rest fixed;
+    \item swapping the pairs $(1,2) \leftrightarrow (3,4)$: $P_1 \leftrightarrow P_3$,
+      $P_2 \leftrightarrow P_4$, $R_{14} \leftrightarrow R_{23}$, the rest fixed.
+  \end{itemize}
+  In each case the swapped terms enter $M$ with equal signs, so $M$ is unchanged.
+  The group generated by these operations acts transitively on $\{1,2,3,4\}$, so
+  without loss of generality
+  \[
+    x_1 = \max(x_1, x_2, x_3, x_4) = \max(x_1, x_2, x_3, x_4, x_5).
+  \]
+  With $x_1$ largest we evaluate each term:
+  \begin{align*}
+    P_1(x) &= 2x_1 && (\text{all entries are } \leq 2x_1, \text{ and } 2x_1 \text{ occurs}); \\
+    P_2(x) &= \max(2x_5, x_1{+}x_2, x_2{+}x_3, x_3{+}x_4) = R_{23}(x)
+      && (x_1{+}x_2 \geq 2x_2,\ x_1{+}x_2 \geq x_2{+}x_4); \\
+    P_3(x) &= \max(2x_5, x_3{+}x_4, x_1{+}x_3, x_1{+}x_2) = R_{13}(x)
+      && (x_1{+}x_3 \geq 2x_3,\ x_1{+}x_3 \geq x_2{+}x_3); \\
+    P_4(x) &= \max(2x_5, x_3{+}x_4, x_1{+}x_4, x_1{+}x_2) = R_{14}(x)
+      && (x_1{+}x_4 \geq 2x_4,\ x_1{+}x_4 \geq x_2{+}x_4); \\
+    R_{24}(x) &= \max(2x_5, x_1{+}x_2, x_3{+}x_4) = Q(x)
+      && (x_1{+}x_2 \geq x_2{+}x_4).
+  \end{align*}
+  The terms $Q, R_{13}, R_{14}, R_{23}$ are unchanged. Substituting,
+  \[
+    M(x) = \tfrac12\bigl(2x_1 + R_{23} + R_{13} + R_{14} + Q
+      - R_{13} - R_{14} - R_{23} - Q\bigr) = \tfrac12(2x_1) = x_1
+      = \mathrm{MAX}_5(x). \qedhere
+  \]
+\end{proof}
+
+% ---------------------------------------------------------------------------
+% Lower bound machinery for MAX_5 (the "exactly two" part of Proposition 3).
+% ---------------------------------------------------------------------------
+
+\begin{lemma}[$\mathrm{MAX}_3$ needs two hidden layers, Mukherjee--Basu]
+  \label{lem:max3-lower}
+  \uses{def:max-n, def:relu-nk}
+  \notready
+  $\mathrm{MAX}_3 \notin \mathrm{ReLU}_{3,1}$; that is, computing $\mathrm{MAX}_3$
+  requires at least two hidden layers.
+\end{lemma}
+% TODO: cited from Mukherjee and Basu [MB17]; the paper does not reproduce the proof.
+
+\begin{lemma}[$\mathrm{MAX}_5$ needs at least two hidden layers]
+  \label{lem:max5-lower}
+  \uses{def:max-n, def:relu-nk}
+  $\mathrm{MAX}_5 \notin \mathrm{ReLU}_{5,1}$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:max-restriction, lem:max3-lower}
+  By Lemma~\ref{lem:max-restriction}, $\mathrm{MAX}_3 = \mathrm{MAX}_5 \circ A$
+  where $A(x_1, x_2, x_3) = (x_1, x_2, x_3, x_3, x_3)$ is linear. If
+  $\mathrm{MAX}_5 \in \mathrm{ReLU}_{5,1}$, then $\mathrm{MAX}_3 \in
+  \mathrm{ReLU}_{3,1}$ by affine precomposition, contradicting
+  Lemma~\ref{lem:max3-lower}. Hence $\mathrm{MAX}_5 \notin \mathrm{ReLU}_{5,1}$.
+\end{proof}
+
+\begin{lemma}[Each term is computable with two hidden layers]
+  \label{lem:terms-two-layers}
+  \uses{def:p1, def:p2, def:p3, def:p4, def:q, def:r13, def:r14, def:r23, def:r24,
+    def:relu-nk}
+  Each of the nine functions $P_1, P_2, P_3, P_4, Q, R_{13}, R_{14}, R_{23},
+  R_{24}$ lies in $\mathrm{ReLU}_{5,2}$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:max2-one-layer, lem:compose-depth, lem:linear-combo-depth}
+  Each term has the nested form $\max(g, h)$ where $g$ and $h$ are each either a
+  single $\mathrm{MAX}_2$ of affine functions or a \emph{sum} of two such
+  $\mathrm{MAX}_2$'s (e.g.\ $P_1 = \max(\max(2x_5, x_1{+}x_2),\, \max(x_1,x_3) +
+  \max(x_1,x_4))$). By Lemma~\ref{lem:max2-one-layer} a pairwise maximum of
+  affine functions is in $\mathrm{ReLU}_{5,1}$, and by
+  Lemma~\ref{lem:linear-combo-depth} a sum of two such functions is again in
+  $\mathrm{ReLU}_{5,1}$; hence $g, h \in \mathrm{ReLU}_{5,1}$. The outer
+  $\mathrm{MAX}_2(g, h)$ is in $\mathrm{ReLU}_{2,1}$, so by
+  Lemma~\ref{lem:compose-depth} the term is in $\mathrm{ReLU}_{5, 1+1} =
+  \mathrm{ReLU}_{5,2}$.
+\end{proof}
+
+\begin{proposition}[Proposition 3: exact depth of $\mathrm{MAX}_5$]
+  \label{prop:max5-depth}
+  \uses{def:max-n, def:relu-nk}
+  The minimum number of hidden layers needed to compute $\mathrm{MAX}_5$ is
+  exactly two; equivalently, $\mathrm{MAX}_5 \in \mathrm{ReLU}_{5,2}$ but
+  $\mathrm{MAX}_5 \notin \mathrm{ReLU}_{5,1}$.
+\end{proposition}
+\begin{proof}
+  \uses{claim:max5-eq-m, def:m, lem:terms-two-layers, lem:linear-combo-depth,
+    lem:max5-lower}
+  \emph{Upper bound.} By Claim~\ref{claim:max5-eq-m}, $\mathrm{MAX}_5 = M$, and by
+  Definition~\ref{def:m}, $M$ is a fixed linear combination of the nine terms.
+  Each term is in $\mathrm{ReLU}_{5,2}$ (Lemma~\ref{lem:terms-two-layers}), so by
+  Lemma~\ref{lem:linear-combo-depth} their linear combination $M =
+  \mathrm{MAX}_5$ is in $\mathrm{ReLU}_{5,2}$.
+  \emph{Lower bound.} By Lemma~\ref{lem:max5-lower}, $\mathrm{MAX}_5 \notin
+  \mathrm{ReLU}_{5,1}$. Hence two hidden layers are necessary and sufficient.
+\end{proof}
+
+\chapter{The improved depth bound}
+
+\begin{definition}[The function $T_{a,b}$]
+  \label{def:t-ab}
+  \uses{def:max-n}
+  For integers $a, b \geq 0$, let $T_{a,b} : \mathbb{R}^{4a+b} \to \mathbb{R}$ be
+  the maximum of $a$ ``double'' terms of the form $\max(x_1,x_2) + \max(x_3,x_4)$
+  and $b$ extra single arguments:
+  \[
+    T_{a,b}(x) = \max\bigl(
+      \max(x_1,x_2) + \max(x_3,x_4),\ \dots,\
+      \max(x_{4a-3},x_{4a-2}) + \max(x_{4a-1},x_{4a}),\
+      x_{4a+1}, \dots, x_{4a+b}\bigr).
+  \]
+  In particular $T_{0,n} = \mathrm{MAX}_n$.
+\end{definition}
+
+\begin{definition}[The space $\mathcal{T}_{a,b}$]
+  \label{def:t-ab-space}
+  \uses{def:t-ab}
+  Let $\mathcal{T}_{a,b}$ be the vector space (under pointwise operations)
+  spanned by the functions $T_{a,b} \circ L$ over all linear transformations
+  $L : \mathbb{R}^{4a+b} \to \mathbb{R}^{4a+b}$. A function is viewed, when
+  convenient, on a larger space $\mathbb{R}^{4a+b+c}$ by ignoring the extra
+  coordinates.
+\end{definition}
+
+\begin{lemma}[Inclusions among the $\mathcal{T}$ spaces]
+  \label{lem:t-inclusions}
+  \uses{def:t-ab-space}
+  Viewing functions on the larger coordinate space by ignoring added
+  coordinates, $\mathcal{T}_{a,b+2} \subseteq \mathcal{T}_{a,b+3} \subseteq
+  \mathcal{T}_{a+1,b+1}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:t-ab}
+  A single extra argument can be turned into an ignored extra argument by padding
+  with a coordinate that is never larger, giving $\mathcal{T}_{a,b+2} \subseteq
+  \mathcal{T}_{a,b+3}$. Moreover $\max(x_1, x_2) = \max\bigl(\max(x_1, x_2) +
+  \max(0, 0)\bigr)$, so a double term with a zeroed second half degenerates to a
+  single argument; conversely three single arguments can be absorbed into one
+  additional double term together with one single argument, giving
+  $\mathcal{T}_{a,b+3} \subseteq \mathcal{T}_{a+1,b+1}$ (using that $L$ ranges
+  over all linear maps).
+\end{proof}
+
+\begin{lemma}[Depth transfers to the whole space $\mathcal{T}_{a,b}$]
+  \label{lem:t-space-depth}
+  \uses{def:t-ab-space, def:relu-nk}
+  If $T_{a,b} \in \mathrm{ReLU}_{4a+b, k}$, then every $f \in \mathcal{T}_{a,b}$
+  is computable with $k$ hidden layers.
+\end{lemma}
+\begin{proof}
+  \uses{lem:affine-precomp-depth, lem:linear-combo-depth, def:t-ab-space}
+  By Definition~\ref{def:t-ab-space}, $f = \sum_j c_j (T_{a,b} \circ L_j)$ for
+  linear maps $L_j$ and scalars $c_j$. Each $T_{a,b} \circ L_j$ is computable
+  with $k$ hidden layers by Lemma~\ref{lem:affine-precomp-depth}, and their
+  linear combination stays in the same depth class by
+  Lemma~\ref{lem:linear-combo-depth}.
+\end{proof}
+
+\begin{claim}[Claim 5]
+  \label{claim:t-reduction}
+  \uses{def:t-ab, def:t-ab-space}
+  Viewing $T_{a,b+4}$ as a function $\mathbb{R}^{4a+b+4+1} \to \mathbb{R}$ that
+  ignores the last coordinate, we have $T_{a,b+4} \in \mathcal{T}_{a+1,b+1}$.
+\end{claim}
+\begin{proof}
+  \uses{claim:max5-eq-m, def:m, def:p1, def:q, def:r13, lem:t-inclusions}
+  Write $i = 4a+b$ and group the arguments of $T_{a,b+4}$ as
+  $T_{a,b+4} = \max(x_{i+1}, x_{i+2}, x_{i+3}, x_{i+4},\, T_{a,b})$, i.e.\ the
+  maximum of $\mathrm{MAX}_5$ applied to the four fresh single arguments together
+  with $T_{a,b}$ in the role of the fifth input. By Claim~\ref{claim:max5-eq-m}
+  and Definition~\ref{def:m}, this equals the linear combination
+  $\tfrac12(P_1 + P_2 + P_3 + P_4 + Q - R_{13} - R_{14} - R_{23} - R_{24})$
+  evaluated at $(x_{i+1}, x_{i+2}, x_{i+3}, x_{i+4}, T_{a,b})$. Substituting
+  $x_5 \mapsto T_{a,b}$ and factoring out $\tfrac12$, each term becomes a scaled
+  $T$-type maximum. For example,
+  \begin{align*}
+    P_1 &= 2\max\Bigl(T_{a,b},\ \tfrac{x_{i+1}+x_{i+2}}2,\
+      \max\bigl(\tfrac{x_{i+1}}2, \tfrac{x_{i+3}}2\bigr)
+      + \max\bigl(\tfrac{x_{i+1}}2, \tfrac{x_{i+4}}2\bigr)\Bigr)
+      \in \mathcal{T}_{a+1,b+1}, \\
+    Q &= 2\max\Bigl(T_{a,b},\ \tfrac{x_{i+1}+x_{i+2}}2,\
+      \tfrac{x_{i+3}+x_{i+4}}2\Bigr) \in \mathcal{T}_{a,b+2}, \\
+    R_{13} &= 2\max\Bigl(T_{a,b},\ \tfrac{x_{i+1}+x_{i+3}}2,\
+      \tfrac{x_{i+1}+x_{i+2}}2,\ \tfrac{x_{i+3}+x_{i+4}}2\Bigr)
+      \in \mathcal{T}_{a,b+3}.
+  \end{align*}
+  Here $T_{a,b}$ contributes its $a$ double terms and $b$ single arguments, and
+  the new terms add one double term and/or single arguments. By the same
+  computation (and the symmetries of Claim~\ref{claim:max5-eq-m}), $P_2, P_3, P_4
+  \in \mathcal{T}_{a+1,b+1}$ and $R_{14}, R_{23}, R_{24} \in \mathcal{T}_{a,b+3}$.
+  By Lemma~\ref{lem:t-inclusions} all nine terms lie in $\mathcal{T}_{a+1,b+1}$,
+  which is a vector space closed under linear combinations; hence $T_{a,b+4} \in
+  \mathcal{T}_{a+1,b+1}$.
+\end{proof}
+
+\begin{claim}[Claim 6]
+  \label{claim:depth-transfer}
+  \uses{def:t-ab, def:t-ab-space, def:relu-nk}
+  Let $n \geq 1$. If $T_{3^{n-1},2}$ is computable with $k$ hidden layers, then so
+  is $T_{0,\,3^{n}+2} = \mathrm{MAX}_{3^{n}+2}$.
+\end{claim}
+\begin{proof}
+  \uses{claim:t-reduction, lem:t-space-depth, def:t-ab-space}
+  By Claim~\ref{claim:t-reduction}, $\mathcal{T}_{a,b+4} \subseteq
+  \mathcal{T}_{a+1,b+1}$ for all $a, b$. Applying this $3^{n-1}$ times (each step
+  raises the first index by $1$ and lowers the number of single arguments by
+  $3$),
+  \[
+    \mathcal{T}_{0,\,3^{n}+2} \subseteq \mathcal{T}_{1,\,3^{n}-1} \subseteq
+    \mathcal{T}_{2,\,3^{n}-4} \subseteq \cdots \subseteq \mathcal{T}_{3^{n-1},\,2}.
+  \]
+  Since $T_{0,3^{n}+2} \in \mathcal{T}_{0,3^{n}+2}$ (take $L = \mathrm{id}$), it
+  lies in $\mathcal{T}_{3^{n-1},2}$. If $T_{3^{n-1},2}$ is computable with $k$
+  hidden layers, then by Lemma~\ref{lem:t-space-depth} every function in
+  $\mathcal{T}_{3^{n-1},2}$ is, in particular $T_{0,3^{n}+2} =
+  \mathrm{MAX}_{3^{n}+2}$.
+\end{proof}
+
+\begin{claim}[Claim 7]
+  \label{claim:first-layer}
+  \uses{def:t-ab, def:relu-nk, def:max-n}
+  Let $n \geq 1$. If $T_{0,\,3^{n-1}+2} = \mathrm{MAX}_{3^{n-1}+2}$ is computable
+  with $k-1$ hidden layers, then $T_{3^{n-1},2}$ is computable with $k$ hidden
+  layers.
+\end{claim}
+\begin{proof}
+  \uses{lem:max2-one-layer, lem:linear-combo-depth, lem:compose-depth, def:t-ab}
+  Each double term $\max(x_1, x_2) + \max(x_3, x_4)$ is a sum of two pairwise
+  maxima, so it is computable with one hidden layer
+  (Lemmas~\ref{lem:max2-one-layer} and~\ref{lem:linear-combo-depth}). In the
+  first hidden layer compute all $3^{n-1}$ double terms of $T_{3^{n-1},2}$ in
+  parallel, and pass the two extra single arguments through. This produces
+  $3^{n-1}+2$ values, to which we apply $T_{0,3^{n-1}+2} = \mathrm{MAX}_{3^{n-1}+2}$,
+  computable with $k-1$ hidden layers by hypothesis. By
+  Lemma~\ref{lem:compose-depth} the composition uses $1 + (k-1) = k$ hidden
+  layers.
+\end{proof}
+
+\begin{theorem}[Theorem 1]
+  \label{thm:max-depth}
+  \uses{def:max-n, def:relu-nk, def:t-ab}
+  For every $n \geq 1$, $\mathrm{MAX}_{3^{n}+2} \in \mathrm{ReLU}_{3^{n}+2,\,n+1}$.
+\end{theorem}
+\begin{proof}
+  \uses{prop:max5-depth, claim:depth-transfer, claim:first-layer, def:t-ab, def:max-n}
+  Induction on $n$. \emph{Base case $n = 1$:} $\mathrm{MAX}_{3^{1}+2} =
+  \mathrm{MAX}_5 \in \mathrm{ReLU}_{5,2}$ by Proposition~\ref{prop:max5-depth},
+  and $2 = 1 + 1$. \emph{Induction step:} assume $\mathrm{MAX}_{3^{n-1}+2} =
+  T_{0,3^{n-1}+2}$ is computable with $n$ hidden layers. Applying
+  Claim~\ref{claim:first-layer} with $k = n+1$, $T_{3^{n-1},2}$ is computable with
+  $n+1$ hidden layers. By Claim~\ref{claim:depth-transfer}, $T_{0,3^{n}+2} =
+  \mathrm{MAX}_{3^{n}+2}$ is then computable with $n+1$ hidden layers.
+\end{proof}
+
+% --- Theorem 2 decomposed into its two inclusions ---
+% Closure facts needed for the (subseteq) direction. CPWL is defined in this
+% blueprint (def:cpwl), so these are novel nodes with full proofs.
+\begin{lemma}[Affine functions are CPWL]
+  \label{lem:affine-cpwl}
+  \uses{def:cpwl}
+  Every affine function $g : \mathbb{R}^n \to \mathbb{R}$, $g(x) = \langle a, x
+  \rangle + b$ with $a \in \mathbb{R}^n$ and $b \in \mathbb{R}$, is CPWL; that is,
+  $g \in \mathrm{CPWL}_n$.
+\end{lemma}
+\begin{proof}
+  \uses{def:cpwl}
+  $g$ is continuous, and the single polyhedral piece $\mathbb{R}^n$ (itself a
+  polyhedron) covers the domain, with $g$ affine on it. Hence $g$ satisfies
+  Definition~\ref{def:cpwl}.
+\end{proof}
+
+\begin{lemma}[The ReLU activation is CPWL]
+  \label{lem:relu-cpwl}
+  \uses{def:cpwl, def:relu-fn}
+  The function $\mathrm{ReLU} : \mathbb{R} \to \mathbb{R}$,
+  $\mathrm{ReLU}(t) = \max(0, t)$, is CPWL; that is,
+  $\mathrm{ReLU} \in \mathrm{CPWL}_1$.
+\end{lemma}
+\begin{proof}
+  \uses{def:cpwl, def:relu-fn}
+  $\mathrm{ReLU}$ is continuous, and the two polyhedral pieces
+  $\{t \leq 0\}$ and $\{t \geq 0\}$ cover $\mathbb{R}$; on the first
+  $\mathrm{ReLU}(t) = 0$ and on the second $\mathrm{ReLU}(t) = t$, each affine.
+  Hence $\mathrm{ReLU} \in \mathrm{CPWL}_1$.
+\end{proof}
+
+\begin{lemma}[CPWL functions are closed under composition]
+  \label{lem:cpwl-compose}
+  \uses{def:cpwl}
+  Let $g : \mathbb{R}^m \to \mathbb{R}$ be CPWL and let $h_1, \dots, h_m :
+  \mathbb{R}^n \to \mathbb{R}$ be CPWL. Then the function $x \mapsto
+  g(h_1(x), \dots, h_m(x))$ lies in $\mathrm{CPWL}_n$.
+\end{lemma}
+\begin{proof}
+  \uses{def:cpwl}
+  Write $h = (h_1, \dots, h_m) : \mathbb{R}^n \to \mathbb{R}^m$; it is continuous
+  because each component is. Let $\{U_j\}$ be the finitely many polyhedral pieces
+  on which $g$ is affine, and let $\{V_l\}$ be a common polyhedral refinement of
+  the pieces of the $h_i$, so that every $h_i$—and hence $h$ itself—is affine on
+  each $V_l$. For each pair $(j, l)$ the set $W_{j,l} = V_l \cap h^{-1}(U_j)$ is a
+  polyhedron: it is the intersection of the polyhedron $V_l$ with the preimage of
+  the polyhedron $U_j$ under the affine map $h|_{V_l}$, which is again a
+  polyhedron. These finitely many pieces $W_{j,l}$ cover $\mathbb{R}^n$, and on
+  each of them $g \circ h$ is a composition of two affine maps, hence affine.
+  Since $g \circ h$ is continuous, it satisfies Definition~\ref{def:cpwl}.
+\end{proof}
+
+\begin{lemma}[ReLU networks compute CPWL functions ($\subseteq$ direction)]
+  \label{lem:relu-subset-cpwl}
+  % Statement names only the two function sets ReLU_{n,k} (def:relu-nk) and
+  % CPWL_n (def:cpwl). The underlying network object def:relu-network is unfolded
+  % only in the proof, so it belongs to the proof \uses below, not the statement.
+  \uses{def:relu-nk, def:cpwl}
+  For all $n$ and all $k \geq 0$, $\mathrm{ReLU}_{n,k} \subseteq \mathrm{CPWL}_n$;
+  that is, every function computable by a ReLU network with $k$ hidden layers is
+  continuous piecewise linear.
+\end{lemma}
+\begin{proof}
+  \uses{def:relu-network, def:cpwl, lem:affine-cpwl, lem:relu-cpwl,
+    lem:cpwl-compose}
+  Let $f \in \mathrm{ReLU}_{n,k}$, computed by the network $T^{(k+1)} \circ
+  \mathrm{ReLU} \circ T^{(k)} \circ \cdots \circ \mathrm{ReLU} \circ T^{(1)}$ of
+  Definition~\ref{def:relu-network}. We prove by induction on the number of
+  processed layers that every coordinate of each intermediate vector, as a
+  function of the input $x \in \mathbb{R}^n$, is CPWL.
+
+  Base case: each coordinate of $T^{(1)}(x)$ is an affine function of $x$, hence
+  CPWL by Lemma~\ref{lem:affine-cpwl}. Inductive step: suppose every coordinate
+  of a partial composite $\phi : \mathbb{R}^n \to \mathbb{R}^{n_i}$ is CPWL.
+  Applying $\mathrm{ReLU}$ coordinatewise replaces coordinate $\phi_j$ by
+  $\mathrm{ReLU} \circ \phi_j$, which is CPWL by
+  Lemma~\ref{lem:cpwl-compose} (composing the CPWL map $\mathrm{ReLU}$ of
+  Lemma~\ref{lem:relu-cpwl} with the CPWL function $\phi_j$). Applying the affine
+  map $T^{(i+1)}$ makes each output coordinate an affine function of the CPWL
+  coordinates $(\mathrm{ReLU} \circ \phi_j)_j$, which is CPWL by
+  Lemmas~\ref{lem:affine-cpwl} and~\ref{lem:cpwl-compose}. By induction the
+  single output coordinate $f$ is CPWL, so $f \in \mathrm{CPWL}_n$.
+\end{proof}
+
+\begin{lemma}[Every CPWL function has depth $\lceil \log_3(n-1)\rceil + 1$ ($\supseteq$ direction)]
+  \label{lem:cpwl-subset-relu}
+  % Statement-level \uses names only the two function sets the inclusion visibly
+  % mentions: CPWL_n (def:cpwl) and ReLU_{n,k} (def:relu-nk). Everything else --
+  % MAX_n and the depth/representation lemmas (def:max-n, lem:wang-sun,
+  % thm:max-depth, lem:max-restriction, lem:affine-precomp-depth,
+  % lem:linear-combo-depth) -- is a proof tool and is kept in the proof \uses
+  % below, matching the convention already used for lem:relu-subset-cpwl and
+  % thm:cpwl-depth. Keeping these out of the statement \uses stops this node's
+  % statement skeleton from importing the MAX_n machinery (and its inlined
+  % def_max_n) that it never mentions.
+  \uses{def:cpwl, def:relu-nk}
+  For $n \geq 3$, $\mathrm{CPWL}_n \subseteq
+  \mathrm{ReLU}_{n,\,\lceil \log_3(n-1) \rceil + 1}$; that is, every CPWL function
+  on $\mathbb{R}^n$ is computable with $\lceil \log_3(n-1) \rceil + 1$ hidden
+  layers.
+\end{lemma}
+\begin{proof}
+  \uses{def:max-n, lem:wang-sun, thm:max-depth, lem:max-restriction,
+    lem:affine-precomp-depth, lem:linear-combo-depth}
+  Set $m = \lceil \log_3(n-1) \rceil$, so $n - 1 \leq 3^{m}$, i.e.\ $n + 1 \leq
+  3^{m} + 2$. By Theorem~\ref{thm:max-depth}, $\mathrm{MAX}_{3^{m}+2}$ is
+  computable with $m + 1$ hidden layers, and by Lemma~\ref{lem:max-restriction}
+  so is $\mathrm{MAX}_{n+1}$. Given $f \in \mathrm{CPWL}_n$, write $f = \sum_i
+  \sigma_i \mathrm{MAX}_{n+1}(A_i(x))$ by Lemma~\ref{lem:wang-sun}. Each summand
+  is in $\mathrm{ReLU}_{n, m+1}$ by Lemma~\ref{lem:affine-precomp-depth}, and the
+  signed sum is in $\mathrm{ReLU}_{n, m+1}$ by
+  Lemma~\ref{lem:linear-combo-depth}. Hence $f \in \mathrm{ReLU}_{n,\lceil
+  \log_3(n-1)\rceil + 1}$.
+\end{proof}
+
+\begin{theorem}[Theorem 2]
+  \label{thm:cpwl-depth}
+  % Statement-level \uses lists only objects the equality visibly names:
+  % CPWL_n (def:cpwl) and ReLU_{n,k} (def:relu-nk). The two inclusion lemmas are
+  % proof tools (kept in the proof \uses below), and MAX_n never appears in this
+  % statement -- it enters only inside lem:cpwl-subset-relu's proof.
+  \uses{def:cpwl, def:relu-nk}
+  For $n \geq 3$, $\mathrm{CPWL}_n = \mathrm{ReLU}_{n,\,\lceil \log_3(n-1) \rceil + 1}$;
+  that is, every CPWL function on $\mathbb{R}^n$ is computable with
+  $\lceil \log_3(n-1) \rceil + 1$ hidden layers.
+\end{theorem}
+\begin{proof}
+  \uses{lem:relu-subset-cpwl, lem:cpwl-subset-relu}
+  The inclusion $\mathrm{ReLU}_{n,k} \subseteq \mathrm{CPWL}_n$ holds for every
+  $k$ by Lemma~\ref{lem:relu-subset-cpwl}. The reverse inclusion
+  $\mathrm{CPWL}_n \subseteq \mathrm{ReLU}_{n,\lceil \log_3(n-1)\rceil + 1}$ is
+  Lemma~\ref{lem:cpwl-subset-relu}. The two inclusions give the claimed equality.
+\end{proof}
+
+% --- Remark 1 decomposed into a binary-weight depth class, base case,
+% inductive step, and corollary. The paper's networks are only asserted to
+% *exist* (membership in ReLU_{n,k}); "the weights of that network are binary
+% fractions" therefore has no distinguished network to refer to. We instead
+% work with the refined class ReLU^{bin}_{n,k} of functions computed by *some*
+% network all of whose affine maps have binary-fraction coefficients, turning
+% each weight claim into a self-contained membership statement. ---
+
+\begin{definition}[Binary fraction (dyadic rational)]
+  \label{def:binary-fraction}
+  A real number $w \in \mathbb{R}$ is a \emph{binary fraction} (dyadic rational)
+  if there exist an integer $a \in \mathbb{Z}$ and a natural number $k \in
+  \mathbb{N}$ with $w = a / 2^{k}$. Equivalently, $w$ is rational and its
+  denominator, in lowest terms, is a power of two. The set of binary fractions
+  is the subring $\mathbb{Z}[\tfrac12] \subseteq \mathbb{R}$; in particular it
+  contains every integer and the number $\tfrac12$, and it is closed under
+  addition, subtraction, and multiplication.
+\end{definition}
+
+\begin{definition}[Binary-fraction affine map]
+  \label{def:affine-binary}
+  \uses{def:binary-fraction}
+  An affine map $T : \mathbb{R}^{p} \to \mathbb{R}^{q}$, written $T(y) = A y + b$
+  with weight matrix $A \in \mathbb{R}^{q \times p}$ and bias vector $b \in
+  \mathbb{R}^{q}$, is a \emph{binary-fraction affine map} if every entry
+  $A_{ij}$ of $A$ and every entry $b_i$ of $b$ is a binary fraction
+  (Definition~\ref{def:binary-fraction}).
+\end{definition}
+
+\begin{definition}[Binary-fraction ReLU network]
+  \label{def:network-binary}
+  \uses{def:relu-network, def:affine-binary}
+  A ReLU network given by affine maps $T^{(1)}, \dots, T^{(k+1)}$
+  (Definition~\ref{def:relu-network}) is a \emph{binary-fraction network} if
+  every one of its affine maps $T^{(i)}$ is a binary-fraction affine map
+  (Definition~\ref{def:affine-binary}); equivalently, every entry of every
+  weight matrix and every entry of every bias vector occurring in the network is
+  a binary fraction.
+\end{definition}
+
+\begin{definition}[Binary-weight depth classes $\mathrm{ReLU}^{\mathrm{bin}}_{n,k}$]
+  \label{def:relu-bin-nk}
+  \uses{def:relu-network, def:network-depth, def:network-binary}
+  For $n, k \geq 0$, let $\mathrm{ReLU}^{\mathrm{bin}}_{n,k}$ be the set of
+  functions $f : \mathbb{R}^n \to \mathbb{R}$ for which there exists a ReLU
+  network (Definition~\ref{def:relu-network}) with $k$ hidden layers
+  (Definition~\ref{def:network-depth}), input dimension $n$ and output dimension
+  $1$, that computes $f$ and that is a binary-fraction network
+  (Definition~\ref{def:network-binary}): every entry of every weight matrix and
+  every entry of every bias vector of every affine map of the network is a
+  binary fraction.
+  Thus $\mathrm{ReLU}^{\mathrm{bin}}_{n,k} \subseteq \mathrm{ReLU}_{n,k}$, and
+  $f \in \mathrm{ReLU}^{\mathrm{bin}}_{n,k}$ asserts precisely that $f$ is
+  computable with $k$ hidden layers using only binary-fraction weights and
+  biases.
+\end{definition}
+
+\begin{lemma}[Binary weights for the base case $\mathrm{MAX}_5$]
+  \label{lem:binary-weights-base}
+  \uses{def:relu-bin-nk, def:max-n}
+  $\mathrm{MAX}_5 \in \mathrm{ReLU}^{\mathrm{bin}}_{5,2}$; that is, $\mathrm{MAX}_5$
+  is computable by a two-hidden-layer ReLU network all of whose weights and
+  biases are binary fractions.
+\end{lemma}
+\begin{proof}
+  \uses{prop:max5-depth, def:m, lem:terms-two-layers, def:binary-fraction}
+  By Proposition~\ref{prop:max5-depth}, $\mathrm{MAX}_5$ is computed with two
+  hidden layers by the network realizing the representation $M$
+  (Definition~\ref{def:m}). We check that this network can be taken with
+  binary-fraction coefficients. Each of the nine terms $P_i, Q, R_{jl}$ is a
+  nested combination of $\mathrm{MAX}_2$'s and coordinate sums with integer
+  ($\pm 1, 2$) coefficients, so the two-layer subnetwork computing it
+  (Lemma~\ref{lem:terms-two-layers}) uses only integer weights and biases, which
+  are binary fractions. The output layer forms the linear combination
+  $M = \tfrac12(P_1 + P_2 + P_3 + P_4 + Q - R_{13} - R_{14} - R_{23} - R_{24})$,
+  whose coefficients $\pm\tfrac12$ are binary fractions
+  (Definition~\ref{def:binary-fraction}). Every affine map of the network
+  therefore has binary-fraction coefficients, so $\mathrm{MAX}_5 \in
+  \mathrm{ReLU}^{\mathrm{bin}}_{5,2}$.
+\end{proof}
+
+\begin{lemma}[The recursive step preserves binary weights]
+  \label{lem:binary-weights-step}
+  % Statement-level \uses names only the objects the implication visibly mentions:
+  % ReLU^{bin}_{n,k} (def:relu-bin-nk) and MAX_n (def:max-n). Claims 5 and 7
+  % (claim:t-reduction, claim:first-layer) are proof tools that construct the
+  % network; they stay in the proof \uses below, matching the convention already
+  % used for lem:relu-subset-cpwl and thm:cpwl-depth. Keeping them out of the
+  % statement \uses stops this node's statement skeleton from importing the
+  % T_{a,b} machinery it never mentions.
+  \uses{def:relu-bin-nk, def:max-n}
+  Fix $n \geq 1$. If $\mathrm{MAX}_{3^{n-1}+2} \in
+  \mathrm{ReLU}^{\mathrm{bin}}_{3^{n-1}+2,\,n}$, then $\mathrm{MAX}_{3^{n}+2} \in
+  \mathrm{ReLU}^{\mathrm{bin}}_{3^{n}+2,\,n+1}$; one recursive step turns a
+  binary-weight network for $\mathrm{MAX}_{3^{n-1}+2}$ with $n$ hidden layers
+  into a binary-weight network for $\mathrm{MAX}_{3^{n}+2}$ with $n+1$ hidden
+  layers.
+\end{lemma}
+\begin{proof}
+  \uses{claim:first-layer, claim:t-reduction, def:m, def:binary-fraction}
+  Start from a network for $\mathrm{MAX}_{3^{n-1}+2}$ with $n$ hidden layers all
+  of whose affine maps have binary-fraction coefficients. The extra first layer
+  of Claim~\ref{claim:first-layer} computes the $3^{n-1}$ double terms
+  $\max(x_1,x_2) + \max(x_3,x_4)$ and passes the two remaining inputs through;
+  its affine map has integer coefficients, hence binary fractions. The reduction
+  of Claim~\ref{claim:t-reduction} realizes $T_{a,b+4}$ through the
+  representation $M$ (Definition~\ref{def:m}), whose only non-integer
+  coefficients are the factor $\tfrac12$ and the coordinate halvings $\tfrac12$,
+  all binary fractions. Because the binary fractions form a subring
+  (Definition~\ref{def:binary-fraction}), composing affine maps with
+  binary-fraction coefficients again yields affine maps with binary-fraction
+  coefficients. Hence the resulting $(n+1)$-hidden-layer network for
+  $\mathrm{MAX}_{3^{n}+2}$ again uses only binary-fraction weights and biases,
+  i.e.\ $\mathrm{MAX}_{3^{n}+2} \in \mathrm{ReLU}^{\mathrm{bin}}_{3^{n}+2,\,n+1}$.
+\end{proof}
+
+\begin{corollary}[Remark 1: binary-fraction weights]
+  \label{cor:binary-weights}
+  % Statement-level \uses names only the objects the membership visibly mentions:
+  % ReLU^{bin}_{n,k} (def:relu-bin-nk) and MAX_n (def:max-n). The base case and
+  % inductive step (lem:binary-weights-base, lem:binary-weights-step) are proof
+  % tools and are kept in the proof \uses below.
+  \uses{def:relu-bin-nk, def:max-n}
+  For every $n \geq 1$, $\mathrm{MAX}_{3^{n}+2} \in
+  \mathrm{ReLU}^{\mathrm{bin}}_{3^{n}+2,\,n+1}$; equivalently, the depth-optimal
+  networks computing $\mathrm{MAX}_{3^{n}+2}$ can be taken to use only weights
+  and biases that are binary fractions (rationals whose denominators are powers
+  of two).
+\end{corollary}
+\begin{proof}
+  \uses{lem:binary-weights-base, lem:binary-weights-step}
+  Induction on $n$. The base case $n = 1$ is $\mathrm{MAX}_5 \in
+  \mathrm{ReLU}^{\mathrm{bin}}_{5,2}$ (Lemma~\ref{lem:binary-weights-base}), with
+  $2 = 1+1$. For the step, assuming $\mathrm{MAX}_{3^{n-1}+2} \in
+  \mathrm{ReLU}^{\mathrm{bin}}_{3^{n-1}+2,\,n}$, Lemma~\ref{lem:binary-weights-step}
+  gives $\mathrm{MAX}_{3^{n}+2} \in \mathrm{ReLU}^{\mathrm{bin}}_{3^{n}+2,\,n+1}$.
+  Hence the membership holds for all $n \geq 1$.
+\end{proof}
+
+\chapter{Geometric intuition: subdividing the simplex}
+
+% ---------------------------------------------------------------------------
+% Polytopes and support functions. convexHull is the single settled dependency.
+% ---------------------------------------------------------------------------
+
+\begin{definition}[Convex hull]
+  \label{def:convex-hull}
+  \lean{convexHull}
+  \mathlibok
+  For a set $S \subseteq \mathbb{R}^n$, $\mathrm{conv}(S)$ is the smallest convex
+  set containing $S$. (Recalled from Mathlib for use below.)
+\end{definition}
+
+\begin{definition}[Polytope]
+  \label{def:polytope}
+  \uses{def:convex-hull}
+  A set $P \subseteq \mathbb{R}^n$ is a \emph{polytope} if there is a finite set
+  $S \subseteq \mathbb{R}^n$ with $P = \mathrm{conv}(S)$; that is, $P$ is the
+  convex hull (Definition~\ref{def:convex-hull}) of finitely many points. This is
+  a predicate on subsets of $\mathbb{R}^n$.
+\end{definition}
+
+\begin{definition}[Support function]
+  \label{def:support-function}
+  \uses{def:polytope}
+  The \emph{support function} of a polytope $P \subseteq \mathbb{R}^n$
+  (Definition~\ref{def:polytope}) is the function $h_P : \mathbb{R}^n \to
+  \mathbb{R}$,
+  \[
+    h_P(x) = \sup\{\langle x, p\rangle : p \in P\},
+  \]
+  the supremum of the linear functional $p \mapsto \langle x, p\rangle$ over the
+  points $p \in P$. Since a (nonempty) polytope is compact, this supremum is
+  finite and attained, so equivalently $h_P(x) = \max\{\langle x, p\rangle : p
+  \in P\}$. (Its convexity, positive homogeneity and CPWL character are recorded
+  as Lemmas~\ref{lem:support-convex}, \ref{lem:support-homogeneous}
+  and~\ref{lem:support-cpwl}.)
+\end{definition}
+
+% --- Properties of the support function, split out as single-declaration nodes. ---
+\begin{lemma}[The support function is convex]
+  \label{lem:support-convex}
+  \uses{def:support-function, def:polytope}
+  For every polytope $P \subseteq \mathbb{R}^n$, the support function $h_P$ is
+  convex on all of $\mathbb{R}^n$: for all $x, y \in \mathbb{R}^n$ and $\lambda
+  \in [0,1]$, $h_P(\lambda x + (1-\lambda) y) \leq \lambda h_P(x) + (1-\lambda)
+  h_P(y)$.
+\end{lemma}
+\begin{proof}
+  \uses{def:support-function}
+  $h_P$ is a pointwise maximum of the linear functions $x \mapsto \langle x, p
+  \rangle$ over $p \in P$, and a pointwise supremum of convex (here linear)
+  functions is convex.
+\end{proof}
+
+\begin{lemma}[The support function is positively homogeneous]
+  \label{lem:support-homogeneous}
+  \uses{def:support-function, def:polytope}
+  For every polytope $P \subseteq \mathbb{R}^n$ and every scalar $c \geq 0$,
+  $h_P(c x) = c\, h_P(x)$ for all $x \in \mathbb{R}^n$.
+\end{lemma}
+\begin{proof}
+  \uses{def:support-function}
+  For $c \geq 0$, $h_P(cx) = \max_{p \in P} \langle cx, p\rangle = c \max_{p \in
+  P}\langle x, p\rangle = c\, h_P(x)$, pulling the nonnegative factor $c$ out of
+  the maximum.
+\end{proof}
+
+\begin{lemma}[The support function is CPWL]
+  \label{lem:support-cpwl}
+  \uses{def:support-function, def:polytope, def:cpwl}
+  For every polytope $P \subseteq \mathbb{R}^n$, the support function $h_P$ is
+  continuous piecewise linear: $h_P \in \mathrm{CPWL}_n$.
+\end{lemma}
+\begin{proof}
+  \uses{def:support-function, def:cpwl}
+  Write $P = \mathrm{conv}\{v_1, \dots, v_N\}$. A linear functional attains its
+  maximum over $P$ at a vertex, so $h_P(x) = \max_{1 \leq j \leq N}\langle x,
+  v_j\rangle$ is a finite maximum of linear functions. Such a function is
+  continuous, and the normal fan of $P$ subdivides $\mathbb{R}^n$ into finitely
+  many polyhedral cones on each of which a single $\langle \cdot, v_j\rangle$ is
+  maximal, so $h_P$ is affine on each piece; hence $h_P$ is CPWL.
+\end{proof}
+
+\begin{lemma}[Support functions determine the polytope (injectivity)]
+  \label{lem:support-injective}
+  \uses{def:support-function, def:polytope}
+  For polytopes $P, Q \subseteq \mathbb{R}^n$, if $h_P = h_Q$ then $P = Q$.
+\end{lemma}
+\begin{proof}
+  \uses{def:support-function}
+  A compact convex set equals the intersection of the half-spaces $\{y :
+  \langle x, y\rangle \leq h_P(x)\}$ over all $x \in \mathbb{R}^n$; hence $h_P =
+  h_Q$ forces the two compact convex polytopes to coincide. Equivalently, if
+  $P \neq Q$ then some point of one, say $p \in P \setminus Q$, is strictly
+  separated from the other by a functional $x$, giving $h_P(x) \geq \langle x,
+  p\rangle > h_Q(x)$.
+\end{proof}
+
+\begin{lemma}[Every convex positively homogeneous CPWL function is a support function (surjectivity)]
+  \label{lem:support-surjective}
+  \uses{def:support-function, def:polytope, def:cpwl}
+  \notready
+  Let $f : \mathbb{R}^n \to \mathbb{R}$ be convex, positively homogeneous and
+  CPWL. Then there is a polytope $P \subseteq \mathbb{R}^n$ with $h_P = f$.
+\end{lemma}
+\begin{proof}
+  \uses{def:support-function, def:polytope}
+  Being CPWL and positively homogeneous, $f$ is affine on each cone of a finite
+  conical subdivision of $\mathbb{R}^n$, i.e.\ $f$ agrees on each cone with a
+  linear functional $\langle \cdot, v_j\rangle$; convexity forces $f = \max_j
+  \langle \cdot, v_j\rangle$ globally. Then $P = \mathrm{conv}\{v_1, \dots,
+  v_N\}$ is a polytope with $h_P = f$.
+\end{proof}
+
+\begin{lemma}[Support functions $\leftrightarrow$ polytopes]
+  \label{lem:support-newton-bijection}
+  \uses{def:support-function, def:cpwl, lem:support-convex, lem:support-homogeneous,
+    lem:support-cpwl, lem:support-injective, lem:support-surjective}
+  \notready
+  The map $P \mapsto h_P$ is a bijection between polytopes in $\mathbb{R}^n$ and
+  convex, positively homogeneous CPWL functions $\mathbb{R}^n \to \mathbb{R}$. The
+  polytope $P$ with $h_P = f$ is called the \emph{Newton polytope} of $f$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:support-convex, lem:support-homogeneous, lem:support-cpwl,
+    lem:support-injective, lem:support-surjective}
+  The map is well defined into the stated codomain because $h_P$ is convex
+  (Lemma~\ref{lem:support-convex}), positively homogeneous
+  (Lemma~\ref{lem:support-homogeneous}) and CPWL
+  (Lemma~\ref{lem:support-cpwl}). It is injective by
+  Lemma~\ref{lem:support-injective} and surjective by
+  Lemma~\ref{lem:support-surjective}; hence it is a bijection.
+\end{proof}
+% TODO: standard (Grünbaum; tropical geometry); the paper cites rather than proves it.
+
+\begin{definition}[Simplex]
+  \label{def:simplex}
+  \uses{def:convex-hull}
+  The $(n-1)$-dimensional simplex is $\Delta_{n-1} = \mathrm{conv}\{e_1, \dots,
+  e_n\} \subseteq \mathbb{R}^n$, where $e_i$ is the $i$-th standard unit vector.
+\end{definition}
+
+\begin{lemma}[Newton polytope of $\mathrm{MAX}_n$ is the simplex]
+  \label{lem:newton-max}
+  \uses{def:simplex, def:support-function, def:max-n}
+  $h_{\Delta_{n-1}} = \mathrm{MAX}_n$; equivalently, the Newton polytope of
+  $\mathrm{MAX}_n$ is $\Delta_{n-1}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:simplex, def:support-function, def:max-n}
+  A linear functional on a polytope attains its maximum at a vertex, so
+  $h_{\Delta_{n-1}}(x) = \max\{\langle x, p\rangle : p \in \mathrm{conv}\{e_1,
+  \dots, e_n\}\} = \max_{1 \leq i \leq n} \langle x, e_i\rangle = \max_i x_i =
+  \mathrm{MAX}_n(x)$.
+\end{proof}
+
+% ---------------------------------------------------------------------------
+% The polytope complexity model P_k and formal Minkowski differences.
+% ---------------------------------------------------------------------------
+
+\begin{definition}[Minkowski sum]
+  \label{def:minkowski-sum}
+  For $P, Q \subseteq \mathbb{R}^n$, their Minkowski sum is $P + Q = \{p + q :
+  p \in P,\ q \in Q\}$.
+\end{definition}
+
+\begin{definition}[Convex-hull join]
+  \label{def:join-hull}
+  \uses{def:convex-hull}
+  For $P, Q \subseteq \mathbb{R}^n$, write $P \ast Q = \mathrm{conv}(P \cup Q)$.
+\end{definition}
+
+\begin{definition}[Polytope complexity classes]
+  \label{def:complexity-classes}
+  \uses{def:minkowski-sum, def:join-hull}
+  Fix the dimension $n$. Let $\mathcal{P}_0$ be the set of single points. For
+  $k \geq 0$,
+  \[
+    \mathcal{P}_{k+1} = \Bigl\{ \sum_i P_i \ast Q_i :\ P_i, Q_i \in \mathcal{P}_k
+    \text{ for all } i \Bigr\},
+  \]
+  the (finite) Minkowski sums of convex-hull joins of pairs from $\mathcal{P}_k$.
+\end{definition}
+
+\begin{definition}[Complexity of a polytope]
+  \label{def:polytope-complexity}
+  \uses{def:complexity-classes}
+  The \emph{complexity} of a polytope $P$ is the least $k$ with $P \in
+  \mathcal{P}_k$.
+\end{definition}
+
+\begin{definition}[Formal Minkowski difference]
+  \label{def:formal-mink-diff}
+  \uses{def:minkowski-sum}
+  A polytope $X$ is a \emph{formal Minkowski difference} of polytopes $P$ and $Q$
+  if $X + P = Q$.
+\end{definition}
+
+\begin{lemma}[$\mathcal{P}_k$ is closed under Minkowski sums]
+  \label{lem:pk-closed-sum}
+  \uses{def:complexity-classes}
+  For $k \geq 1$, if $P, Q \in \mathcal{P}_k$ then $P + Q \in \mathcal{P}_k$.
+\end{lemma}
+\begin{proof}
+  \uses{def:complexity-classes, def:minkowski-sum}
+  Write $P = \sum_i P_i \ast Q_i$ and $Q = \sum_j P'_j \ast Q'_j$ with all
+  factors in $\mathcal{P}_{k-1}$. Then $P + Q = \sum_i P_i \ast Q_i + \sum_j
+  P'_j \ast Q'_j$ is again a finite Minkowski sum of convex-hull joins of pairs
+  from $\mathcal{P}_{k-1}$, hence in $\mathcal{P}_k$ by
+  Definition~\ref{def:complexity-classes}.
+\end{proof}
+
+\begin{lemma}[Every polytope in $\mathcal{P}_k$ is non-empty]
+  \label{lem:pk-nonempty}
+  \uses{def:complexity-classes, def:join-hull, def:minkowski-sum}
+  For every $k \geq 0$ and every $P \in \mathcal{P}_k$, the polytope $P$ is
+  non-empty; equivalently, $\emptyset \notin \mathcal{P}_k$.
+\end{lemma}
+\begin{proof}
+  \uses{def:complexity-classes, def:join-hull, def:minkowski-sum}
+  Induction on $k$. For $k = 0$, $\mathcal{P}_0$ consists of single points
+  $\{p\}$, which are non-empty. For $k \geq 1$, every $P \in \mathcal{P}_k$ has
+  the form $\sum_i P_i \ast Q_i$ with $P_i, Q_i \in \mathcal{P}_{k-1}$. By the
+  induction hypothesis each $P_i$ is non-empty, so each join $P_i \ast Q_i =
+  \mathrm{conv}(P_i \cup Q_i) \supseteq P_i$ is non-empty, and a Minkowski sum of
+  non-empty sets is non-empty; hence $P$ is non-empty.
+\end{proof}
+
+\begin{lemma}[$\mathcal{P}_k$ is closed under taking non-empty faces]
+  \label{lem:pk-closed-faces}
+  \uses{def:complexity-classes, def:join-hull, lem:pk-nonempty}
+  For every $k$, if $P \in \mathcal{P}_k$ then every \emph{non-empty} face $F$ of
+  $P$ is in $\mathcal{P}_k$. (The non-emptiness hypothesis is essential: the empty
+  set is a face of every polytope but is never a member of $\mathcal{P}_k$ by
+  Lemma~\ref{lem:pk-nonempty}.)
+\end{lemma}
+\begin{proof}
+  \uses{def:complexity-classes, def:minkowski-sum, def:join-hull, lem:pk-nonempty}
+  Induction on $k$. Points ($\mathcal{P}_0$) have only themselves as their unique
+  non-empty face. For $k \geq 1$, fix a linear objective $c$ and let $P = \sum_i
+  P_i \ast Q_i$; the non-empty face $F$ selected by $c$ is the $c$-maximal face.
+  The face of a Minkowski sum in direction $c$ is the Minkowski sum of the faces
+  of the summands in direction $c$, and the face of a join $P_i \ast Q_i$ in
+  direction $c$ is the join of the $c$-maximal faces of $P_i$ and $Q_i$ (or one
+  of them alone); each such summand face is non-empty by
+  Lemma~\ref{lem:pk-nonempty}. By the induction hypothesis those faces lie in
+  $\mathcal{P}_{k-1}$, so the whole face $F$ lies in $\mathcal{P}_k$.
+\end{proof}
+
+\begin{lemma}[Lemma 8: depth via formal Minkowski differences, Hertrich]
+  \label{lem:formal-diff-depth}
+  \uses{def:support-function, def:complexity-classes, def:formal-mink-diff, def:relu-nk}
+  \notready
+  For every polytope $X$, the number of hidden layers required to represent
+  $h_X$ equals the least $k$ for which there exist $P, Q \in \mathcal{P}_k$ with
+  $X + P = Q$.
+\end{lemma}
+% TODO: cited from Hertrich [Her22, Theorem 3.35]; the paper does not reproduce the proof.
+
+\begin{lemma}[Valuation property, Eq.~(3)]
+  \label{lem:valuation}
+  \uses{def:minkowski-sum}
+  \notready
+  If $P$ and $Q$ are polytopes such that $P \cup Q$ is a polytope, then
+  $(P \cup Q) + (P \cap Q) = P + Q$.
+\end{lemma}
+% TODO: paper states this "simple fact" of the identity valuation without proof;
+% a formal argument goes through support functions / valuation theory.
+
+\begin{lemma}[Lemma 9: full additivity of the identity map]
+  \label{lem:full-additivity}
+  \uses{def:minkowski-sum, lem:valuation}
+  \notready
+  Let $X$ and $Q_1, \dots, Q_m$ be polytopes in $\mathbb{R}^n$ with $X =
+  \bigcup_{i \in [m]} Q_i$. Let $\mathcal{S}_0$ be the collection of non-empty
+  $S \subseteq [m]$ of even size and $\mathcal{S}_1$ the collection of $S
+  \subseteq [m]$ of odd size, and put $Q_S = \bigcap_{i \in S} Q_i$. Then
+  \[
+    X + \sum_{S \in \mathcal{S}_0} Q_S = \sum_{S \in \mathcal{S}_1} Q_S .
+  \]
+\end{lemma}
+% TODO: proved via the Euler characteristic and support-function extension
+% (McMullen--Schneider [MS83], Schneider [Sch13]); the paper only sketches it.
+
+\begin{lemma}[A $\mathcal{P}_k$ cover yields a formal Minkowski difference]
+  \label{lem:subdivision-formal-diff}
+  \uses{def:simplex, def:complexity-classes, def:formal-mink-diff,
+    lem:full-additivity, lem:pk-closed-sum}
+  Let $Q_1, \dots, Q_m$ be polytopes with $\Delta_{n-1} = \bigcup_{i \in [m]}
+  Q_i$ and $Q_S = \bigcap_{i \in S} Q_i \in \mathcal{P}_k$ for every non-empty
+  $S \subseteq [m]$. Put $P = \sum_{S \in \mathcal{S}_0} Q_S$ and $Q = \sum_{S
+  \in \mathcal{S}_1} Q_S$, where $\mathcal{S}_0$ (resp.\ $\mathcal{S}_1$) is the
+  collection of non-empty even-size (resp.\ odd-size) subsets of $[m]$. Then
+  $P, Q \in \mathcal{P}_k$ and $\Delta_{n-1} + P = Q$; i.e.\ $\Delta_{n-1}$ is a
+  formal Minkowski difference of two polytopes in $\mathcal{P}_k$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:full-additivity, lem:pk-closed-sum, def:formal-mink-diff}
+  Full additivity (Lemma~\ref{lem:full-additivity}) applied to the cover gives
+  $\Delta_{n-1} + \sum_{S \in \mathcal{S}_0} Q_S = \sum_{S \in \mathcal{S}_1}
+  Q_S$, that is $\Delta_{n-1} + P = Q$. Since every $Q_S \in \mathcal{P}_k$ and
+  $\mathcal{P}_k$ is closed under Minkowski sums (Lemma~\ref{lem:pk-closed-sum}),
+  the finite sums $P$ and $Q$ lie in $\mathcal{P}_k$.
+\end{proof}
+
+\begin{lemma}[Lemma 10: depth via subdivisions of the simplex]
+  \label{lem:subdivision-bound}
+  \uses{def:simplex, def:complexity-classes, def:relu-nk, def:max-n,
+    lem:subdivision-formal-diff, lem:formal-diff-depth, lem:newton-max}
+  The number of hidden layers required for $\mathrm{MAX}_n$ is at most the least
+  $k$ for which there are polytopes $Q_1, \dots, Q_m$ with $\Delta_{n-1} =
+  \bigcup_{i \in [m]} Q_i$ and $Q_S \in \mathcal{P}_k$ for all non-empty
+  $S \subseteq [m]$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:subdivision-formal-diff, lem:formal-diff-depth, lem:newton-max,
+    def:simplex}
+  Given such a cover of $X = \Delta_{n-1}$, Lemma~\ref{lem:subdivision-formal-diff}
+  produces $P, Q \in \mathcal{P}_k$ with $\Delta_{n-1} + P = Q$, so
+  $\Delta_{n-1}$ is a formal Minkowski difference of two $\mathcal{P}_k$
+  polytopes. By Lemma~\ref{lem:formal-diff-depth}, $h_{\Delta_{n-1}}$ needs at
+  most $k$ hidden layers, and $h_{\Delta_{n-1}} = \mathrm{MAX}_n$ by
+  Lemma~\ref{lem:newton-max}.
+\end{proof}
+
+% ---------------------------------------------------------------------------
+% The explicit subdivision of the three- and four-simplex.
+% ---------------------------------------------------------------------------
+
+\begin{construction}[Rhombic-pyramid subdivision of the three-simplex]
+  \label{constr:rhombic-pyramids}
+  \uses{def:join-hull, def:complexity-classes}
+  Let
+  \[
+    x_1 = (-1,-1,-1),\quad x_2 = (1,1,-1),\quad x_3 = (-1,1,1),\quad x_4 = (1,-1,1),
+  \]
+  whose convex hull is a three-simplex affinely equivalent to $\Delta_3$. Let
+  $x_{ij} = \tfrac12(x_i + x_j)$ be edge midpoints. Cutting the simplex along the
+  coordinate planes $e_1^\perp$ and $e_2^\perp$ yields four pieces, each a
+  \emph{rhombic pyramid} $Q_i = p_i \ast Z_i$ with apex the point $p_i$ and base
+  the rhombus $Z_i$:
+  \[
+    \begin{array}{c|c}
+      \text{apex} & \text{base} \\\hline
+      x_{12} & x_1, x_{14}, x_{34}, x_{13} \\
+      x_{12} & x_2, x_{23}, x_{34}, x_{24} \\
+      x_{34} & x_3, x_{13}, x_{12}, x_{23} \\
+      x_{34} & x_4, x_{14}, x_{12}, x_{24}
+    \end{array}
+  \]
+\end{construction}
+
+\begin{lemma}[A parallelogram is in $\mathcal{P}_1$]
+  \label{lem:parallelogram-p1}
+  \uses{def:complexity-classes, def:join-hull}
+  Every parallelogram (in particular a rhombus) lies in $\mathcal{P}_1$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:pk-closed-sum, def:join-hull, def:complexity-classes}
+  A segment is $p \ast q$ for two points $p, q \in \mathcal{P}_0$, hence lies in
+  $\mathcal{P}_1$. A parallelogram is the Minkowski sum of two segments (its edge
+  vectors), so it lies in $\mathcal{P}_1$ by Lemma~\ref{lem:pk-closed-sum}.
+\end{proof}
+
+\begin{lemma}[A rhombic pyramid is in $\mathcal{P}_2$]
+  \label{lem:rhombic-pyramid-p2}
+  \uses{def:complexity-classes, def:join-hull}
+  If $p$ is a point and $Z$ is a parallelogram, then the rhombic pyramid
+  $p \ast Z$ lies in $\mathcal{P}_2$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:parallelogram-p1, def:complexity-classes, def:join-hull}
+  We have $p \in \mathcal{P}_0 \subseteq \mathcal{P}_1$ and $Z \in \mathcal{P}_1$
+  by Lemma~\ref{lem:parallelogram-p1}. Thus $p \ast Z$ is a single convex-hull
+  join of two polytopes from $\mathcal{P}_1$, hence lies in $\mathcal{P}_2$.
+\end{proof}
+
+\begin{lemma}[The four rhombic pyramids tile the three-simplex]
+  \label{lem:delta3-subdivision}
+  \uses{constr:rhombic-pyramids}
+  \notready
+  The four rhombic pyramids of Construction~\ref{constr:rhombic-pyramids} have
+  pairwise disjoint interiors and their union is the three-simplex
+  $\mathrm{conv}\{x_1, x_2, x_3, x_4\}$.
+\end{lemma}
+% TODO: verified geometrically in the paper via Figures 1 and 2; no textual proof.
+
+\begin{definition}[Embedding the three-simplex as a facet of $\Delta_4$]
+  \label{def:facet-embedding}
+  \uses{constr:rhombic-pyramids, def:join-hull}
+  The construction above lives in $\mathbb{R}^3$; to view its three-simplex as a
+  facet of a genuine four-simplex we lift it into $\mathbb{R}^4$. Let
+  $\iota \colon \mathbb{R}^3 \to \mathbb{R}^4$ be the affine injection
+  $\iota(v) = (v_1, v_2, v_3, 0)$, whose image is the hyperplane
+  $H = \{y \in \mathbb{R}^4 : y_4 = 0\}$. Write
+  \[
+    X = \iota\bigl(\mathrm{conv}\{x_1, x_2, x_3, x_4\}\bigr) \subseteq H
+  \]
+  for the lifted three-simplex of Construction~\ref{constr:rhombic-pyramids}, with
+  the four lifted rhombic pyramids $\iota(p_i) \ast \iota(Z_i)$, and set the
+  \emph{apex}
+  \[
+    x_5 = (0, 0, 0, 1) \in \mathbb{R}^4 .
+  \]
+  Define the four-simplex $\Delta_4 = x_5 \ast X$.
+\end{definition}
+
+\begin{lemma}[The apex $x_5$ lies off the facet hyperplane]
+  \label{lem:x5-off-facet}
+  \uses{def:facet-embedding, constr:rhombic-pyramids}
+  With $\iota$, $H$, $X$, and $x_5$ as in Definition~\ref{def:facet-embedding},
+  every point of $X$ has fourth coordinate $0$, whereas $x_5$ has fourth
+  coordinate $1$; hence $x_5 \notin \mathrm{aff}(X)$. Consequently the five points
+  $\iota(x_1), \dots, \iota(x_4), x_5$ are affinely independent, so
+  $\Delta_4 = x_5 \ast X$ is a genuine four-dimensional simplex and the coning map
+  $y \mapsto x_5 \ast \{y\}$ is injective on $X$.
+\end{lemma}
+\begin{proof}
+  \uses{def:facet-embedding, constr:rhombic-pyramids}
+  By definition $\iota(v) = (v_1, v_2, v_3, 0)$ has fourth coordinate $0$ for every
+  $v \in \mathbb{R}^3$, so $X \subseteq H = \{y_4 = 0\}$ and therefore
+  $\mathrm{aff}(X) \subseteq H$. Since $x_5 = (0,0,0,1)$ has fourth coordinate
+  $1 \neq 0$, we have $x_5 \notin H \supseteq \mathrm{aff}(X)$. The points
+  $x_1, \dots, x_4$ are affinely independent in $\mathbb{R}^3$ (their convex hull is
+  a three-simplex), hence so are $\iota(x_1), \dots, \iota(x_4)$ inside $H$;
+  adjoining $x_5 \notin \mathrm{aff}(X)$ yields five affinely independent points,
+  and a cone over an affinely independent base with an apex off its affine hull is
+  a nondegenerate simplex.
+\end{proof}
+
+\begin{lemma}[Subdivision of the four-simplex into $\mathcal{P}_2$ pieces]
+  \label{lem:delta4-subdivision}
+  \uses{constr:rhombic-pyramids, def:complexity-classes, def:join-hull,
+    def:facet-embedding, lem:x5-off-facet}
+  Work in $\mathbb{R}^4$. Let $X = \iota(\mathrm{conv}\{x_1, \dots, x_4\})$ be the
+  facet of $\Delta_4$ of Definition~\ref{def:facet-embedding}, subdivided into the
+  four lifted rhombic pyramids $\iota(p_i) \ast \iota(Z_i)$ of
+  Construction~\ref{constr:rhombic-pyramids}, and let $x_5 = (0,0,0,1)$ be the
+  vertex of $\Delta_4$ opposite $X$, which lies off $\mathrm{aff}(X)$ by
+  Lemma~\ref{lem:x5-off-facet}. Then $\Delta_4 = x_5 \ast X$ is subdivided (pieces
+  with pairwise disjoint interiors whose union is $\Delta_4$) into the four
+  polytopes
+  \[
+    x_5 \ast (\iota(p_i) \ast \iota(Z_i)) = (x_5 \ast \iota(p_i)) \ast \iota(Z_i),
+    \qquad i = 1, 2, 3, 4,
+  \]
+  each of which lies in $\mathcal{P}_2$ (for the ambient dimension $n = 4$).
+\end{lemma}
+\begin{proof}
+  \uses{lem:delta3-subdivision, lem:parallelogram-p1, lem:rhombic-pyramid-p2,
+    def:join-hull, def:complexity-classes, def:facet-embedding, lem:x5-off-facet}
+  By Lemma~\ref{lem:x5-off-facet} the apex $x_5$ lies off $\mathrm{aff}(X)$, so
+  $\Delta_4 = x_5 \ast X$ is a genuine four-simplex and the coning map is injective
+  on $X$; in particular distinct pieces of a subdivision of $X$ cone to pieces of
+  $\Delta_4$ with pairwise disjoint interiors. The lifted rhombic pyramids
+  $\iota(p_i) \ast \iota(Z_i)$ subdivide $X$ (they are the image under the affine
+  injection $\iota$ of the subdivision of Lemma~\ref{lem:delta3-subdivision}), and
+  coning by $x_5$ distributes over this subdivision, so the four sets
+  $x_5 \ast (\iota(p_i) \ast \iota(Z_i))$ have pairwise disjoint interiors and union
+  $\Delta_4$. The join is associative, so
+  $x_5 \ast (\iota(p_i) \ast \iota(Z_i)) = (x_5 \ast \iota(p_i)) \ast \iota(Z_i)$.
+  Here $x_5 \ast \iota(p_i)$ is a segment, hence in $\mathcal{P}_1$, and
+  $\iota(Z_i) \in \mathcal{P}_1$ by Lemma~\ref{lem:parallelogram-p1} (it is a
+  parallelogram); therefore the single convex-hull join
+  $(x_5 \ast \iota(p_i)) \ast \iota(Z_i)$ of two $\mathcal{P}_1$ polytopes lies in
+  $\mathcal{P}_2$, as in Lemma~\ref{lem:rhombic-pyramid-p2}.
+\end{proof}
+
+% --- Explicit vertex correspondence realizing Eq.~(2) as Newton polytopes. ---
+\begin{definition}[Vertex embedding $\varphi$ of $\Delta_4$ into $\mathbb{R}^5$]
+  \label{def:eq2-embedding}
+  \uses{def:facet-embedding, constr:rhombic-pyramids}
+  Let $\varphi \colon \mathbb{R}^4 \to \mathbb{R}^5$ be the unique affine map with
+  \[
+    \varphi(\iota(x_j)) = 2 e_j \quad (j = 1, \dots, 4), \qquad
+    \varphi(x_5) = 2 e_5,
+  \]
+  where $\iota(x_1), \dots, \iota(x_4), x_5$ are the five affinely independent
+  vertices of $\Delta_4$ (Definition~\ref{def:facet-embedding}) and $e_1, \dots,
+  e_5$ are the standard basis vectors of $\mathbb{R}^5$. Being affine, $\varphi$
+  carries each edge midpoint $x_{jl} = \tfrac12(x_j + x_l)$ to $e_j + e_l$.
+\end{definition}
+
+\begin{lemma}[$\varphi$ is injective]
+  \label{lem:eq2-embedding-injective}
+  \uses{def:eq2-embedding, lem:x5-off-facet}
+  The affine map $\varphi \colon \mathbb{R}^4 \to \mathbb{R}^5$ of
+  Definition~\ref{def:eq2-embedding} is injective.
+\end{lemma}
+\begin{proof}
+  \uses{def:eq2-embedding, lem:x5-off-facet}
+  The five points $\iota(x_1), \dots, \iota(x_4), x_5$ are affinely independent
+  (Lemma~\ref{lem:x5-off-facet}), hence affinely span $\mathbb{R}^4$; their
+  images $2e_1, \dots, 2e_5$ are affinely independent in $\mathbb{R}^5$. An affine
+  map carrying an affine basis to an affinely independent set is injective.
+\end{proof}
+
+\begin{lemma}[Each piece maps to the Newton polytope of $P_i$]
+  \label{lem:eq2-newton-pieces}
+  \uses{def:eq2-embedding, lem:delta4-subdivision, def:support-function,
+    def:p1, def:p2, def:p3, def:p4}
+  For each $i \in \{1,2,3,4\}$, the image under $\varphi$ of the four-simplex
+  piece $(x_5 \ast \iota(p_i)) \ast \iota(Z_i)$ of
+  Lemma~\ref{lem:delta4-subdivision} is a polytope in $\mathbb{R}^5$ whose support
+  function equals $P_i$:
+  \[
+    h_{\varphi((x_5 \ast \iota(p_i)) \ast \iota(Z_i))} = P_i .
+  \]
+  Equivalently, $\varphi((x_5 \ast \iota(p_i)) \ast \iota(Z_i))$ is the Newton
+  polytope of $P_i$.
+\end{lemma}
+\begin{proof}
+  \uses{def:eq2-embedding, def:support-function, def:p1, constr:rhombic-pyramids}
+  Take $i = 1$; the other three cases are symmetric. The vertices of the piece
+  $(x_5 \ast \iota(p_1)) \ast \iota(Z_1)$ are $x_5$, the apex $\iota(p_1) =
+  \iota(x_{12})$ and the four base vertices $\iota(x_1), \iota(x_{14}),
+  \iota(x_{34}), \iota(x_{13})$. Since $\varphi$ sends $x_j \mapsto 2e_j$ and each
+  midpoint $x_{jl} \mapsto e_j + e_l$, these vertices map to
+  \[
+    2e_5,\quad e_1 + e_2,\quad 2e_1,\quad e_1 + e_4,\quad e_3 + e_4,\quad e_1 + e_3,
+  \]
+  which are exactly the exponent vectors of the six monomials $2x_5,\ x_1{+}x_2,\
+  2x_1,\ x_1{+}x_4,\ x_3{+}x_4,\ x_1{+}x_3$ of $P_1$ (Definition~\ref{def:p1}).
+  The support function of the convex hull of a finite vertex set is the maximum
+  of the corresponding linear functionals, so $h_{\varphi(\cdots)}(x) = \max(2x_5,
+  x_1{+}x_2, 2x_1, x_1{+}x_4, x_3{+}x_4, x_1{+}x_3) = P_1(x)$.
+\end{proof}
+
+\begin{lemma}[The remaining terms are support functions of common faces]
+  \label{lem:eq2-face-terms}
+  \uses{lem:eq2-newton-pieces, lem:pk-closed-faces, def:support-function,
+    def:q, def:r13, def:r14, def:r23, def:r24}
+  \notready
+  Let $\Pi_i = \varphi((x_5 \ast \iota(p_i)) \ast \iota(Z_i))$ be the four Newton
+  polytopes of Lemma~\ref{lem:eq2-newton-pieces}, and for non-empty $S \subseteq
+  \{1,2,3,4\}$ write $\Pi_S = \bigcap_{i \in S} \Pi_i$ for their common (lower
+  dimensional) faces. Then each of the remaining five terms of Equation~(2) is
+  the support function of such a face: $h_{\Pi_{\{1,2,3,4\}}} = Q$ (the central
+  intersection) and $h_{\Pi_{\{i,j\}}} = R_{ij}$ for the four pairwise
+  intersections $\{i,j\} \in \{\{1,3\},\{1,4\},\{2,3\},\{2,4\}\}$.
+\end{lemma}
+% TODO: identifies each Q/R term with the support function of a specific common
+% face of the four pieces; the vertex-by-vertex check is analogous to
+% lem:eq2-newton-pieces but is not carried out in the paper.
+
+\begin{corollary}[Geometry of Eq.~(2)]
+  \label{cor:geometry-eq2}
+  \uses{lem:delta4-subdivision, lem:eq2-newton-pieces, lem:eq2-face-terms,
+    def:eq2-embedding, def:p1, def:p2, def:p3, def:p4, lem:newton-max}
+  \notready
+  The four full-dimensional pieces $(x_5 \ast p_i) \ast Z_i \in \mathcal{P}_2$ of
+  Lemma~\ref{lem:delta4-subdivision} are the Newton polytopes of the four terms
+  $P_1, P_2, P_3, P_4$ of Equation~(2) (via the explicit embedding $\varphi$ of
+  Definition~\ref{def:eq2-embedding}, Lemma~\ref{lem:eq2-newton-pieces}); the
+  remaining terms $Q, R_{13}, R_{14}, R_{23}, R_{24}$ are the support functions of
+  their lower-dimensional common faces (Lemma~\ref{lem:eq2-face-terms}).
+\end{corollary}
+% TODO: the paper asserts this correspondence without a detailed verification.
+
+\begin{lemma}[Polytope complexity of a simplex]
+  \label{lem:simplex-complexity}
+  \uses{def:simplex, def:polytope-complexity, def:complexity-classes}
+  \notready
+  For $d \geq 1$ the $d$-simplex $\Delta_d = \mathrm{conv}\{e_1, \dots, e_{d+1}\}
+  \subseteq \mathbb{R}^{d+1}$ has polytope complexity exactly
+  $\lceil \log_2(d+1) \rceil$; that is, $\Delta_d \in \mathcal{P}_k$ if and only if
+  $k \geq \lceil \log_2(d+1) \rceil$.
+\end{lemma}
+% TODO: folklore, not proved in the paper. Upper bound: split the vertex set in
+% half and take the convex-hull join of the two sub-simplices, giving the
+% recursion c(Delta_d) = 1 + ceil(log2(ceil((d+1)/2))). Lower bound: a simplex is
+% Minkowski-indecomposable, so any P_k representation is a single join P * Q with
+% P, Q faces (hence sub-simplices) of Delta_d, forcing the same recursion.
+
+\begin{corollary}[The simplex $\Delta_{3^{n}+1}$ is not in $\mathcal{P}_{n+1}$]
+  \label{cor:simplex-not-pn1}
+  \uses{lem:simplex-complexity, def:complexity-classes, def:simplex}
+  \notready
+  For every $n \geq 1$ the simplex $\Delta_{3^{n}+1} =
+  \mathrm{conv}\{e_1, \dots, e_{3^{n}+2}\} \subseteq \mathbb{R}^{3^{n}+2}$ is not a
+  member of the polytope-complexity class $\mathcal{P}_{n+1}$; that is,
+  $\Delta_{3^{n}+1} \notin \mathcal{P}_{n+1}$. Indeed, by
+  Lemma~\ref{lem:simplex-complexity} its polytope complexity equals
+  $\lceil \log_2(3^{n}+2) \rceil \geq n+2 > n+1$.
+\end{corollary}
+% TODO: numeric bound uses log2(3^n) = n*log2(3) > n+1 for n >= 1, hence
+% ceil(log2(3^n+2)) >= n+2; the non-membership then follows from
+% lem:simplex-complexity applied with d = 3^n+1.
+
+% --- The higher-dimensional recursive subdivision, split into a construction
+% --- (the family), its combinatorial correctness, and its complexity bound.
+\begin{definition}[Recursive subdivision family of $\Delta_{3^n+1}$]
+  \label{def:geom-higher-subdivision}
+  \uses{def:simplex, def:complexity-classes, def:join-hull,
+    lem:delta4-subdivision, constr:rhombic-pyramids, claim:t-reduction}
+  \notready
+  For each $n \geq 1$ define a finite family $\mathcal{Q}^{(n)} = \{Q_1, \dots,
+  Q_m\}$ of full-dimensional polytopes in $\mathbb{R}^{3^n+2}$ recursively. For
+  $n = 1$, $\mathcal{Q}^{(1)}$ is the four-piece rhombic-pyramid subdivision
+  $\{(x_5 \ast \iota(p_i)) \ast \iota(Z_i) : i = 1, \dots, 4\}$ of $\Delta_4$
+  from Lemma~\ref{lem:delta4-subdivision}. For $n > 1$, $\mathcal{Q}^{(n)}$ is
+  obtained from a subdivision of $\Delta_{3^{n-1}+1}$ by one
+  ``join-and-subdivide'' step that, on each cell, replaces a triangle (a join of
+  three points, a $\mathcal{P}_2$ object) by a single parallelogram (a
+  $\mathcal{P}_1$ object) — the geometric content of
+  Claim~\ref{claim:t-reduction} — thereby lowering the complexity class of the
+  cells by one at each of the $n+1$ levels.
+\end{definition}
+% TODO: the paper (Section 3.4) gives only the intuition; the explicit recursive
+% cells are not written out. Left \notready.
+
+\begin{lemma}[The recursive family subdivides $\Delta_{3^n+1}$ (properties (i), (ii))]
+  \label{lem:geom-higher-cover}
+  \uses{def:geom-higher-subdivision, def:simplex, lem:delta4-subdivision}
+  \notready
+  For every $n \geq 1$, the family $\mathcal{Q}^{(n)} = \{Q_1, \dots, Q_m\}$ of
+  Definition~\ref{def:geom-higher-subdivision} is a polyhedral subdivision of
+  $\Delta_{3^n+1}$: \emph{(i)} $\bigcup_{i \in [m]} Q_i = \Delta_{3^n+1}$, and
+  \emph{(ii)} the $Q_i$ have pairwise disjoint interiors and each pairwise
+  intersection $Q_i \cap Q_j$ is a common face of $Q_i$ and $Q_j$.
+\end{lemma}
+% TODO: base case n=1 is lem:delta4-subdivision; the inductive step needs the
+% join/subdivision interaction of Section 3.4, not carried out here.
+
+\begin{lemma}[Every intersection lies in $\mathcal{P}_{n+1}$ (property (iii))]
+  \label{lem:geom-higher-pieces-pn1}
+  \uses{def:geom-higher-subdivision, lem:geom-higher-cover,
+    def:complexity-classes, lem:pk-closed-faces, lem:rhombic-pyramid-p2,
+    cor:simplex-not-pn1}
+  \notready
+  For every $n \geq 1$ and every non-empty $S \subseteq [m]$, the intersection
+  $Q_S = \bigcap_{i \in S} Q_i$ of the family
+  Definition~\ref{def:geom-higher-subdivision} lies in $\mathcal{P}_{n+1}$. Since
+  each $Q_S$ is, by Lemma~\ref{lem:geom-higher-cover}(ii), a face of some cell
+  $Q_i \in \mathcal{P}_{n+1}$, membership follows from closure under non-empty
+  faces (Lemma~\ref{lem:pk-closed-faces}). This is strictly stronger than
+  $\Delta_{3^n+1} \in \mathcal{P}_{n+1}$, which is \emph{false} by
+  Corollary~\ref{cor:simplex-not-pn1}; a genuine subdivision is therefore
+  required.
+\end{lemma}
+% TODO: relies on each cell Q_i being in P_{n+1}, the quantitative content of the
+% recursive construction of def:geom-higher-subdivision. Left \notready.
+
+\begin{lemma}[Higher-dimensional subdivisions into $\mathcal{P}_{n+1}$ pieces]
+  \label{lem:geom-higher-dim}
+  \uses{def:geom-higher-subdivision, lem:geom-higher-cover,
+    lem:geom-higher-pieces-pn1, lem:subdivision-bound, lem:delta4-subdivision,
+    cor:simplex-not-pn1, claim:t-reduction, def:complexity-classes, def:simplex,
+    def:max-n, lem:newton-max}
+  \notready
+  Fix $n \geq 1$ and work in the ambient dimension $3^{n}+2$. There is a finite
+  family of full-dimensional polytopes $Q_1, \dots, Q_m \subseteq
+  \mathbb{R}^{3^{n}+2}$ that forms a polyhedral subdivision of the Newton polytope
+  of $\mathrm{MAX}_{3^{n}+2}$, i.e.\ of the simplex $\Delta_{3^{n}+1} =
+  \mathrm{conv}\{e_1, \dots, e_{3^{n}+2}\}$ (Lemma~\ref{lem:newton-max}), such
+  that:
+  \emph{(i)} $\bigcup_{i \in [m]} Q_i = \Delta_{3^{n}+1}$;
+  \emph{(ii)} the $Q_i$ have pairwise disjoint interiors and each pairwise
+  intersection $Q_i \cap Q_j$ is a common face of $Q_i$ and $Q_j$; and
+  \emph{(iii)} for every non-empty $S \subseteq [m]$ the intersection
+  $Q_S = \bigcap_{i \in S} Q_i$ lies in the polytope-complexity class
+  $\mathcal{P}_{n+1}$ (Definition~\ref{def:complexity-classes}, ambient dimension
+  $3^{n}+2$).
+
+  The construction is recursive, lowering the complexity class of the pieces by
+  one at each of the $n+1$ levels: one subdivision step replaces a triangle (the
+  join of three points, a $\mathcal{P}_2$ object) by a single parallelogram (a
+  $\mathcal{P}_1$ object), the geometric content of Claim~\ref{claim:t-reduction};
+  the base case $n = 1$ is the four-piece subdivision of $\Delta_4$ into the
+  $\mathcal{P}_2$ rhombic-pyramid pieces of
+  Lemma~\ref{lem:delta4-subdivision}. Property~(iii) is the crucial quantitative
+  content: it is strictly stronger than membership of the whole simplex in
+  $\mathcal{P}_{n+1}$, because $\Delta_{3^{n}+1} \notin \mathcal{P}_{n+1}$ by
+  Corollary~\ref{cor:simplex-not-pn1}; hence the trivial one-piece family
+  ($m = 1$, $Q_1 = \Delta_{3^{n}+1}$) violates~(iii), and a genuine subdivision is
+  required. Feeding this subdivision into Lemma~\ref{lem:subdivision-bound}
+  re-derives $\mathrm{MAX}_{3^{n}+2} \in \mathrm{ReLU}_{3^{n}+2,\,n+1}$ purely
+  geometrically---the geometric counterpart of Theorem~\ref{thm:max-depth}.
+\end{lemma}
+% TODO: the paper gives only the intuition of Section 3.4 ("a formal
+% implementation requires non-trivial reasoning on the interactions between joins
+% and subdivisions"); the statement above pins down the geometric claim (a
+% P_{n+1} polyhedral subdivision of Delta_{3^n+1}) whose combination with
+% Lemma 10 (lem:subdivision-bound) yields Theorem 1. Left \notready: the recursive
+% construction of the pieces is not carried out here.

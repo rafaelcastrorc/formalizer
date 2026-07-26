@@ -1511,6 +1511,8 @@ def _statement_audit_prompt(
     blueprint_blocks: dict[str, str],
     decls: dict[str, LeanDecl],
     paper_text: str,
+    *,
+    skeleton_phase: bool = False,
 ) -> str:
     pairs: list[str] = []
     for label, node in sorted(nodes.items(), key=lambda item: (item[1].file, item[1].line, item[0])):
@@ -1528,6 +1530,22 @@ def _statement_audit_prompt(
         )
     paper_block = f"\nOriginal paper context:\n<paper>\n{paper_text[:20000]}\n</paper>\n" if paper_text else ""
     pair_text = "\n\n".join(pairs)
+    skeleton_block = ""
+    if skeleton_phase:
+        skeleton_block = """
+STATEMENT-PHASE CONVENTIONS (this audit runs BEFORE any proofs are written):
+- Theorem-like declarations here intentionally end in `:= sorry`. That is the
+  designed skeleton convention, NOT a defect: proofs are produced and checked
+  in a later phase. NEVER reject a declaration because its proof is `sorry`
+  or because proof obligations are "not yet discharged".
+- Judge only (a) whether the STATEMENT faithfully encodes the blueprint node,
+  and (b) whether the blueprint proof's substantive obligations are
+  representable through the statement plus the node's listed `\\uses{...}`
+  dependencies. Dependency mentions that belong inside the eventual proof are
+  checked at proof time, not now.
+- Definition-kind declarations must still be complete (no `sorry`) and are
+  judged on their bodies as usual.
+"""
     return f"""TASK: BLUEPRINT-CONTRACT-AUDIT
 
 You are the publication gate for Auto-Blueprint.
@@ -1536,6 +1554,7 @@ Lean has already accepted the generated file, but that is not enough. Decide
 whether each generated Lean declaration actually formalizes the corresponding
 blueprint node without weakening, erasing parameters, replacing concrete
 claims by abstract placeholders, or changing the mathematical content.
+{skeleton_block}
 
 Also check proof-obligation coverage at the node level. The Lean declaration
 does not need to follow the prose proof line by line, but it must represent the

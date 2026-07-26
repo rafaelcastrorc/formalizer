@@ -200,13 +200,27 @@ class Job:
     def snapshot(self, offset: int) -> dict:
         with self.lock:
             lines = _read_log_lines(self.log_path)
+            # Cap one response; the client advances `offset` by `total` and
+            # picks the rest up on the next poll a second later.
+            chunk = _log_chunk(lines, offset)
             return {
                 "action": self.action,
                 "status": self.status,
                 "returncode": self.returncode,
                 "elapsed": int(time.time() - self.started),
-                "total": len(lines),
-                "lines": lines[offset:],
+                "total": offset + len(chunk),
+                "lines": chunk,
+                "log_path": str(self.log_path.relative_to(REPO_ROOT)),
+            }
+
+    def status_only(self) -> dict:
+        """Job status without any log content, for the /api/state poll."""
+        with self.lock:
+            return {
+                "action": self.action,
+                "status": self.status,
+                "returncode": self.returncode,
+                "elapsed": int(time.time() - self.started),
                 "log_path": str(self.log_path.relative_to(REPO_ROOT)),
             }
 
@@ -342,13 +356,63 @@ def _latest_run_log() -> Path | None:
     return max(logs, key=lambda path: path.stat().st_mtime)
 
 
+# Cache of parsed log lines keyed by path, invalidated on (size, mtime). The
+# UI polls once a second and every poll used to re-read and re-split the whole
+# file; on a fast-growing log that is O(filesize) per request per client, and
+# ThreadingHTTPServer runs those concurrently.
+_LOG_CACHE: dict[str, tuple[int, float, list[str]]] = {}
+_LOG_CACHE_LOCK = threading.Lock()
+# Ceiling on one log response. A runaway run can emit thousands of lines in
+# seconds (measured: 1732 lines / 149KB in 22s), and sending that in one body
+# is what turns a disconnected browser into a BrokenPipeError. Bytes are the
+# binding constraint, not lines - agent output lines are long and highly
+# variable - so cap both. The client polls every second and advances `offset`,
+# so a backlog drains over a few polls instead of one huge write.
+MAX_LOG_LINES_PER_RESPONSE = 400
+MAX_LOG_BYTES_PER_RESPONSE = 64 * 1024
+
+
+def _log_chunk(lines: list[str], offset: int) -> list[str]:
+    """Bounded slice of `lines` starting at `offset`, by count and by bytes."""
+    chunk: list[str] = []
+    used = 0
+    for line in lines[offset : offset + MAX_LOG_LINES_PER_RESPONSE]:
+        used += len(line) + 1
+        if chunk and used > MAX_LOG_BYTES_PER_RESPONSE:
+            break
+        chunk.append(line)
+    return chunk
+
+
 def _read_log_lines(path: Path | None) -> list[str]:
     if path is None:
         return []
+    key = str(path)
     try:
-        return path.read_text(encoding="utf-8", errors="replace").splitlines()
+        st = path.stat()
     except OSError:
         return []
+    with _LOG_CACHE_LOCK:
+        cached = _LOG_CACHE.get(key)
+        if cached and cached[0] == st.st_size and cached[1] == st.st_mtime:
+            return cached[2]
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    with _LOG_CACHE_LOCK:
+        _LOG_CACHE[key] = (st.st_size, st.st_mtime, lines)
+        if len(_LOG_CACHE) > 8:
+            for stale in list(_LOG_CACHE)[:-8]:
+                _LOG_CACHE.pop(stale, None)
+    return lines
+
+
+def _status_only(snapshot: dict | None) -> dict | None:
+    """Strip log content from a snapshot dict (adopted-job path)."""
+    if not snapshot:
+        return None
+    return {k: v for k, v in snapshot.items() if k not in ("lines", "total")}
 
 
 def _adopted_job_snapshot(offset: int) -> dict | None:
@@ -369,13 +433,14 @@ def _adopted_job_snapshot(offset: int) -> dict | None:
         started = int(state.get("job_started") or time.time())
     except (TypeError, ValueError):
         started = int(time.time())
+    chunk = _log_chunk(lines, offset)
     payload = {
         "action": state.get("job_action", "run"),
         "status": "running",
         "returncode": None,
         "elapsed": max(0, int(time.time() - started)),
-        "total": len(lines),
-        "lines": lines[offset:],
+        "total": offset + len(chunk),
+        "lines": chunk,
         "adopted": True,
     }
     if log_path is not None:
@@ -783,11 +848,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_json(self, obj: dict, code: int = 200) -> None:
         body = json.dumps(obj).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # The browser navigated away, reloaded, or fell behind mid-write.
+            # Small responses never surface this (they fit the socket buffer),
+            # so it only appears when a response is large - exactly when a run
+            # is misbehaving and the log is growing fast. Nothing to recover.
+            self.close_connection = True
 
     def read_json(self) -> dict:
         length = int(self.headers.get("Content-Length", 0))
@@ -798,11 +870,14 @@ class Handler(BaseHTTPRequestHandler):
     def send_file(self, path: Path) -> None:
         ctype = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
         data = path.read_bytes()
-        self.send_response(200)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     # -- routes -------------------------------------------------------------
 
@@ -817,17 +892,23 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         elif path == "/api/state":
             suggestions = model_suggestions()
+            # Status only: the log is tailed incrementally through /api/log,
+            # so never ship log lines here. This endpoint used to send
+            # snapshot(0) - the ENTIRE log - on every poll, which is invisible
+            # for a normal 5-10KB run log but became a ~150KB write per poll
+            # when a misbehaving run wrote 1732 lines in 22 seconds.
             try:
                 adopted = None if CURRENT_JOB else _adopted_job_snapshot(0)
             except Exception:
                 adopted = None
+            job_status = CURRENT_JOB.status_only() if CURRENT_JOB else _status_only(adopted)
             self.send_json({
                 "blueprints": list_blueprints(),
                 "backends": RUNNER_BACKENDS,
                 "efforts": [e for e in REASONING_EFFORTS if e],
                 "model_suggestions": suggestions,
                 "runner_defaults": fast_runner_defaults(suggestions),
-                "job": CURRENT_JOB.snapshot(0) if CURRENT_JOB else adopted,
+                "job": job_status,
             })
         elif path == "/api/lean/status":
             self.send_json(lean_status_payload())
