@@ -770,8 +770,11 @@ def build_command(action: str, p: dict) -> list[str]:
         lean_command = (p.get("lean_command") or "").strip()
         if lean_command:
             cmd += ["--lean-command", lean_command]
-        if p.get("continue_run"):
-            cmd.append("--continue")
+        # Always send the resume decision explicitly. `--continue` is the
+        # pipeline's DEFAULT, so omitting the flag when the box is unchecked
+        # silently resumed anyway and the checkbox did nothing in the "off"
+        # position.
+        cmd.append("--continue" if p.get("continue_run") else "--fresh")
         return cmd
 
     if action == "validate":
@@ -1446,7 +1449,7 @@ const FORMS = {
     <div class="leanbox" id="leanStatus">Lean setup not checked.
       <br><button type="button" onclick="checkLean()">Check Lean setup</button>
     </div>
-    <div class="check"><input type="checkbox" id="f_continue" checked><label for="f_continue">Continue from accepted generated chunks</label></div>
+    <div class="check"><input type="checkbox" id="f_continue" checked><label for="f_continue">Continue from accepted generated chunks <span class="hint">(uncheck = --fresh, deletes frozen statements)</span></label></div>
     ${paperField(false)}
     ${runnerFields('300', true, {
       defaultBackend: runnerDefault('base', 'backend', 'codex'),
@@ -1571,6 +1574,16 @@ async function run(){
   el('error').textContent = '';
   resetProgress();
   const payload = params();
+  if (active === 'refine' && !payload.continue_run) {
+    // --fresh deletes AutoBlueprint/Generated/<Name>/ and skeleton_state.json.
+    // Frozen statements are hours of model time; never discard them silently.
+    const ok = confirm(
+      'Start FRESH?\\n\\nThis deletes all frozen Lean statements and accepted ' +
+      'proofs for "' + (payload.name || '?') + '" and re-runs the whole ' +
+      'blueprint from scratch.\\n\\nLeave "Continue from accepted generated ' +
+      'chunks" checked to resume instead.');
+    if (!ok) return;
+  }
   if (active === 'refine') {
     progress.visible = true;
     const maxTrials = Number(payload.max_trials);
