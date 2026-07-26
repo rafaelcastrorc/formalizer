@@ -1,0 +1,9 @@
+% Vestigial stub kept for fidelity with the canonical leanblueprint layout.
+% It is loaded by NEITHER build: the web build resolves \usepackage{blueprint}
+% to the leanblueprint plasTeX plugin (Packages/blueprint.py), and print.tex
+% never imports it (it gets its no-op macros from macros/print.tex). Editing
+% this file has no effect on either output.
+\DeclareOption*{}
+\ProcessOptions
+
+\newcommand{\graphcolor}[3]{}
