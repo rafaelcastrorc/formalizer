@@ -169,6 +169,11 @@ class Job:
         threading.Thread(target=self._wait, daemon=True).start()
         _update_webui_job_state(self.proc.pid, self.proc.pid, action, self.log_path)
 
+    def _log_control_event(self, message: str) -> None:
+        with contextlib.suppress(Exception):
+            self._stdout_file.write(f"==> webui control: {message}\n")
+            self._stdout_file.flush()
+
     def _wait(self) -> None:
         rc = self.proc.wait()
         self._stdout_file.write(f"==> exit code {rc}\n")
@@ -183,6 +188,10 @@ class Job:
         with self.lock:
             self.status = "stopped"
         try:
+            self._log_control_event(
+                f"sending SIGTERM to job process group {self.proc.pid} "
+                f"(action={self.action}, pid={self.proc.pid})"
+            )
             os.killpg(self.proc.pid, signal.SIGTERM)
         except ProcessLookupError:
             return
@@ -190,6 +199,9 @@ class Job:
             self.proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             try:
+                self._log_control_event(
+                    f"job process group {self.proc.pid} ignored SIGTERM for 10s; sending SIGKILL"
+                )
                 os.killpg(self.proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
@@ -283,6 +295,19 @@ def _update_webui_job_state(job_pid: int, job_pgid: int, action: str, log_path: 
     _merge_webui_state(updates)
 
 
+def _append_job_control_log(log_path: str | Path | None, message: str) -> None:
+    if not log_path:
+        return
+    try:
+        path = Path(log_path)
+        if not path.is_absolute():
+            path = REPO_ROOT / path
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(f"==> webui control: {message}\n")
+    except OSError:
+        pass
+
+
 def _clear_webui_job_state(job_pid: int | None = None) -> None:
     state = _read_webui_state()
     if state.get("pid") != os.getpid():
@@ -315,6 +340,11 @@ def _clear_webui_state() -> None:
 
 def _kill_process_group(pgid: int, label: str, *, timeout: float = 10.0) -> bool:
     print(f"==> stopping {label} process group {pgid}")
+    state = _read_webui_state()
+    _append_job_control_log(
+        state.get("job_log"),
+        f"sending SIGTERM to process group {pgid} via _kill_process_group ({label})",
+    )
     try:
         os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
@@ -327,6 +357,10 @@ def _kill_process_group(pgid: int, label: str, *, timeout: float = 10.0) -> bool
             return True
         time.sleep(0.1)
     print(f"==> {label} process group {pgid} did not exit; killing")
+    _append_job_control_log(
+        state.get("job_log"),
+        f"process group {pgid} ignored SIGTERM for {timeout:.1f}s; sending SIGKILL ({label})",
+    )
     try:
         os.killpg(pgid, signal.SIGKILL)
     except ProcessLookupError:
@@ -458,6 +492,11 @@ def _stop_recorded_job() -> bool:
     if not _pid_is_running(job_pid) or not _recorded_job_matches(job_pid):
         return False
     try:
+        _append_job_control_log(
+            state.get("job_log"),
+            f"sending SIGTERM to recorded job process group {job_pgid} "
+            f"(job_pid={job_pid}, requested through /api/stop without live Job object)",
+        )
         os.killpg(job_pgid, signal.SIGTERM)
     except ProcessLookupError:
         return False
@@ -737,8 +776,8 @@ def build_command(action: str, p: dict) -> list[str]:
                     raise ValueError("section size must be a positive number")
                 cmd += ["--section-size", section_size]
             proof_order = str(p.get("proof_order") or "top-down").strip()
-            if proof_order not in {"top-down", "parallel"}:
-                raise ValueError("proof order must be top-down or parallel")
+            if proof_order not in {"top-down", "bottom-up"}:
+                raise ValueError("refinement order must be top-down or bottom-up")
             cmd += ["--proof-order", proof_order]
             escalation_runner = runner_spec_from(
                 p,
@@ -1244,15 +1283,55 @@ function stageFromLine(line){
   if ((m = line.match(/==> validate [^:]+: ok/))) return 'Validate blueprint';
 
   // Fast statements-first pipeline.
-  if ((m = line.match(/==> Phase 1: freezing statements for (\d+) node\(s\) \((\d+) already frozen\)/))) {
-    return `Phase 1 · freeze statements (${m[2]}/${Number(m[1]) + Number(m[2])} frozen)`;
+  if ((m = line.match(/==> Initial declaration pass: creating boilerplate for (\d+) node\(s\) \((\d+) declarations already available\)/))) {
+    return `Initial pass · boilerplate (${m[2]}/${Number(m[1]) + Number(m[2])} available)`;
+  }
+  if ((m = line.match(/==> Initial declaration pass: stating (\d+) node\(s\) in one call/))) {
+    return `Initial pass · generate declarations (${m[1]} nodes)`;
+  }
+  if ((m = line.match(/==> Initial declaration pass: generating one complete provisional Lean environment for (\d+) node\(s\)/))) {
+    return `Initial pass · complete environment (${m[1]} nodes)`;
+  }
+  if ((m = line.match(/==> Initial declaration pass: creating one complete boilerplate file for (\d+) node\(s\)/))) {
+    return `Initial pass · boilerplate file (${m[1]} nodes)`;
+  }
+  if ((m = line.match(/==> Initial declaration pass attempt (\d+)\/2/))) {
+    return `Initial pass · whole-environment attempt ${m[1]}/2`;
+  }
+  if (line.includes('Initial Lean skeleton complete')) {
+    return 'Initial pass · boilerplate complete';
+  }
+  if ((m = line.match(/==> Phase 1: added (\d+) provisional name\(s\) introduced by blueprint repair/))) {
+    return `Phase 1 · add repaired helper names (${m[1]})`;
+  }
+  if ((m = line.match(/==> Phase 1: refining statements (top-down|bottom-up) for (\d+) node\(s\) \((\d+) already frozen\)/))) {
+    return `Phase 1 · ${m[1]} statements (${m[3]}/${Number(m[2]) + Number(m[3])} frozen)`;
+  }
+  if ((m = line.match(/==> Phase 1: refining top-down statement layer (\d+) \((\d+) node\(s\)\)/))) {
+    return `Phase 1 · statement frontier ${m[1]} (${m[2]} nodes)`;
+  }
+  if ((m = line.match(/==> Phase 1: refining bottom-up statement layer (\d+) \((\d+) node\(s\)\)/))) {
+    return `Phase 1 · dependency frontier ${m[1]} (${m[2]} nodes)`;
+  }
+  if ((m = line.match(/==> Phase 1: generating exact statements for (\d+) provisional declaration\(s\)/))) {
+    return `Phase 1 · generate exact statements (${m[1]} nodes)`;
   }
   if ((m = line.match(/==> Skeleton section (\d+): (\d+) node\(s\)/))) {
     return `Phase 1 · skeleton section ${m[1]} (${m[2]} nodes)`;
   }
+  if ((m = line.match(/==> Initial declaration section (\d+): (\d+) node\(s\)/))) {
+    return `Initial pass · section ${m[1]} (${m[2]} nodes)`;
+  }
+  if ((m = line.match(/==> Initial declaration retry (\d+)\/(\d+):/))) {
+    return `Initial pass · retry ${m[1]}/${m[2]}`;
+  }
   if ((m = line.match(/==> Model call: ([a-z_]+) \((\d+) node\(s\), timeout (\d+)s/))) {
     const purpose = {
+      initial_declaration_generation: 'initial declaration generation',
       skeleton_generation: 'skeleton generation',
+      skeleton_design_pass: 'skeleton design',
+      phase1_design_plan: 'Phase 1 statement plan',
+      phase1_statement_generation: 'Phase 1 statement generation',
       skeleton_declaration_patch: 'skeleton patch',
       statement_audit: 'statement audit',
       proof_batch: 'proof batch',
@@ -1267,14 +1346,27 @@ function stageFromLine(line){
   if (line.includes('lean rejected skeleton section')) return 'Phase 1 · Lean skeleton check';
   if (line.includes('alignment audit rejected statements')) return 'Phase 1 · statement alignment audit';
   if ((m = line.match(/section (\d+) frozen/))) return `Phase 1 · section ${m[1]} frozen`;
+  if ((m = line.match(/section (\d+) provisioned/))) return `Initial pass · section ${m[1]} provisioned`;
+  if (line.includes('Phase 1 froze')) return 'Phase 1 · statement contracts frozen';
+  if (line.includes('Phase 1 integration recheck') || line.includes('Phase 1 integration gate')) return 'Phase 1 · integration recheck';
+  if ((m = line.match(/==> Phase 2: implementing deferred bodies for top-down frontier (\d+) \((\d+) node\(s\)\) with (\d+) worker\(s\)/))) {
+    return `Phase 2 · root-first frontier ${m[1]} (${m[2]} nodes, ${m[3]} workers)`;
+  }
+  if ((m = line.match(/==> Phase 2: implementing deferred bodies for bottom-up frontier (\d+) \((\d+) node\(s\)\) with (\d+) worker\(s\)/))) {
+    return `Phase 2 · dependency-first frontier ${m[1]} (${m[2]} nodes, ${m[3]} workers)`;
+  }
   if ((m = line.match(/==> Phase 2: filling proofs for top-down frontier (\d+) \((\d+) node\(s\)\) with (\d+) worker\(s\)/))) {
     return `Phase 2 · root-first frontier ${m[1]} (${m[2]} nodes, ${m[3]} workers)`;
+  }
+  if ((m = line.match(/==> Phase 2: filling proofs for bottom-up frontier (\d+) \((\d+) node\(s\)\) with (\d+) worker\(s\)/))) {
+    return `Phase 2 · dependency-first frontier ${m[1]} (${m[2]} nodes, ${m[3]} workers)`;
   }
   if ((m = line.match(/==> Phase 2: filling proofs for (\d+) section\(s\) with (\d+) worker\(s\)/))) {
     return `Phase 2 · fill proofs (${m[1]} sections, ${m[2]} workers)`;
   }
   if (line.includes('tactic ladder closed') || line.includes('tactic ladder crashed')) return 'Phase 2 · tactic ladder';
   if (line.includes('batch timed out; reducing batch size')) return 'Phase 2 · resize proof batch';
+  if (line.includes('accepted ') && line.includes(' implementation(s)')) return 'Phase 2 · implementation accepted';
   if (line.includes('accepted ') && line.includes(' proof(s)')) return 'Phase 2 · proof accepted';
   if (line.includes('Final from-scratch Lean check')) return 'Final Lean check';
 
@@ -1435,26 +1527,26 @@ const FORMS = {
     <select id="f_name">${bpSelect()}</select>
     <div class="check"><input type="checkbox" id="f_fast" checked><label for="f_fast">Fast statements-first pipeline (recommended; uncheck for the legacy per-chunk loop)</label></div>
     <div class="hint">Model preset: ${esc((state.runner_defaults && state.runner_defaults.source) || 'local Codex fallback')}.</div>
-    <label>Parallel proof workers (fast pipeline only)</label>
+    <label>Parallel proof workers (Phase 2)</label>
     <input type="number" id="f_workers" value="3" min="1">
-    <label>Proof traversal (fast pipeline only)</label>
+    <label>Refinement traversal (Phase 1 and Phase 2)</label>
     <select id="f_proof_order">
-      <option value="top-down" selected>Root-first, then dependency frontiers (recommended)</option>
-      <option value="parallel">All frozen sections in parallel (previous behavior)</option>
+      <option value="top-down">Top down: roots to dependencies (initial pass required)</option>
+      <option value="bottom-up" selected>Bottom up: dependencies to roots (no initial pass)</option>
     </select>
     <label>Skeleton section size (fast pipeline only; statements per Phase-1 call — shrinks automatically on timeouts)</label>
-    <input type="number" id="f_section_size" value="24" min="1">
+    <input type="number" id="f_section_size" value="12" min="1">
     <label>Max blueprint-repair trials</label>
-    <input type="number" id="f_trials" value="8" min="1">
+    <input type="number" id="f_trials" value="100" min="1">
     <div class="leanbox" id="leanStatus">Lean setup not checked.
       <br><button type="button" onclick="checkLean()">Check Lean setup</button>
     </div>
-    <div class="check"><input type="checkbox" id="f_continue" checked><label for="f_continue">Continue from accepted generated chunks <span class="hint">(uncheck = --fresh, deletes frozen statements)</span></label></div>
+    <div class="check"><input type="checkbox" id="f_continue" checked><label for="f_continue">Continue unpublished refinement <span class="hint">(reuses the blueprint draft, frozen statements, and accepted proofs)</span></label></div>
     ${paperField(false)}
     ${runnerFields('300', true, {
       defaultBackend: runnerDefault('base', 'backend', 'codex'),
       defaultEffort: runnerDefault('base', 'effort', 'medium'),
-      defaultModel: runnerDefault('base', 'model', 'gpt-5')
+      defaultModel: runnerDefault('base', 'model', 'gpt-5.5')
     })}
     <div id="fastEscalationFields">${escalationRunnerFields()}</div>
     <label>Lean command override (optional)</label>
@@ -1575,13 +1667,13 @@ async function run(){
   resetProgress();
   const payload = params();
   if (active === 'refine' && !payload.continue_run) {
-    // --fresh deletes AutoBlueprint/Generated/<Name>/ and skeleton_state.json.
-    // Frozen statements are hours of model time; never discard them silently.
+    // --fresh discards both unpublished TeX and generated Lean state.
+    // Either may represent hours of work; never discard them silently.
     const ok = confirm(
-      'Start FRESH?\\n\\nThis deletes all frozen Lean statements and accepted ' +
-      'proofs for "' + (payload.name || '?') + '" and re-runs the whole ' +
-      'blueprint from scratch.\\n\\nLeave "Continue from accepted generated ' +
-      'chunks" checked to resume instead.');
+      'Start FRESH?\\n\\nThis discards the unpublished blueprint draft, all ' +
+      'frozen Lean statements, and accepted proofs for "' +
+      (payload.name || '?') + '". The published blueprint is unchanged.\\n\\n' +
+      'Leave "Continue unpublished refinement" checked to resume instead.');
     if (!ok) return;
   }
   if (active === 'refine') {

@@ -183,22 +183,41 @@ Rules for content_tex:
 """
 
 
-def _agent_prompt(paper_text: str, *, requested_name: str | None, source_label: str) -> str:
+def _agent_prompt(
+    paper_text: str,
+    *,
+    requested_name: str | None,
+    source_label: str,
+    force: bool = False,
+    no_build: bool = False,
+) -> str:
     name_part = f"Use this blueprint name unless it is invalid: {requested_name}\n" if requested_name else ""
+    scaffold_force = " --force" if force else ""
+    replacement_rule = (
+        "The user explicitly requested replacement. The scaffold command MUST include "
+        "`--force`; do not retain or validate the old folder.\n"
+        if force
+        else "Do not replace an existing blueprint folder.\n"
+    )
+    build_step = (
+        "6. Do not build the site; the user requested validation only.\n"
+        if no_build
+        else "6. Run `python scripts/build.py <name>`.\n"
+    )
     return f"""TASK: GENERATE-BLUEPRINT-IN-REPO
 
 Generate a blueprint in this Auto-Blueprint repo from the paper below.
 
 {name_part}Source: {source_label}
+{replacement_rule}
 
 Follow the paper-to-blueprint context exactly. In particular:
 1. Pick/validate a lowercase URL-safe blueprint name.
-2. Run `python scripts/new_blueprint.py <name> --title ... --description ...`.
+2. Run `python scripts/new_blueprint.py <name> --title ... --description ...{scaffold_force}`.
 3. Overwrite `blueprints/<name>/blueprint/src/content.tex`.
 4. Update title/author/home in web.tex and print.tex.
 5. Run `python scripts/validate_blueprint.py <name>`.
-6. Run `python scripts/build.py <name>`.
-7. Fix validation/build issues before finishing.
+{build_step}7. Fix validation/build issues before finishing.
 
 At the end, report the blueprint name, node count, warnings/TODOs, and build
 status. Do not commit changes.
@@ -312,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paper", help="PDF/text path, URL, or pasted paper text")
     parser.add_argument("--name", help="Blueprint folder/URL name")
-    parser.add_argument("--runner", default="codex", help="Runner spec, e.g. codex, claude-code, openai:gpt-5")
+    parser.add_argument("--runner", default="codex:gpt-5.5", help="Runner spec, e.g. codex, claude-code, openai:gpt-5")
     parser.add_argument(
         "--reasoning-effort",
         choices=("low", "medium", "high", "xhigh"),
@@ -348,7 +367,13 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
         result = runner.run(
-            _agent_prompt(paper_text, requested_name=args.name, source_label=source_label),
+            _agent_prompt(
+                paper_text,
+                requested_name=args.name,
+                source_label=source_label,
+                force=args.force,
+                no_build=args.no_build,
+            ),
             cwd=REPO_ROOT,
             retries=0,
         )

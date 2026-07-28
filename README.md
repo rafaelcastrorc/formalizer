@@ -298,64 +298,152 @@ The blueprint is still the only source of truth and Lean is still the critic;
 this pipeline changes *when* model calls happen and how much each one does, so
 a 150-node paper takes tens of model calls instead of hundreds:
 
-1. **Phase 1 — skeleton.** Each wave opens with a two-stage **design pass**.
-   First a cheap *plan* call fixes the shared vocabulary: the model sees every
-   pending node plus the public roots (theorem-like nodes nothing else depends
-   on) and returns one signature line per node — no bodies, no proofs — after
-   reasoning *root-first*, deciding what each public result needs in order to
-   be a non-trivial claim and letting that determine the shape of everything
-   beneath it. Designing each definition in isolation from its consumers is
-   what produces contradictory foundations (a class defined as a subset of the
-   very set a theorem is meant to prove it equals), so the plan also records
-   the decisions a section writer could otherwise get wrong. The plan is short
-   enough to be injected into **every** later skeleton prompt, including the
-   per-section fallback, so all sections transcribe one agreed design instead
-   of re-deriving it. Statements are then emitted in section-sized chunks —
-   transcription rather than design, which keeps each call inside its budget —
-   split into sections deterministically, and put through the normal gates
-   below. Anything a chunk fails to deliver or freeze falls back to the
-   per-section loop, so the worst case is the previous behaviour plus one or
-   two calls.
-   That per-section loop generates one Lean declaration per
-   blueprint node, ~24 nodes per call, in dependency order: real bodies for
-   definition nodes, `:= sorry` proofs for theorem-like nodes. Each section is
-   compiled locally. Lean compile errors are mapped back to their declarations
-   and patched in place before any semantic model audit is called. The
-   blueprint-contract audit (deterministic coverage checks plus one batched
-   model audit per section) therefore runs only on compiling statements and
-   proof obligations **before** any proof effort is spent. If Lean, a
-   deterministic check, or the semantic audit isolates only a few bad
-   declarations inside an otherwise useful section, Phase 1 asks for
-   replacements for those declarations only, then recompiles and audits the
-   whole section again. Every section is a bounded transaction: one base-tier
-   generation attempt plus at most one fresh escalated attempt, with exactly
-   one targeted patch per stage (deterministic findings, Lean compile) and one
-   escalated correction plus one re-audit after a semantic-audit rejection —
-   anything the second attempt cannot land routes to blueprint repair instead
-   of further Lean variants. A Lean failure isolated to a proper subset splits
-   that subset out so healthy declarations freeze on their own, and both
-   `NEEDS-DECOMPOSITION` refusals and compile isolations practice partial
-   delivery: declarations the model already produced for the healthy nodes
-   are re-checked and frozen directly instead of being regenerated, and the
-   deliverable parts run before the refused one so their work survives the
-   repair. Every blueprint environment kind outside the definition-like set
-   (including custom `\newtheorem` environments such as `claim`) is treated
-   as theorem-like — stated as a `theorem` ending in `:= sorry`; partial
-   tactic proofs are rejected deterministically, and the statement-phase
-   audit is told explicitly that deferred `sorry` proofs are the convention,
-   never a defect. Resumed sessions are discarded between the two tiers, a
-   repeated byte-identical prompt/response exchange is detected before the
-   pipeline pays to compile and request it again, and a timed-out CLI call
-   hands its session id to the retry, which resumes the paid-for exploration
-   instead of restarting cold (claude-code and codex, best-effort).
-   Accepted statements are frozen: later phases can only
-   replace `sorry` bodies — the harness splices proofs into the frozen file
-   itself, so a model cannot silently reshape a statement.
+Blueprint repair is transactional. The published source under
+`blueprints/<name>/` is copied to
+`.auto-blueprint/formalization/<name>/blueprint-draft/`, and every model repair,
+structural validation, statement audit, and Lean generation reads that
+unpublished draft. A stopped or exhausted run leaves the published blueprint
+unchanged. `--continue` resumes both the draft and compatible generated Lean
+state; `--fresh` discards both and starts from the published blueprint. Only a
+complete final Lean check and correctness audit atomically promote the draft's
+`content.tex` into the published blueprint.
+
+Every model-produced Lean response first crosses one canonical ingestion
+boundary. Models provide declaration content, but the pipeline owns the module:
+it extracts declarations, removes balanced response-only namespace/section
+wrappers, allowlists imports and preamble commands, normalizes every
+theorem-like blueprint node to Lean's `theorem` command, rejects duplicate
+declaration names, and assigns adjacent local helpers to a blueprint-node
+owner. Only the reconstructed canonical module may be saved, merged, compiled,
+or used as repair evidence. The same boundary is used by the initial pass,
+Phase 1 generation and patches, timeout/refusal salvage, and Phase 2 body
+implementation responses. Consequently, formatting mistakes cannot be persisted and later
+charged to an unrelated blueprint node.
+
+The fast pipeline has two real traversal modes. `--proof-order top-down` runs
+both phases from public roots toward dependencies. `--proof-order bottom-up`
+runs both phases from dependency leaves toward roots. `--workers` controls
+parallel Phase 2 calls and, in bottom-up Phase 1, concurrent compilation and
+correction of independent groups or routed fragments in one dependency layer.
+
+Before either Phase 1 traversal starts, one shared root-first planning stage
+fixes the intended Lean contract vocabulary across the pending graph. This is
+not a third traversal and does not generate declarations or proofs: top-down
+still refines roots first, and bottom-up still compiles dependencies first.
+Ordinary graphs fit in one model call; only graphs above 120 pending nodes use
+a small number of bounded planning calls rather than one oversized prompt.
+The plan prevents each local generation batch from independently redesigning
+the same interfaces. Plan entries are stored per blueprint node with that
+node's statement fingerprint. A blueprint repair therefore replans only the
+changed entries, while unchanged entries survive later waves and `--continue`.
+Generation prompts receive only the plan entries for their targets, direct
+dependencies, and direct consumers rather than the full graph-wide plan.
+
+1. **Initial declaration pass — top-down only, boilerplate only.** Create one complete
+   provisional Lean file containing a declaration for every non-Mathlib
+   blueprint node. The sole purpose of this pass is to ensure that all
+   lower-level Lean names and boilerplate already exist before Phase 1 starts
+   working from the roots downward. Placeholder bodies and `sorry` are allowed
+   because nothing produced here is accepted mathematics. This pass runs once
+   over the complete blueprint. It does not split the graph into chunks,
+   generate proofs, refine statements, audit mathematical alignment, edit the
+   blueprint, or iteratively repair compilation errors.
+
+   Bottom-up mode skips this pass because each dependency is frozen before a
+   consumer is stated.
+
+2. **Phase 1 — statement and interface refinement in the selected direction.**
+   Top-down starts at public roots, traverses the existing `\uses` graph toward
+   dependencies, and replaces provisional boilerplate. Bottom-up starts at
+   dependency leaves and creates exact audited sections directly, climbing
+   toward consumers without provisional whole-graph declarations. Every frontier
+   begins with this statement-generation transaction; stage-zero placeholders
+   are never audited or used as evidence for blueprint repair. Compilation
+   errors caused by provisional interfaces are resolved here, not in the
+   initial pass. If compiling a root exposes a malformed lower provisional
+   declaration, Phase 1 repairs only that lower declaration's header/interface,
+   keeps its body or proof provisional with `sorry`, and then retries the
+   original root. The lower node is not marked refined by this scaffolding
+   repair; it is still replaced and audited when traversal reaches its own
+   Phase 1 frontier. Compiler diagnostics are attributed to their owning
+   declaration and are never assigned to the current root merely because the
+   complete provisional file was being checked. Each refined contract must
+   pass deterministic coverage and local Lean compilation before it becomes a
+   temporary candidate. Statement-generation and correction prompts contain
+   only the exact generated interfaces required by their direct dependencies,
+   plus the generated names referenced by those interfaces. A deterministic
+   name-set check prevents dispatch if that compact context is incomplete;
+   unrelated frozen modules are not copied into the prompt. Bottom-up mode stages all candidates in the current
+   dependency layer, verifies that their modules import together, and sends the
+   complete layer through one batched read-only blueprint-contract audit.
+   Candidate generation and routed compile-failure fragments run concurrently
+   up to `--workers`; no candidate counts as frozen until that layer gate accepts
+   it. If the critic rejects only part of the layer as a Lean translation
+   problem, only the rejected declarations are scheduled again. Audit batching
+   never merges retry history: every node retains the model tier that produced
+   its candidate, its statement fingerprint, failure count, and rejection
+   evidence. A rejected base-tier statement is isolated and its next attempt
+   starts at the escalation tier even when several independent candidates were
+   audited together. If that exact statement version is rejected again after
+   escalation, it cannot silently restart at the base tier; it enters the
+   existing bounded blueprint repair/decomposition path. Acceptance or a
+   blueprint statement change clears the lifecycle. Evidence that
+   a section is only partially rejected does not discard its accepted
+   siblings: their declarations are extracted into a smaller module and must
+   pass deterministic checks and Lean compilation again before they are
+   retained. Extraction failure falls back to regeneration of that section.
+   Deterministic audit failures use the same narrow transaction boundary. When
+   every finding is attributable to a proper subset of a generated section,
+   the unaffected declarations are extracted and independently rechecked, and
+   only the rejected statement versions are regenerated. A genuinely
+   file-level finding, or a failure covering the entire section, keeps the
+   whole-section retry because no smaller ownership claim is justified.
+   Lean-generation retry scope is selected by one provider-neutral policy used
+   in both phases: an attributable proper subset is isolated, an unresolved
+   multi-node unit is bisected, and only a singleton may reach the configured
+   escalation runner. When a batched audit contains multiple independently
+   generated failures, its verdict is mapped back to those original singleton
+   units instead of treating the audit batch as a new indivisible failure.
+   A rejected declaration is retained as a statement-fingerprinted revision
+   candidate. Its next model call receives both that exact Lean declaration
+   and the compiler/critic evidence, so escalation edits the existing candidate
+   instead of recreating it from an empty file. Candidate text is
+   runner-independent, survives `--continue`, and is cleared only after
+   acceptance or when a blueprint edit changes that statement's fingerprint.
+   It remains untrusted and passes every normal deterministic, Lean,
+   integration, and semantic-audit gate again.
+   Existing blueprint-repair and confirmed-decomposition classifications bypass
+   this scope policy unchanged.
+   Evidence that
+   the blueprint contract itself is inadequate routes to
+   the bounded blueprint-repair path. After lower contracts settle, recompile
+   the integrated environment so higher contracts cannot retain stale
+   interfaces. Phase 2 may replace terminal `sorry` bodies, but it cannot
+   silently reshape a frozen statement.
+
+   Every blueprint environment kind outside the definition-like set (including
+   custom `\newtheorem` environments such as `claim` or `corollary`) is emitted
+   using Lean's `theorem` command and keeps a terminal `:= sorry` until Phase 2.
+   Definition-like nodes freeze an exact typed `def`/`abbrev` header with a
+   deferred terminal body; structures and inductives instead freeze their exact
+   fields or constructors immediately.
+   Model output that spells a declaration as `corollary` is normalized to
+   `theorem` before coverage or compilation, rather than being mistaken for a
+   missing declaration. Resumed sessions are discarded between
+   independent generation chunks; local correction calls may resume their own
+   producer session. Repeated byte-identical exchanges are detected before the
+   pipeline pays to compile and request them again.
    Phase 1 blueprint repairs are also scope-checked deterministically: a repair
    may change the failing node and helper/dependency contracts needed by that
-   node, but downstream consumer contracts are rolled back and retried with
-   narrower instructions. Consumers are rechecked against the repaired
-   interface instead of being rewritten preemptively.
+   node. When decomposition adds a new property/helper node, that new node is
+   accepted only when its `\uses{...}` chain reaches the rejected target; this
+   covers the natural `new property lemma -> original definition` graph
+   direction. Existing downstream consumer contracts are still rolled back and
+   retried with narrower instructions. Consumers are rechecked against the
+   repaired interface instead of being rewritten preemptively. The statement
+   auditor can return `needs_decomposition` with exact missing helper statements,
+   routing the result through the same existing `NEEDS-DECOMPOSITION` repair
+   path instead of repeatedly patching a declaration that must be split.
    Section capacity adapts from observed latency rather than mathematical
    guesses. A genuine batch timeout reduces later batch size; two complete
    batches accepted at the current capacity grow it back exponentially, up to
@@ -367,12 +455,20 @@ a 150-node paper takes tens of model calls instead of hundreds:
    repair that changes the statement automatically releases the old record, so
    `--continue` cannot permanently degrade later sections into one-node
    generation/audit calls. Unchanged failing statements remain isolated.
-   Quarantine and capacity are saved to `skeleton_state.json` immediately
+   Quarantine, retry lifecycle, rejected revision candidates, and capacity are
+   saved to
+   `skeleton_state.json` immediately
    when they change — and after every frozen part of a split section — so a
    killed or quota-limited run resumes with everything it learned; legacy
    label-only quarantine is discarded because it cannot be matched safely to a
-   statement version. This preserves the existing single batched model audit
-   for each section whenever repaired nodes can rejoin a normal section. Every prompt
+   statement version. Successful critic verdicts are cached by the exact
+   blueprint-text/Lean-statement fingerprint for the current run. Regrouping an
+   unchanged declaration after a sibling fails therefore cannot trigger another
+   paid audit. Compiler and audit evidence that crosses the outer Phase-1 loop
+   is persisted per statement fingerprint and inserted into the next generation
+   prompt. It is cleared only when that statement is accepted, and is discarded
+   automatically if blueprint repair changes the statement. Thus an unchanged
+   retry cannot silently receive the same prompt that already failed. Every prompt
    also receives an authoritative dependency table distinguishing generated
    declarations from `\mathlibok` declarations and their settled Lean names.
    Prompts are dependency-sliced so their size scales with the work in the
@@ -383,22 +479,29 @@ a 150-node paper takes tens of model calls instead of hundreds:
    audit calls run with agent-spawning and harness-side tools disabled, and
    every generation prompt carries a write-discipline rule: spend at most
    half the budget exploring, and always emit the requested code.
-2. **Phase 2 — root-first proofs.** The default `--proof-order top-down`
-   scheduler finds theorem-like roots of the blueprint's existing `\uses`
-   graph: public results that are not proof dependencies of another theorem.
-   It proves those roots first against the exact frozen interfaces of their
-   lower theorem dependencies, whose internal skeleton proofs may still be
-   `sorry`. Definitions already have their real bodies. It then walks backward
-   through nearest theorem-dependency frontiers until every `sorry` is gone.
+3. **Phase 2 — bodies and proofs in the same direction as Phase 1.** Phase 1
+   freezes exact declaration headers/interfaces but leaves both theorem proofs
+   and typed `def`/`abbrev` bodies as terminal `sorry`. Phase 2 implements every
+   deferred body in the selected traversal direction. Completed definition
+   bodies receive a read-only semantic audit against their blueprint nodes;
+   compilation alone cannot accept a definition with the right type but wrong
+   meaning. Structure fields and inductive constructors remain Phase-1
+   interfaces because they have no separate body to fill.
    Lower-frontier prompts include the frozen statements and blueprint proof
    contracts of the higher results that consume them, so information flows
    downward without inventing a second graph or creating Lean import cycles.
    At each frontier a deterministic tactic ladder
    (`rfl`/`omega`/`norm_num`/`ring`/`simp`/`aesop`) runs first at zero model
    cost; survivors use batched calls in parallel across owning sections, and
-   only the residue escalates to singleton calls. `--proof-order parallel`
-   preserves the previous all-sections Phase-2 scheduler.
-3. **Repair — evidence only.** A timed-out model call is treated as latency,
+   only the residue escalates to singleton calls. With `--proof-order bottom-up`,
+   dependency bodies are implemented first and the scheduler climbs toward
+   public roots. In both modes, independent nodes in the current frontier may
+   run in parallel according to `--workers`.
+   Phase 2 uses the same failure-scope policy as Phase 1: successful bodies stay
+   committed, a failed subset is retried alone, and a batch that fails as a
+   whole is repeatedly bisected through base-runner rounds before any remaining
+   singleton is sent to the escalation runner.
+4. **Repair — evidence only.** A timed-out model call is treated as latency,
    never as mathematical difficulty: batches are bisected, targeted declaration
    patches are used for small skeleton failures, and singletons are retried at
    higher effort. A base-model skeleton `NEEDS-DECOMPOSITION` response is
@@ -415,11 +518,15 @@ a 150-node paper takes tens of model calls instead of hundreds:
    stay additive — add helper nodes and keep non-target statements unchanged. Only real Lean/audit output, an escalated
    `NEEDS-DECOMPOSITION` refusal, or a statement that cannot even be *stated*
    within two full escalated budgets can trigger a blueprint repair (bounded
-   by `--max-trials`, default 8). If the same Phase-1 section keeps returning
+   by `--max-trials`, default 100). If the same Phase-1 section keeps returning
    to repair after ordinary skeleton fixes, the pipeline performs one
-   constrained section-normalization pass: the escalation runner may rewrite
-   only that stuck section plus immediate helper nodes, the result is validated,
-   and it is rejected/rolled back if it changes too many node contracts. A
+   constrained section-normalization pass. Its editable scope is the exact set
+   of evidence-backed failing contracts plus immediate helper nodes; rejected
+   siblings that have not exhausted their own retry lifecycle are context only
+   and retain their current retry tier. Partially overlapping failure sets are
+   tracked independently rather than unioned into a wider edit scope. The
+   result is validated and rejected/rolled back if it changes unauthorized or
+   too many node contracts. A
    timeout, malformed model response, invalid edit, or rejected normalization
    is rolled back and becomes a bounded no-op/fallback repair; it does not kill
    the run. The formalization loop stops deliberately only when the configured
@@ -431,7 +538,8 @@ a 150-node paper takes tens of model calls instead of hundreds:
    them locally. Reactivation is attempted eagerly after every frozen section,
    not only between waves, so a chain of deferred sections recovers as soon as
    its dependencies refreeze. A descendant is reactivated only if that
-   deterministic check passes; otherwise it returns to Phase 1 generation. Thus proof-prose edits
+   deterministic check passes; otherwise it returns to Phase 1 refinement.
+   Thus proof-prose edits
    cannot silently retain stale Lean, while an interface repair does not force
    model regeneration of every unchanged consumer. Repair telemetry records
    graph distance, added/removed helpers, deferred descendants, deterministic
@@ -448,26 +556,29 @@ final gate, and every declaration corresponds 1-1 to a blueprint node.
 
 Every dependency contract is still enforced: a node whose blueprint entry
 `\uses{...}` another node must visibly use that node's generated Lean name.
-For definitions this is checked when the statement freezes; for theorem-like
-nodes it is checked as soon as the proof exists, and a proof that re-derives a
-dependency inline is rejected.
+It is checked in the frozen interface whenever the dependency belongs there,
+and again in every completed declaration body. An implementation that silently
+re-derives a declared dependency inline is rejected.
 
 Useful flags: `--section-size` (statements per Phase-1 call, default 24),
-`--proof-batch-size` (proofs per Phase-2 call, default 12), `--workers`
-(parallel proof workers, default 3), `--runner` (base runner/model for batched
-calls; when omitted, the CLI uses the same cheap-API-first preset as the Web
+`--proof-batch-size` (deferred bodies per Phase-2 call, default 12), `--workers`
+(parallel Phase-2 implementation workers plus bottom-up Phase-1 routed-fragment
+workers, default 3), `--runner` (base
+runner/model for batched calls; when omitted, the CLI uses the same
+cheap-API-first preset as the Web
 UI), `--reasoning-effort` (codex effort for batched calls, default `medium`),
 `--escalation-runner` (runner/model for singleton retries and blueprint repair;
 when `--runner` is explicitly set, the CLI default is the same runner, otherwise
 it uses the stronger half of the auto preset),
 `--escalation-effort` (codex effort for escalation calls, default `high`),
 `--timeout`/`--hard-timeout` (per-call budgets, defaults 300/600 s),
-`--proof-order` (`top-down` by default, or `parallel` for the previous proof
-scheduler), `--no-ladder`, `--no-build`, `--continue`, and `--fresh`. For non-Codex runners,
+`--proof-order` (`top-down` by default, or `bottom-up`; this controls both
+Phase 1 and Phase 2), `--no-ladder`, `--no-build`, `--continue`, and `--fresh`. For non-Codex runners,
 `--reasoning-effort`/`--escalation-effort` do not change model strength; use
 different `--runner` and `--escalation-runner` model specs instead.
 Continuation is the default. `--continue` states it explicitly; `--fresh` is
-required to discard generated fast-pipeline state. Continuation reloads
+required to discard the unpublished blueprint draft and generated
+fast-pipeline state. Continuation reloads
 `skeleton_state.json`, keeps every section whose file hash, blueprint statement
 fingerprints, and full proof-contract fingerprints still match. Unchanged
 descendants of a stale dependency are loaded as deferred cache candidates and
@@ -514,41 +625,56 @@ Fast pipeline diagram:
 
 ```mermaid
 flowchart TD
-    A["Existing blueprint"] --> B["Validate blueprint structure"]
-    B --> C["Plan dependency-ordered sections from the uses graph"]
-    C --> BP0["Phase 1 design plan: fix the shared vocabulary root-first (signatures only)"]
-    BP0 --> BP["Emit statements in section-sized chunks against the plan"]
-    BP --> D["Phase 1: per-section generation for anything the chunks missed (plan included)"]
-    BP -->|Delivered declarations| E
-    D --> E["Compile skeleton section locally with theorem-like proofs as sorry"]
-    E -->|Few declaration errors| EP["Patch once: only compiler-identified declarations"]
-    EP --> E
-    E -->|Failing subset isolated| ES["Split subset out; freeze delivered healthy declarations directly"]
-    ES --> E
-    E -->|Whole-section failure| D
-    E -->|Compiles| F["Statement gate: blueprint-contract audit before proof work"]
-    F --> G["Deterministic coverage and dependency checks"]
-    G --> H["Read-only critic compares blueprint nodes to frozen Lean statements"]
+    A["Published blueprint"] --> AD["Create or resume unpublished blueprint draft"]
+    AD --> B["Validate draft blueprint structure"]
+    B --> T{"Traversal mode"}
+    T -->|Top down| P0["Initial pass model emits provisional declarations for every generated Lean name"]
+    P0 --> C0["Canonical ingestion: pipeline rebuilds the boilerplate module and assigns ownership"]
+    C0 --> BP0["Shared Phase 1 planning call fixes graph-wide contract decisions root-first"]
+    T -->|Bottom up| BP0
+    BP0 -->|Top-down traversal| D["Model refines current root/dependency statement frontier"]
+    D --> TDC["Canonical ingestion, deterministic checks, and local Lean compilation"]
+    TDC --> TDH["Read-only critic checks the refined top-down contract group"]
+    TDH -->|Statement matches blueprint| I
+    TDH -->|Node needs separate declaration-level helpers| ND
+    TDH -->|Blueprint contract itself is incomplete| R
+    BP0 -->|Bottom-up traversal| BU["Phase 1: generate exact statements for the next dependency-first frontier"]
+    BU --> C1["Canonical ingestion: normalize declarations, helpers, imports, and module shape"]
+    C1 --> G["Deterministic coverage and local Lean compilation"]
+    G --> PG["Stage compiled candidates for the current dependency layer"]
+    PG --> PA["Run independent groups and routed fragments in parallel"]
+    PA --> IG["Import candidates together in one deterministic layer gate"]
+    IG --> H["One read-only critic call compares the whole layer with its blueprint nodes"]
+    H -->|Lean translation issue| RT{"Per-node producing tier"}
+    RT -->|Base candidate| ES["Keep node isolated; revise the rejected candidate with its evidence at escalation tier"]
+    ES --> PG
+    RT -->|Escalated candidate| R
     H -->|Statement matches blueprint| I["Freeze accepted statements"]
-    H -->|Statement cannot represent blueprint faithfully| R["Author model repairs blueprint source"]
+    H -->|Node needs separate declaration-level helpers| ND["Existing NEEDS-DECOMPOSITION route"]
+    H -->|Blueprint contract itself is incomplete| R["Author model repairs unpublished blueprint draft"]
+    ND --> R
     R --> RV["Revalidate repaired blueprint structure"]
     RV --> RC["Mark changed contracts for regeneration; defer unchanged descendants"]
-    RC --> D
-    I --> RR["Rebind imports and recompile deferred Lean locally — eagerly, after every frozen section"]
-    RR -->|Passes| J
-    RR -->|Fails| D
-    I --> J["Phase 2: find public theorem roots in the existing uses graph"]
-    J --> K["Prove current root/dependency frontier against frozen lower interfaces"]
-    K --> L["Batched proof model calls for remaining proofs"]
-    L --> M["Singleton escalation for residue"]
-    M --> N["Advance backward to the next theorem-dependency frontier"]
-    N -->|Lower theorem sorries remain| K
+    RC --> PN["Phase 1 inserts provisional names for any newly added helpers"]
+    PN --> D
+    I --> N1["Advance Phase 1 in the selected graph direction"]
+    N1 -->|Unrefined contracts remain| D
+    N1 -->|All contracts frozen| RR["Recompile the complete integrated statement environment"]
+    RR -->|Higher contract became stale| D
+    RR -->|Passes| J["Phase 2: select the next deferred-body frontier in the same traversal direction"]
+    J --> K["Implement theorem proofs and definition bodies against frozen interfaces"]
+    K --> L["Batched body-implementation model calls"]
+    L --> C2["Canonical ingestion: extract tactic bodies by frozen declaration owner"]
+    C2 --> M["Singleton escalation for residue"]
+    M --> N["Advance Phase 2 in the selected graph direction"]
+    N -->|Deferred bodies remain| K
     N -->|No sorries remain| V["Run strict correctness audit: no sorry, axioms, vacuous True proofs"]
     V -->|Proof failed but statement is still valid| K
     V -->|Blueprint evidence from real Lean/audit output| R
     V -->|All proofs accepted| O["Assemble formalization.lean"]
     O --> P["Final from-scratch Lean check"]
-    P --> Q["Publish Lean file and rebuild blueprint page"]
+    P --> Q["Atomically promote blueprint draft and publish Lean file"]
+    Q --> QB["Rebuild blueprint page"]
 ```
 
 ## Legacy Lean-Guided Refinement (per-chunk loop)
@@ -815,12 +941,14 @@ publish the file.
 
 The generation call constructs its runner with `readonly=True`. API backends
 (`anthropic`, `openai`, `mock`) are read-only by construction because they only
-return text. `claude-code` hard-blocks shell and edit tools in this mode. `codex`
-uses a `read-only` sandbox, which prevents repo writes but may still allow
-read-only shell commands depending on the local Codex CLI; external timeouts,
-audits, and the no-stale-attempt cleanup are therefore still part of the safety
-model. The prompt tells the model not to compile or run Lean itself: the model
-writes one Lean file as its reply, and this script performs the compile check.
+return text and receive no tool definitions. `claude-code` disables all built-in
+tools and hard-blocks file inspection, shell, editing, web, task, and harness
+tools supplied by settings. `codex` uses a `read-only` sandbox and disables its
+shell, unified-execution, and code-mode execution features for fresh and resumed
+generation/audit calls. Every backend therefore returns text only, and this
+script performs repository inspection, library search, and compilation.
+External timeouts, audits, and no-stale-attempt cleanup remain part of the
+safety model.
 Attempts are asked to import only the specific Mathlib modules they need rather
 than the blanket `import Mathlib`, which keeps each compile check to seconds
 instead of minutes. The repair step keeps normal repo access, since it must edit
@@ -919,7 +1047,7 @@ The telemetry is raw observation data, not guessed labels. It stores:
   mentions;
 - root-first graph features: whether a theorem is a public root, its proof
   depth, nearest theorem dependencies, theorem consumers, each scheduled
-  frontier, and the unresolved-proof count before and after that frontier;
+  frontier, and the unresolved-body count before and after that frontier;
 - pre-refinement decomposition candidates, heuristic reasons, model
   prompt/response artifacts, changed nodes, node counts before/after, and
   whether the candidate actually changed in the repaired blueprint;
@@ -928,17 +1056,33 @@ The telemetry is raw observation data, not guessed labels. It stores:
   backend, duration, status, and error if it failed;
 - Lean attempt source, Lean output, compile status, imports, and duration;
 - statement-audit outcomes, rejected labels, and routing classification;
+- layer-level Phase 1 candidate/freeze/rejection events, parallel fragment
+  routing, corrected and discarded labels, and exact statement-audit cache hits;
+- Phase 2 frontier composition split into theorem proofs and definition bodies,
+  plus semantic audit outcomes for completed definition bodies;
 - blueprint-repair outcomes, changed nodes, graph distance from repair targets,
   downstream scope rollbacks, added/removed helpers, deferred unchanged
   descendants, deterministic recompile outcomes, and nodes that genuinely
   required regeneration;
 - compiler-targeted skeleton patches, conditionally accepted root proofs and
   the exact lower dependency interfaces still admitted when they passed;
+- bounded compiler-feedback retries for non-compiling semantic statement
+  corrections, including their affected labels and acceptance outcome;
 - duplicate skeleton prompt/response exchanges and singleton compile
   escalations, including the affected labels and normalized Lean error shape;
 - quarantine creation/release evidence, including the statement fingerprint,
   failure class, and whether continuation released an old label-only record or
   a blueprint edit changed the statement version.
+- persisted Phase-1 retry evidence, its statement fingerprints, later prompt
+  injection, and deterministic proper-subset isolation/retention outcomes.
+- persisted rejected Phase-1 candidate declarations, whether the next
+  correction call reused them, and the statement fingerprint governing reuse.
+- shared Lean-generation failure-scope decisions from both phases, including
+  stage, action (`isolate`, `bisect`, `singleton`, or `independent`), requested/failed/accepted
+  labels, resulting part sizes, and the associated model/compiler outcome.
+- per-node retry lifecycle transitions, including statement fingerprint,
+  producing tier, previous/next state, failure count, evidence hash, and the
+  candidate-tier map used to separate provenance after a batched layer audit.
 
 The point is to let a later training pipeline derive labels from observed
 outcomes. For example, a classifier can learn from “this decision later accepted
@@ -1050,8 +1194,14 @@ That writes:
 .auto-blueprint/telemetry/datasets/repair_examples.jsonl
 .auto-blueprint/telemetry/datasets/pre_decomposition_examples.jsonl
 .auto-blueprint/telemetry/datasets/fast_run_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_initial_declaration_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_phase1_statement_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_phase1_integration_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_phase1_layer_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_phase1_design_plan_examples.jsonl
 .auto-blueprint/telemetry/datasets/fast_skeleton_examples.jsonl
 .auto-blueprint/telemetry/datasets/fast_statement_audit_examples.jsonl
+.auto-blueprint/telemetry/datasets/fast_definition_body_audit_examples.jsonl
 .auto-blueprint/telemetry/datasets/fast_tactic_ladder_examples.jsonl
 .auto-blueprint/telemetry/datasets/fast_proof_attempt_examples.jsonl
 .auto-blueprint/telemetry/datasets/fast_proof_section_examples.jsonl

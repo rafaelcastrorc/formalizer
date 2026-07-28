@@ -12,10 +12,11 @@ Two runner modes matter:
 * ``mode = "api"``: the runner only returns text; Python code writes files.
 
 Constructing any runner with ``readonly=True`` means the caller is asking for a
-read-only generation pass. API backends satisfy this by construction. Local
-agent backends apply the strongest restriction their CLI exposes; some CLIs can
-still execute read-only shell commands inside a sandbox, so callers must still
-use external timeouts and audits.
+text-only generation pass. API backends satisfy this by construction. Local
+agent backends disable their CLI's execution, file-inspection, and editing
+tools; the harness alone reads generated files, searches libraries, and runs
+compilers. External timeouts and audits remain mandatory backend-independent
+guards.
 """
 from __future__ import annotations
 

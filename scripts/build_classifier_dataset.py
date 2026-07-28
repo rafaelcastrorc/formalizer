@@ -53,7 +53,13 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
     formalize_configs: dict[str, dict[str, Any]] = {}
     run_ends: dict[str, dict[str, Any]] = {}
     skeleton_sections: list[dict[str, Any]] = []
+    initial_declaration_sections: list[dict[str, Any]] = []
+    phase1_statement_refinements: list[dict[str, Any]] = []
+    phase1_integration_rechecks: list[dict[str, Any]] = []
+    phase1_layer_events: list[dict[str, Any]] = []
+    phase1_design_plan_events: list[dict[str, Any]] = []
     statement_audits: list[dict[str, Any]] = []
+    definition_body_audits: list[dict[str, Any]] = []
     tactic_ladder_results: list[dict[str, Any]] = []
     proof_attempt_results: list[dict[str, Any]] = []
     proof_section_results: list[dict[str, Any]] = []
@@ -98,8 +104,31 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
             run_ends[str(event.get("run_id"))] = event
         elif etype == "skeleton_section_frozen":
             skeleton_sections.append(event)
+        elif etype in {"initial_declaration_section", "initial_declaration_retry"}:
+            initial_declaration_sections.append(event)
+        elif etype in {"phase1_statement_generation", "phase1_statement_refined"}:
+            phase1_statement_refinements.append(event)
+        elif etype == "phase1_integration_recheck":
+            phase1_integration_rechecks.append(event)
+        elif etype in {
+            "skeleton_section_candidate",
+            "phase1_layer_started",
+            "phase1_fragments_parallel",
+            "phase1_layer_frozen",
+            "phase1_layer_rejected",
+            "statement_audit_cache_hit",
+        }:
+            phase1_layer_events.append(event)
+        elif etype in {
+            "phase1_design_plan_result",
+            "phase1_design_plan_reused",
+            "phase1_design_plan_invalidated",
+        }:
+            phase1_design_plan_events.append(event)
         elif etype == "statement_audit":
             statement_audits.append(event)
+        elif etype == "definition_body_audit_result":
+            definition_body_audits.append(event)
         elif etype == "tactic_ladder_result":
             tactic_ladder_results.append(event)
         elif etype == "proof_attempt_result":
@@ -134,6 +163,13 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
             "partial_sections_preserved",
             "skeleton_quarantine_created",
             "skeleton_quarantine_released",
+            "lean_generation_failure_routed",
+            "skeleton_deterministic_routed",
+            "node_retry_lifecycle",
+            "phase1_retry_candidate_saved",
+            "phase1_retry_candidate_injected",
+            "phase1_retry_candidate_cleared",
+            "phase1_retry_candidate_invalidated",
         }:
             skeleton_routing_events.append(event)
         elif etype == "blueprint_repair_scope":
@@ -176,6 +212,7 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
 
     model_rows = [
         {
+            "event": row.get("event"),
             "run_id": row.get("run_id"),
             "blueprint": row.get("blueprint"),
             "decision_id": row.get("decision_id"),
@@ -277,7 +314,7 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
                 "section_size": config.get("section_size"),
                 "proof_batch": config.get("proof_batch"),
                 "workers": config.get("workers"),
-                "proof_order": config.get("proof_order", "parallel"),
+                "proof_order": config.get("proof_order", "top-down"),
                 "base_effort": config.get("base_effort"),
                 "escalation_effort": config.get("escalation_effort"),
                 "continue_run": config.get("continue_run"),
@@ -288,6 +325,115 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
                 "unresolved": end.get("unresolved"),
             }
         )
+
+    initial_declaration_rows = [
+        {
+            "event": row.get("event"),
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "section": row.get("section"),
+            "labels": row.get("labels"),
+            "label_count": len(row.get("labels") or []),
+            "decls": row.get("decls"),
+            "source": row.get("source"),
+            "trial": row.get("trial"),
+            "max_trials": row.get("max_trials"),
+            "evidence": row.get("evidence"),
+        }
+        for row in initial_declaration_sections
+        if is_fast_run(row)
+    ]
+    phase1_statement_rows = [
+        {
+            "event": row.get("event"),
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "section": row.get("section"),
+            "labels": row.get("labels"),
+            "label_count": len(row.get("labels") or []),
+            "status": row.get("status"),
+            "escalated": row.get("escalated"),
+        }
+        for row in phase1_statement_refinements
+        if is_fast_run(row)
+    ]
+    phase1_integration_rows = [
+        {
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "section": row.get("section"),
+            "labels": row.get("labels"),
+            "label_count": len(row.get("labels") or []),
+            "status": row.get("status"),
+            "output_tail": row.get("output_tail"),
+        }
+        for row in phase1_integration_rechecks
+        if is_fast_run(row)
+    ]
+
+    phase1_layer_rows: list[dict[str, Any]] = []
+    for row in phase1_layer_events:
+        if not is_fast_run(row):
+            continue
+        labels = (
+            row.get("labels")
+            or row.get("accepted_labels")
+            or row.get("rejected_labels")
+            or [
+                label
+                for part in (row.get("part_labels") or [])
+                for label in (part or [])
+            ]
+            or []
+        )
+        run_id = str(row.get("run_id"))
+        generation = related_model_stats(run_id, "skeleton_generation", labels)
+        patch = related_model_stats(run_id, "skeleton_declaration_patch", labels)
+        audit = related_model_stats(run_id, "statement_audit", labels)
+        phase1_layer_rows.append(
+            {
+                "event": row.get("event"),
+                "run_id": row.get("run_id"),
+                "blueprint": row.get("blueprint"),
+                "layer": row.get("layer"),
+                "section": row.get("section"),
+                "labels": labels,
+                "label_count": len(labels),
+                "groups": row.get("groups"),
+                "workers": row.get("workers"),
+                "part_labels": row.get("part_labels"),
+                "part_sizes": row.get("part_sizes"),
+                "sections": row.get("sections"),
+                "corrected_labels": row.get("corrected_labels"),
+                "rejected_labels": row.get("rejected_labels"),
+                "discarded_labels": row.get("discarded_labels"),
+                "accepted_labels": row.get("accepted_labels"),
+                "classification": row.get("classification"),
+                "cache_hit_count": row.get("count"),
+                **{f"generation_{key}": value for key, value in generation.items()},
+                **{f"patch_{key}": value for key, value in patch.items()},
+                **{f"audit_{key}": value for key, value in audit.items()},
+            }
+        )
+
+    phase1_design_plan_rows = [
+        {
+            "event": row.get("event"),
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "labels": row.get("labels"),
+            "label_count": len(row.get("labels") or []),
+            "status": row.get("status"),
+            "planned_labels": row.get("planned_labels"),
+            "planned_count": row.get("planned_count"),
+            "missing_labels": row.get("missing_labels"),
+            "entry_count": row.get("entry_count"),
+            "reason": row.get("reason"),
+            "chars": row.get("chars"),
+        }
+        for row in phase1_design_plan_events
+        if is_fast_run(row)
+    ]
 
     skeleton_rows: list[dict[str, Any]] = []
     for row in skeleton_sections:
@@ -328,6 +474,22 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
                 **stats,
             }
         )
+
+    definition_body_audit_rows = [
+        {
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "section": row.get("section"),
+            "labels": row.get("labels"),
+            "label_count": len(row.get("labels") or []),
+            "accepted": row.get("accepted"),
+            "routed_kind": row.get("routed_kind"),
+            "rejected_labels": row.get("rejected_labels"),
+            "rejected_count": len(row.get("rejected_labels") or []),
+        }
+        for row in definition_body_audits
+        if is_fast_run(row)
+    ]
 
     ladder_rows = [
         {
@@ -408,6 +570,9 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
             "labels": row.get("labels"),
             "label_count": len(row.get("labels") or []),
             "root_labels": row.get("root_labels"),
+            "theorem_labels": row.get("theorem_labels"),
+            "definition_body_labels": row.get("definition_body_labels"),
+            "node_kinds": row.get("node_kinds"),
             "unproved_before": row.get("unproved_before"),
             "section_count": row.get("section_count"),
         }
@@ -565,10 +730,26 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
             "code_sha256": row.get("code_sha256"),
             "lean_output_sha256": row.get("lean_output_sha256"),
             "failing_labels": row.get("failing_labels"),
+            "accepted_labels": row.get("accepted_labels"),
+            "action": row.get("action"),
+            "stage": row.get("stage"),
+            "round": row.get("round"),
+            "section": row.get("section"),
             "lean_error_shape": row.get("lean_error_shape"),
             "count": row.get("count"),
             "escalated": row.get("escalated"),
             "quarantine_records": row.get("records"),
+            "label": row.get("label"),
+            "statement_fp": row.get("statement_fp"),
+            "previous_state": row.get("previous_state"),
+            "attempted_tier": row.get("attempted_tier"),
+            "next_state": row.get("next_state"),
+            "failures": row.get("failures"),
+            "source": row.get("source"),
+            "evidence_sha256": row.get("evidence_sha256"),
+            "candidate_tiers": row.get("candidate_tiers"),
+            "code_chars": row.get("code_chars"),
+            "statement_fps": row.get("statement_fps"),
         }
         for row in skeleton_routing_events
         if is_fast_run(row)
@@ -612,8 +793,14 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
         "repair_examples": repairs,
         "pre_decomposition_examples": pre_rows,
         "fast_run_examples": fast_run_rows,
+        "fast_initial_declaration_examples": initial_declaration_rows,
+        "fast_phase1_statement_examples": phase1_statement_rows,
+        "fast_phase1_integration_examples": phase1_integration_rows,
+        "fast_phase1_layer_examples": phase1_layer_rows,
+        "fast_phase1_design_plan_examples": phase1_design_plan_rows,
         "fast_skeleton_examples": skeleton_rows,
         "fast_statement_audit_examples": statement_rows,
+        "fast_definition_body_audit_examples": definition_body_audit_rows,
         "fast_tactic_ladder_examples": ladder_rows,
         "fast_proof_attempt_examples": proof_attempt_rows,
         "fast_proof_section_examples": proof_section_rows,

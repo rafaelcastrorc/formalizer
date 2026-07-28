@@ -76,12 +76,12 @@ def list_codex_model_ids(*, timeout: int = 5) -> list[str]:
 
 
 def choose_codex_base_model(models: list[str]) -> str:
-    """Pick the cheaper/lighter Codex model from the local catalog."""
+    """Prefer GPT-5.5 for Codex, falling back to the available catalog."""
     usable = [model for model in models if "review" not in model.lower()]
     for model in usable:
-        if "mini" in model.lower():
+        if model.lower() == "gpt-5.5":
             return model
-    return usable[-1] if usable else ""
+    return usable[-1] if usable else "gpt-5.5"
 
 
 def choose_codex_escalation_model(models: list[str]) -> str:
@@ -126,14 +126,15 @@ class ClaudeCodeRunner(ModelRunner):
         # --allowedTools only pre-approves; user/project settings can still
         # allow more. --disallowedTools is the hard block.
         self.disallowed_tools = disallowed_tools
+        self.disable_all_tools = self.readonly
         if self.readonly:
-            self.allowed_tools = "Read,Grep,Glob"
+            self.allowed_tools = ""
             # Also hard-block agent-spawning and harness-side tools: audits and
             # generators kept wandering into them (Task/Agent fan-outs turned
             # 90s audits into 5-minute ones, and a stray ReportFindings call
             # once got parsed as the audit verdict itself).
             self.disallowed_tools = (
-                "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,"
+                "Bash,Edit,Write,NotebookEdit,Read,Grep,Glob,WebFetch,WebSearch,"
                 "Task,Agent,TaskCreate,TaskUpdate,TaskOutput,TodoWrite,"
                 "ToolSearch,ReportFindings,Skill,SendMessage,AskUserQuestion"
             )
@@ -150,6 +151,12 @@ class ClaudeCodeRunner(ModelRunner):
             exe, "-p", "--output-format", "stream-json", "--verbose",
             "--max-turns", str(self.max_turns),
         ]
+        if self.disable_all_tools:
+            # `--allowedTools` only pre-approves named tools; it does not make
+            # an exhaustive allowlist. `--tools ""` removes the built-ins,
+            # while `--disallowedTools` below also blocks tools supplied by
+            # user/project settings.
+            cmd += ["--tools", ""]
         if self.allowed_tools:
             cmd += ["--allowedTools", self.allowed_tools]
         if self.disallowed_tools:
@@ -325,6 +332,22 @@ class CodexRunner(ModelRunner):
         resume_flags = [
             "--skip-git-repo-check",
         ]
+        if self.readonly:
+            # A read-only filesystem sandbox still permits shell commands.
+            # Generation/audit calls must return code or a verdict promptly;
+            # the harness owns Mathlib search and Lean compilation. Disable
+            # every execution feature path so fresh and resumed Codex sessions
+            # cannot spend their budgets running `lake`, `rg`, or `find`.
+            no_shell_flags = [
+                "--disable",
+                "shell_tool",
+                "--disable",
+                "unified_exec",
+                "--disable",
+                "code_mode_host",
+            ]
+            exec_flags += no_shell_flags
+            resume_flags += no_shell_flags
         if self.model:
             exec_flags += ["--model", self.model]
             resume_flags += ["--model", self.model]

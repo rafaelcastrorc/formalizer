@@ -246,8 +246,17 @@ def _check_cycles(result: ValidationResult) -> None:
         result.errors.append(f"dependency cycle involving: {', '.join(cyclic[:20])}")
 
 
-def validate_blueprint(repo_root: Path, name: str) -> ValidationResult:
-    src_dir = repo_root / "blueprints" / name / "blueprint" / "src"
+def validate_blueprint(
+    repo_root: Path, name: str, *, blueprint_dir: Path | None = None
+) -> ValidationResult:
+    """Validate a canonical blueprint or an explicitly supplied draft directory.
+
+    ``blueprint_dir`` has the same shape as ``blueprints/<name>``. Refinement
+    uses it to validate an unpublished working copy without temporarily
+    replacing the canonical source.
+    """
+    blueprint_dir = blueprint_dir or repo_root / "blueprints" / name
+    src_dir = blueprint_dir / "blueprint" / "src"
     result = ValidationResult(name=name)
 
     if not src_dir.is_dir():
@@ -260,7 +269,7 @@ def validate_blueprint(repo_root: Path, name: str) -> ValidationResult:
         result.errors.append(f"blueprints/{name}/blueprint/src/web.tex does not exist")
         return result
 
-    meta_path = repo_root / "blueprints" / name / "meta.yml"
+    meta_path = blueprint_dir / "meta.yml"
     if meta_path.is_file():
         try:
             meta = yaml.safe_load(meta_path.read_text(encoding="utf-8")) or {}
@@ -321,6 +330,11 @@ def discover_names(repo_root: Path) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate blueprint source structure.")
     parser.add_argument("names", nargs="*", help="Blueprint names to validate (default: all)")
+    parser.add_argument(
+        "--blueprint-dir",
+        type=Path,
+        help="Validate one unpublished blueprint directory instead of blueprints/<name>.",
+    )
     args = parser.parse_args(argv)
 
     names = args.names or discover_names(REPO_ROOT)
@@ -329,8 +343,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     failed = False
+    if args.blueprint_dir and len(names) != 1:
+        parser.error("--blueprint-dir requires exactly one blueprint name")
     for name in names:
-        result = validate_blueprint(REPO_ROOT, name)
+        result = validate_blueprint(
+            REPO_ROOT, name, blueprint_dir=args.blueprint_dir
+        )
         print_result(result)
         failed = failed or not result.ok
     return 1 if failed else 0

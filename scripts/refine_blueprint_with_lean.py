@@ -1534,17 +1534,32 @@ def _statement_audit_prompt(
     if skeleton_phase:
         skeleton_block = """
 STATEMENT-PHASE CONVENTIONS (this audit runs BEFORE any proofs are written):
-- Theorem-like declarations here intentionally end in `:= sorry`. That is the
-  designed skeleton convention, NOT a defect: proofs are produced and checked
-  in a later phase. NEVER reject a declaration because its proof is `sorry`
-  or because proof obligations are "not yet discharged".
+- Theorem-like declarations and typed `def`/`abbrev` declarations here may
+  intentionally end in `:= sorry`. That is the designed skeleton convention,
+  NOT a defect: proofs and definition bodies are produced and checked in a
+  later phase. NEVER reject a declaration merely because its terminal body is
+  `sorry` or because implementation obligations are "not yet discharged".
 - Judge only (a) whether the STATEMENT faithfully encodes the blueprint node,
   and (b) whether the blueprint proof's substantive obligations are
   representable through the statement plus the node's listed `\\uses{...}`
   dependencies. Dependency mentions that belong inside the eventual proof are
   checked at proof time, not now.
-- Definition-kind declarations must still be complete (no `sorry`) and are
-  judged on their bodies as usual.
+- For a deferred `def`/`abbrev`, judge its public parameters and result type;
+  its completed body receives a separate semantic audit in Phase 2. Structure
+  fields and inductive constructors are part of the interface and must already
+  be complete here.
+"""
+    classification_options = '"lean_translation_issue" | "blueprint_issue"'
+    decomposition_guidance = ""
+    if skeleton_phase:
+        classification_options += ' | "needs_decomposition"'
+        decomposition_guidance = """
+Use `needs_decomposition` when the blueprint is mathematically concrete but one
+node bundles several declaration-level obligations that must become separate
+blueprint nodes for faithful Lean formalization. For example, a node may define
+a concrete function and also assert substantial properties of that function.
+List the exact missing helper statements in `missing_helpers`; do not use this
+classification merely because proving a faithful single statement is difficult.
 """
     return f"""TASK: BLUEPRINT-CONTRACT-AUDIT
 
@@ -1573,12 +1588,13 @@ Return exactly one JSON object:
 If anything should block publication, return:
 {{
   "accepted": false,
-  "classification": "lean_translation_issue" | "blueprint_issue",
+  "classification": {classification_options},
   "issues": [
     {{
       "node": "label",
       "severity": "reject",
-      "reason": "specific reason"
+      "reason": "specific reason",
+      "missing_helpers": ["precise statement of each helper node needed"]
     }}
   ]
 }}
@@ -1588,6 +1604,7 @@ and the generated Lean simply mistranslated it. Use `blueprint_issue` when a
 faithful Lean implementation would require making the blueprint more concrete:
 adding missing semantics, hypotheses, parameters, promised behavior,
 input/output relations, or replacing abstract problem tags by real definitions.
+{decomposition_guidance}
 
 Reject examples:
 - Lean statement is just `True`, a placeholder proposition, or an uninterpreted
@@ -2844,8 +2861,8 @@ def _load_existing_accepted_chunks(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("name", help="Existing blueprint name under blueprints/<name>/")
-    parser.add_argument("--runner", default="codex", help="Runner spec, e.g. codex, openai:gpt-5")
-    parser.add_argument("--max-trials", type=int, default=3, help="Stop after this many blueprint-repair trials")
+    parser.add_argument("--runner", default="codex:gpt-5.5", help="Runner spec, e.g. codex, openai:gpt-5")
+    parser.add_argument("--max-trials", type=int, default=100, help="Stop after this many blueprint-repair trials")
     parser.add_argument(
         "--chunk-size",
         type=int,

@@ -167,6 +167,11 @@ Telemetry now records data for these classifier families:
   full-batch regrowth, persistent node quarantine, node-specific refusal
   isolation, rejected false Mathlib dependency refusals, exact and normalized
   compiler-failure fingerprints, and preserved partial sections;
+- retry-tier classification: statement-fingerprinted per-node transitions from
+  base generation to escalation and exhaustion, the producing tier of every
+  candidate in a combined audit, and whether the next outcome was acceptance,
+  decomposition, or blueprint repair. This supports learning escalation policy
+  without treating the shape of an audit batch as a node feature;
 - repair reuse: graph distance of every changed contract from the repair
   target, added/removed helper labels, unchanged descendants deferred for local
   recompilation, reactivation/failure outcomes, and the nodes that ultimately

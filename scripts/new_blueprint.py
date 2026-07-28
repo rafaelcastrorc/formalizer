@@ -4,6 +4,7 @@
 Usage::
 
     python scripts/new_blueprint.py <name> --title "Title" --description "..."
+    python scripts/new_blueprint.py <name> --force  # replace an existing folder
 
 It copies the skeleton to ``blueprints/<name>/`` and writes
 ``blueprints/<name>/meta.yml`` with the provided fields (and ``name: <name>``).
@@ -79,6 +80,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--build-pdf", action="store_true", help="set build_pdf: true")
     parser.add_argument("--home", default="", help="optional home URL")
     parser.add_argument("--github", default="", help="optional GitHub repo URL")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace blueprints/<name>/ if it already exists",
+    )
     args = parser.parse_args(argv)
 
     name = args.name
@@ -98,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"{label} must not contain newlines or control characters")
 
     dest = BLUEPRINTS_DIR / name
-    if dest.exists():
+    if dest.exists() and not args.force:
         parser.error(f"{dest.relative_to(REPO_ROOT)} already exists; refusing to overwrite")
 
     # Build & validate meta.yml content BEFORE touching the filesystem, so bad
@@ -115,6 +121,8 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, yaml.YAMLError) as exc:
         parser.error(f"could not generate meta.yml: {exc}")
 
+    if dest.exists():
+        shutil.rmtree(dest)
     BLUEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
     shutil.copytree(SKELETON_DIR, dest)
     (dest / "meta.yml").write_text(meta_content, encoding="utf-8")
