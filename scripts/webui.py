@@ -1208,13 +1208,28 @@ function renderProgress(){
   const trialsMax = Number.isFinite(progress.repairTrialsMax) ? progress.repairTrialsMax : null;
   const trialsLeft = trialsUsed != null && trialsMax != null ? Math.max(trialsMax - trialsUsed, 0) : null;
   const provenSub = total != null && proven != null ? `${Math.round((proven / Math.max(total, 1)) * 100)}%` : '';
-  box.innerHTML = [
-    metric('Blueprint nodes', total == null ? '—' : String(total), progress.currentChunk ? `chunk ${progress.currentChunk}` : ''),
-    metric('Proven so far', proven == null ? '—' : String(proven), provenSub),
-    metric('Nodes remaining', remaining == null ? '—' : String(remaining), total == null ? '' : `of ${total}`),
-    metric('Repair trials left', trialsLeft == null ? '—' : String(trialsLeft),
-      trialsUsed == null || trialsMax == null ? '' : `${trialsUsed}/${trialsMax} used`),
-  ].join('');
+  const phase1Frozen = Number.isFinite(progress.phase1Frozen) ? progress.phase1Frozen : null;
+  const phase1Required = Number.isFinite(progress.phase1Required) ? progress.phase1Required : null;
+  if (active === 'refine' && !progress.legacyPipeline) {
+    const pct = (n, d) => `${Math.round((n / Math.max(d, 1)) * 100)}%`;
+    box.innerHTML = [
+      metric('Phase 1 contracts frozen', phase1Frozen == null || phase1Required == null ? '—' :
+        `${phase1Frozen}/${phase1Required}`,
+        phase1Frozen == null || phase1Required == null ? '' : pct(phase1Frozen, phase1Required)),
+      metric('Overall nodes completed', proven == null || total == null ? '—' : `${proven}/${total}`, provenSub),
+      metric('Repair trials left', trialsLeft == null ? '—' : String(trialsLeft),
+        trialsUsed == null || trialsMax == null ? '' : `${trialsUsed}/${trialsMax} used`),
+    ].join('');
+  } else {
+    // Legacy per-chunk logs do not expose stage-specific counters.
+    box.innerHTML = [
+      metric('Blueprint nodes', total == null ? '—' : String(total), progress.currentChunk ? `chunk ${progress.currentChunk}` : ''),
+      metric('Proven so far', proven == null ? '—' : String(proven), provenSub),
+      metric('Nodes remaining', remaining == null ? '—' : String(remaining), total == null ? '' : `of ${total}`),
+      metric('Repair trials left', trialsLeft == null ? '—' : String(trialsLeft),
+        trialsUsed == null || trialsMax == null ? '' : `${trialsUsed}/${trialsMax} used`),
+    ].join('');
+  }
 }
 
 function ingestProgressLines(lines){
@@ -1238,6 +1253,19 @@ function ingestProgressLines(lines){
       progress.repairTrialsMax = Number(m[4]);
       changed = true;
     }
+    if ((m = line.match(/==> Progress: Phase 1 contracts (\d+)\/(\d+) frozen; Phase 2 Lean implementations (\d+)\/(\d+) complete; overall (\d+)\/(\d+) verified; repairs (\d+)\/(\d+)/))){
+      progress.legacyPipeline = false;
+      progress.phase1Frozen = Number(m[1]);
+      progress.phase1Required = Number(m[2]);
+      progress.phase2Implemented = Number(m[3]);
+      progress.phase2Required = Number(m[4]);
+      progress.acceptedNodes = Number(m[5]);
+      progress.totalNodes = Number(m[6]);
+      progress.remainingNodes = Math.max(progress.totalNodes - progress.acceptedNodes, 0);
+      progress.repairTrialsUsed = Number(m[7]);
+      progress.repairTrialsMax = Number(m[8]);
+      changed = true;
+    }
     if ((m = line.match(/blueprint repairs used (\d+)\/(\d+)/))){
       progress.repairTrialsUsed = Number(m[1]);
       progress.repairTrialsMax = Number(m[2]);
@@ -1254,12 +1282,14 @@ function ingestProgressLines(lines){
       changed = true;
     }
     if ((m = line.match(/Chunk (\d+) passed; accepted (\d+) of (\d+) blueprint nodes/))){
+      progress.legacyPipeline = true;
       progress.currentChunk = Number(m[1]);
       progress.acceptedNodes = Number(m[2]);
       progress.totalNodes = Number(m[3]);
       progress.remainingNodes = Math.max(progress.totalNodes - progress.acceptedNodes, 0);
       changed = true;
     } else if ((m = line.match(/==> Chunk (\d+):/))){
+      progress.legacyPipeline = true;
       progress.currentChunk = Number(m[1]);
       changed = true;
     }
@@ -1331,6 +1361,8 @@ function stageFromLine(line){
       skeleton_generation: 'skeleton generation',
       skeleton_design_pass: 'skeleton design',
       phase1_design_plan: 'Phase 1 statement plan',
+      phase1_design_plan_audit: 'Phase 1 contract-plan audit',
+      phase1_design_plan_correction: 'Phase 1 contract-plan correction',
       phase1_statement_generation: 'Phase 1 statement generation',
       skeleton_declaration_patch: 'skeleton patch',
       statement_audit: 'statement audit',
@@ -1340,6 +1372,21 @@ function stageFromLine(line){
       section_normalization: 'section normalization',
     }[m[1]] || m[1].replace(/_/g, ' ');
     return `Model · ${purpose} (${m[2]} nodes, ${m[3]}s budget)`;
+  }
+  if ((m = line.match(/==> Phase 1 contract-plan audit: checking (\d+) proposed interface/))) {
+    return `Phase 1 · validate contract plan (${m[1]} nodes)`;
+  }
+  if ((m = line.match(/==> Phase 1 contract-plan correction \((base|escalation)\):/))) {
+    return `Phase 1 · correct contract plan (${m[1]})`;
+  }
+  if ((m = line.match(/==> Phase 1 layer (\d+): compiling (\d+) validated-contract candidate group/))) {
+    return `Phase 1 · compile validated contracts (layer ${m[1]}, ${m[2]} groups)`;
+  }
+  if (line.includes('compiled unchanged under the complete Mathlib environment')) {
+    return 'Phase 1 · resolve Lean environment';
+  }
+  if ((m = line.match(/==> Phase 1 layer (\d+): checking (\d+) integrated declaration/))) {
+    return `Phase 1 · final contract audit (layer ${m[1]}, ${m[2]} nodes)`;
   }
   if (line.includes('deterministic audit isolated')) return 'Phase 1 · deterministic audit patch';
   if (line.includes('deterministic audit failed')) return 'Phase 1 · deterministic audit';

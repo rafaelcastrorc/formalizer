@@ -116,6 +116,18 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
             "phase1_fragments_parallel",
             "phase1_layer_frozen",
             "phase1_layer_rejected",
+            "phase1_uncompiled_candidate",
+            "phase1_uncompiled_candidate_reused",
+            "phase1_semantic_first_audit",
+            "phase1_semantic_revision",
+            "phase1_semantic_first_rejected",
+            "phase1_validated_contract_transaction",
+            "phase1_environment_fallback",
+            "phase1_shared_helper_component_expanded",
+            "phase1_semantic_candidate_transition",
+            "phase1_semantic_candidate_rehydrated",
+            "phase1_ready_frontier_stalled",
+            "phase1_partial_frontier_advanced",
             "statement_audit_cache_hit",
         }:
             phase1_layer_events.append(event)
@@ -123,6 +135,9 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
             "phase1_design_plan_result",
             "phase1_design_plan_reused",
             "phase1_design_plan_invalidated",
+            "phase1_design_plan_audit",
+            "phase1_design_plan_correction",
+            "phase1_outline_plan_closure_correction",
         }:
             phase1_design_plan_events.append(event)
         elif etype == "statement_audit":
@@ -315,6 +330,9 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
                 "proof_batch": config.get("proof_batch"),
                 "workers": config.get("workers"),
                 "proof_order": config.get("proof_order", "top-down"),
+                "phase1_validation_order": config.get(
+                    "phase1_validation_order", "compile-first"
+                ),
                 "base_effort": config.get("base_effort"),
                 "escalation_effort": config.get("escalation_effort"),
                 "continue_run": config.get("continue_run"),
@@ -409,6 +427,20 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
                 "discarded_labels": row.get("discarded_labels"),
                 "accepted_labels": row.get("accepted_labels"),
                 "classification": row.get("classification"),
+                "transaction_order": row.get("transaction_order"),
+                "scheduling": row.get("scheduling"),
+                "stage": row.get("stage"),
+                "status": row.get("status"),
+                "previous": row.get("previous"),
+                "current": row.get("current"),
+                "pending_labels": row.get("pending_labels"),
+                "frozen_labels": row.get("frozen_labels"),
+                "blocked_by": row.get("blocked_by"),
+                "generation_tier": row.get("generation_tier"),
+                "producing_tier": row.get("producing_tier"),
+                "added_import": row.get("added_import"),
+                "critic_rejected_labels": row.get("critic_rejected_labels"),
+                "component_labels": row.get("component_labels"),
                 "cache_hit_count": row.get("count"),
                 **{f"generation_{key}": value for key, value in generation.items()},
                 **{f"patch_{key}": value for key, value in patch.items()},
@@ -430,6 +462,9 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
             "entry_count": row.get("entry_count"),
             "reason": row.get("reason"),
             "chars": row.get("chars"),
+            "accepted": row.get("accepted"),
+            "classification": row.get("classification"),
+            "corrected": row.get("corrected"),
         }
         for row in phase1_design_plan_events
         if is_fast_run(row)

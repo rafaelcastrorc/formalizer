@@ -1520,13 +1520,19 @@ def _statement_audit_prompt(
             continue
         lean_name = _lean_name(label)
         decl = decls.get(lean_name)
+        visible_decl = (
+            _decl_text_with_local_helpers(decl, decls)
+            if decl is not None
+            else "(missing)"
+        )
         pairs.append(
             f"## Node {label}\n"
             f"- kind: {node.kind}\n"
             f"- expected Lean declaration name: {lean_name}\n"
             f"- uses: {', '.join(sorted(node.uses)) or '(none)'}\n"
             f"\nBlueprint text:\n```tex\n{blueprint_blocks.get(label, '')[:5000]}\n```\n"
-            f"\nGenerated Lean declaration:\n```lean\n{decl.text[:5000] if decl else '(missing)'}\n```\n"
+            "\nGenerated Lean declaration and referenced local helpers:\n"
+            f"```lean\n{visible_decl[:12000]}\n```\n"
         )
     paper_block = f"\nOriginal paper context:\n<paper>\n{paper_text[:20000]}\n</paper>\n" if paper_text else ""
     pair_text = "\n\n".join(pairs)
@@ -1594,7 +1600,13 @@ If anything should block publication, return:
       "node": "label",
       "severity": "reject",
       "reason": "specific reason",
-      "missing_helpers": ["precise statement of each helper node needed"]
+      "missing_helpers": ["precise statement of each helper node needed"],
+      "required_dependencies": [
+        "existing blueprint label required by this node's public statement"
+      ],
+      "missing_blueprint_information": [
+        "exact mathematical fact absent from the blueprint"
+      ]
     }}
   ]
 }}
@@ -1604,6 +1616,18 @@ and the generated Lean simply mistranslated it. Use `blueprint_issue` when a
 faithful Lean implementation would require making the blueprint more concrete:
 adding missing semantics, hypotheses, parameters, promised behavior,
 input/output relations, or replacing abstract problem tags by real definitions.
+For every `blueprint_issue`, `missing_blueprint_information` MUST be nonempty and
+must identify information absent from the blueprint text, not a defect in the
+generated Lean representation. If a different Lean encoding (for example a
+predicate, subtype, quotient, extensionality theorem, or different structure)
+can faithfully represent the existing blueprint, classify the problem as
+`lean_translation_issue` and leave `missing_blueprint_information` empty.
+When a faithful public Lean statement requires the declaration of an existing
+blueprint node that is absent from this node's listed `\\uses`, put that exact
+existing label in `required_dependencies`. Include only public-statement
+dependencies, never proof-only conveniences, and otherwise return an empty
+list. This reports a dependency-contract mismatch; it does not by itself mean
+that the blueprint's mathematical claim is wrong.
 {decomposition_guidance}
 
 Reject examples:
@@ -1682,6 +1706,35 @@ def _alignment_failure_kind(classification: str, formatted_issues: list[str]) ->
     if any(marker.lower() in text for marker in BLUEPRINT_REPAIR_AUDIT_MARKERS):
         return "blueprint"
     return "lean-generation"
+
+
+def _authorized_alignment_failure_kind(
+    classification: str,
+    formatted_issues: list[str],
+    issues: object,
+) -> tuple[str, list[str]]:
+    """Require explicit missing blueprint facts before authorizing mutation.
+
+    A semantic critic can correctly reject a generated Lean representation but
+    still mislabel that rejection as a blueprint problem. Rewriting the source
+    blueprint is destructive and expensive, so a bare classification is not
+    enough: the critic must identify mathematical information that is absent
+    from the blueprint itself. Representation defects remain Lean-generation
+    failures and are retried under the unchanged blueprint contract.
+    """
+    missing_information = list(
+        dict.fromkeys(
+            str(item).strip()
+            for issue in issues if isinstance(issue, dict)
+            if str(issue.get("severity", "reject")).lower() == "reject"
+            for item in (issue.get("missing_blueprint_information") or [])
+            if str(item).strip()
+        )
+    ) if isinstance(issues, list) else []
+    routed = _alignment_failure_kind(classification, formatted_issues)
+    if routed == "blueprint" and not missing_information:
+        return "lean-generation", []
+    return routed, missing_information
 
 
 def _run_statement_alignment_audit(
@@ -1829,7 +1882,15 @@ def _run_statement_alignment_audit(
     # explicit (and now authoritative) lean_translation_issue verdict.
     raw_classification = str(payload.get("classification") or "")
     classification = raw_classification or "lean_translation_issue"
-    kind = _alignment_failure_kind(raw_classification, formatted)
+    kind, missing_blueprint_information = _authorized_alignment_failure_kind(
+        raw_classification, formatted, issues
+    )
+    routing_note = ""
+    if kind == "lean-generation" and raw_classification == "blueprint_issue":
+        routing_note = (
+            "\nRouting note: blueprint repair was not authorized because the "
+            "audit named no mathematical information absent from the blueprint."
+        )
     if telemetry:
         issues_artifact = telemetry.store_text(
             "audit_issues",
@@ -1844,13 +1905,19 @@ def _run_statement_alignment_audit(
             accepted=False,
             classification=classification,
             routed_kind=kind,
+            blueprint_repair_authorized=kind == "blueprint",
+            missing_blueprint_information=missing_blueprint_information,
             rejected_labels=sorted(rejected_labels),
             issues=issues_artifact.to_event(REPO_ROOT),
         )
     return LeanAttempt(
         ok=False,
         command=[],
-        reason="Statement alignment audit rejected the compiled Lean:\n- " + "\n- ".join(formatted),
+        reason=(
+            "Statement alignment audit rejected the compiled Lean:\n- "
+            + "\n- ".join(formatted)
+            + routing_note
+        ),
         kind=kind,
         rejected_labels=rejected_labels,
     )

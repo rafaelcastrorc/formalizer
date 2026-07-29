@@ -45,7 +45,13 @@ class Node:
     kind: str
     file: Path
     line: int
+    # ``uses`` remains the complete dependency graph used for ordering and
+    # cycle checks.  Keep the two source scopes as well: statement dependencies
+    # constrain the public Lean declaration, while proof-only dependencies may
+    # appear only when Phase 2 fills its body.
     uses: set[str] = field(default_factory=set)
+    statement_uses: set[str] = field(default_factory=set)
+    proof_uses: set[str] = field(default_factory=set)
     mathlibok: bool = False
     lean_decl: str | None = None
 
@@ -194,6 +200,7 @@ def _parse_file(path: Path, envs: set[str], result: ValidationResult) -> None:
             pos = block_end
             continue
 
+        statement_uses = _uses(body)
         proof_uses: set[str] = set()
         proof_match = _PROOF_RE.match(text, block_end)
         if proof_match:
@@ -205,7 +212,9 @@ def _parse_file(path: Path, envs: set[str], result: ValidationResult) -> None:
             kind=env,
             file=path,
             line=line,
-            uses=_uses(body) | proof_uses,
+            uses=statement_uses | proof_uses,
+            statement_uses=statement_uses,
+            proof_uses=proof_uses,
             mathlibok=bool(_MATHLIBOK_RE.search(body)),
             lean_decl=lean.group(1).strip() if lean else None,
         )
