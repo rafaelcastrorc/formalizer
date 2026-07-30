@@ -775,10 +775,6 @@ def build_command(action: str, p: dict) -> list[str]:
                 if not section_size.isdigit() or int(section_size) < 1:
                     raise ValueError("section size must be a positive number")
                 cmd += ["--section-size", section_size]
-            proof_order = str(p.get("proof_order") or "top-down").strip()
-            if proof_order not in {"top-down", "bottom-up"}:
-                raise ValueError("refinement order must be top-down or bottom-up")
-            cmd += ["--proof-order", proof_order]
             escalation_runner = runner_spec_from(
                 p,
                 "escalation_runner_backend",
@@ -1576,11 +1572,7 @@ const FORMS = {
     <div class="hint">Model preset: ${esc((state.runner_defaults && state.runner_defaults.source) || 'local Codex fallback')}.</div>
     <label>Parallel proof workers (Phase 2)</label>
     <input type="number" id="f_workers" value="3" min="1">
-    <label>Refinement traversal (Phase 1 and Phase 2)</label>
-    <select id="f_proof_order">
-      <option value="top-down">Top down: roots to dependencies (initial pass required)</option>
-      <option value="bottom-up" selected>Bottom up: dependencies to roots (no initial pass)</option>
-    </select>
+    <div class="hint">Phase 1 freezes statements bottom up; Phase 2 implements them top down.</div>
     <label>Skeleton section size (fast pipeline only; statements per Phase-1 call — shrinks automatically on timeouts)</label>
     <input type="number" id="f_section_size" value="12" min="1">
     <label>Max blueprint-repair trials</label>
@@ -1702,7 +1694,7 @@ function params(){
     return {action:'refine', name:v('f_name'), max_trials:v('f_trials'),
             paper:v('f_paper'), lean_command:v('f_leancmd'),
             continue_run:c('f_continue'), fast:c('f_fast'), workers:v('f_workers'),
-            section_size:v('f_section_size'), proof_order:v('f_proof_order'),
+            section_size:v('f_section_size'),
             ...common};
   const names = [...document.querySelectorAll('.bpcheck:checked')].map(n=>n.value);
   if (active === 'validate') return {action:'validate', names};

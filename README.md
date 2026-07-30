@@ -318,30 +318,33 @@ A helper required by the accepted interface plan is deterministically matched
 to that plan entry by its contract name, or by a unique kind/member surface,
 and receives the plan's canonical owner and name. This remains authoritative
 while target bodies are `sorry`, when references cannot reveal ownership.
-During the provisional initial pass, unplanned boilerplate helpers still use
-the declaration-reference graph because that file is only compilation
-scaffolding. Phase 1 is stricter: it accepts only blueprint targets and the
-exact plan-owned `structure`/`inductive`/`class` interfaces. An extra helper
+Phase 1 accepts only blueprint targets and the exact plan-owned
+`structure`/`inductive`/`class` interfaces. An extra helper
 `def`, theorem, lemma, abbreviation, or instance is rejected before Lean is
-run and routes back to contract-plan correction; Phase 1 must never spend time
-implementing a body that belongs to Phase 2. Only the reconstructed canonical
-module may be saved, merged, compiled, or used as repair evidence. The same boundary is used by the initial pass,
-Phase 1 generation and patches, timeout/refusal salvage, and Phase 2 body
+run. If the accepted plan requested an invalid declaration surface, the plan
+is corrected; if statement generation invented the helper despite a closed
+plan, the generated declaration is corrected without paying for another plan
+call. Phase 1 must never spend time implementing a body that belongs to Phase
+2. Only the reconstructed canonical
+module may be saved, merged, compiled, or used as repair evidence. The same
+boundary is used by Phase 1 generation and patches, timeout/refusal salvage,
+and Phase 2 body
 implementation responses. Consequently, formatting mistakes cannot be persisted and later
 charged to an unrelated blueprint node.
 
-The fast pipeline has two real traversal modes. `--proof-order top-down` runs
-both phases from public roots toward dependencies. `--proof-order bottom-up`
-runs both phases from dependency leaves toward roots. `--workers` controls
-parallel Phase 2 calls and, in bottom-up Phase 1, concurrent compilation and
+Traversal is fixed by phase. Phase 1 freezes statement contracts bottom-up,
+from dependencies toward public results. Phase 2 implements bodies top-down,
+from public results toward their supporting declarations. There is no traversal
+setting because these directions are part of the pipeline design. `--workers`
+controls parallel Phase 2 calls and concurrent Phase 1 compilation and
 correction of independent groups on a dynamically recomputed dependency-ready
 frontier. A failing contract blocks only its actual descendants, never an
 unrelated branch that happened to share its original topological depth.
 
-Before either Phase 1 traversal starts, one shared root-first planning stage
-fixes the intended Lean contract vocabulary across the pending graph. This is
-not a third traversal and does not generate declarations or proofs: top-down
-still refines roots first, and bottom-up still compiles dependencies first.
+Before Phase 1 starts, one shared root-first planning stage fixes the intended
+Lean contract vocabulary across the pending graph. This is not a traversal and
+does not generate declarations or proofs; Phase 1 still compiles dependency
+contracts first.
 Ordinary graphs fit in one model call; only graphs above 120 pending nodes use
 a small number of bounded planning calls rather than one oversized prompt.
 The plan prevents each local generation batch from independently redesigning
@@ -360,11 +363,38 @@ on the target contract and its Phase-2 decisions. Statement-level
 `\uses` and proof-level `\uses` remain separate: only the former constrain the
 Phase 1 public signature, while their union still drives traversal and Phase 2.
 Dependency authorization is therefore deterministic rather than a critic-model
-judgment. The same lossless object is persisted and passed to generation.
-Before compilation, a deterministic handoff gate rejects any candidate that
-omits a target or helper promised by its contract. Correctness is decided only
-on the generated Lean: it must compile and the independent statement critic
-must accept the actual declaration together with its consumed helpers. A
+judgment. Before generation, a deterministic contract-closure gate builds the
+complete planned symbol/member table. It rejects a generated dotted reference
+such as `A.member` when the planned declaration `A` exposes no `member`, use of
+a helper whose owning node is outside the consumer's statement dependency
+closure, generated target dependencies outside that same closure, and a target
+signature that declares anything other than the node's single canonical public
+Lean target. When one blueprint node defines several related operations, its
+plan must expose them through one plan-owned type interface returned by that
+canonical target; it cannot create additional public targets that Phase 2 does
+not own. Valid closure results are cached by plan fingerprint and add no model
+call. Closure is not a global generation barrier: dependency-ready contracts
+outside an invalid component proceed immediately. A missing-member finding
+blocks both its consumer and the provider that owns the referenced surface, so
+the provider cannot freeze before the inconsistency is repaired. When that
+component reaches the traversal frontier, the provider and all connected
+rejected consumers go to one targeted plan-correction transaction with the
+exact mechanical findings. If the base correction remains unclosed, only that
+connected component receives one escalation correction. If both tiers fail,
+the unresolved component's plan entries are discarded so the next bounded
+retry genuinely replans them; unrelated contracts and accepted work remain
+intact, and an unchanged correction-cache hit cannot consume the retry budget
+in a no-work loop.
+Because a plan-shape rejection contains no evidence about model-call capacity,
+it never shrinks the statement section size or quarantines the affected node;
+only an actual generation timeout or failure may train that scheduler.
+The same lossless object is then persisted and passed to generation. Before
+compilation, the deterministic handoff gate rejects any candidate that omits a
+target/helper promised by its contract or materializes a cycle between a
+target and its plan-owned type helper. Such cycles also return to targeted plan
+correction rather than compiler patching. Correctness is decided only on the
+generated Lean: it must compile and the independent statement critic must
+accept the actual declaration together with its consumed helpers. A
 model that emits `target.Helper` for a planned `Helper` does not trigger a
 repair call merely because of that spelling: canonical ingestion maps it to
 the exact plan-owned helper, and all later slicing, diagnostics, and audits use
@@ -373,35 +403,11 @@ entries, while unchanged entries survive later waves and `--continue`.
 Generation prompts receive only the contracts for their targets, direct
 dependencies, and direct consumers rather than the full graph-wide plan.
 
-1. **Initial declaration pass — top-down only, boilerplate only.** Create one complete
-   provisional Lean file containing a declaration for every non-Mathlib
-   blueprint node. The sole purpose of this pass is to ensure that all
-   lower-level Lean names and boilerplate already exist before Phase 1 starts
-   working from the roots downward. Placeholder bodies and `sorry` are allowed
-   because nothing produced here is accepted mathematics. This pass runs once
-   over the complete blueprint. It does not split the graph into chunks,
-   generate proofs, refine statements, audit mathematical alignment, edit the
-   blueprint, or iteratively repair compilation errors.
-
-   Bottom-up mode skips this pass because each dependency is frozen before a
-   consumer is stated.
-
-2. **Phase 1 — statement and interface refinement in the selected direction.**
-   Top-down starts at public roots, traverses the existing `\uses` graph toward
-   dependencies, and replaces provisional boilerplate. Bottom-up starts at
+1. **Phase 1 — statements and interfaces bottom-up.** Phase 1 starts at
    dependency leaves and creates exact audited sections directly, climbing
-   toward consumers without provisional whole-graph declarations. Every frontier
-   begins with this statement-generation transaction; stage-zero placeholders
-   are never audited or used as evidence for blueprint repair. Compilation
-   errors caused by provisional interfaces are resolved here, not in the
-   initial pass. If compiling a root exposes a malformed lower provisional
-   declaration, Phase 1 repairs only that lower declaration's header/interface,
-   keeps its body or proof provisional with `sorry`, and then retries the
-   original root. The lower node is not marked refined by this scaffolding
-   repair; it is still replaced and audited when traversal reaches its own
-   Phase 1 frontier. Compiler diagnostics are attributed to their owning
-   declaration and are never assigned to the current root merely because the
-   complete provisional file was being checked. Statement-generation and correction prompts contain
+   toward consumers without provisional whole-graph declarations. Every
+   frontier begins with a statement-generation transaction. Statement-generation
+   and correction prompts contain
    only the exact generated interfaces required by their direct dependencies,
    plus the generated names referenced by those interfaces. A deterministic
    name-set check prevents dispatch if that compact context is incomplete;
@@ -567,10 +573,14 @@ dependencies, and direct consumers rather than the full graph-wide plan.
    audit calls run with agent-spawning and harness-side tools disabled, and
    every generation prompt carries a write-discipline rule: spend at most
    half the budget exploring, and always emit the requested code.
-3. **Phase 2 — bodies and proofs in the same direction as Phase 1.** Phase 1
+2. **Phase 2 — bodies and proofs top-down.** Phase 1
    freezes exact declaration headers/interfaces but leaves both theorem proofs
    and typed `def`/`abbrev` bodies as terminal `sorry`. Phase 2 implements every
-   deferred body in the selected traversal direction. Completed definition
+   deferred body from public results toward supporting declarations, regardless
+   of the Phase 1 statement order. A higher theorem is accepted against the
+   exact frozen statements of its dependencies; replacing those dependencies'
+   theorem bodies later does not change that interface or discard the accepted
+   higher proof. Completed definition
    bodies receive a read-only semantic audit against their blueprint nodes;
    compilation alone cannot accept a definition with the right type but wrong
    meaning. Structure fields and inductive constructors remain Phase-1
@@ -581,15 +591,13 @@ dependencies, and direct consumers rather than the full graph-wide plan.
    At each frontier a deterministic tactic ladder
    (`rfl`/`omega`/`norm_num`/`ring`/`simp`/`aesop`) runs first at zero model
    cost; survivors use batched calls in parallel across owning sections, and
-   only the residue escalates to singleton calls. With `--proof-order bottom-up`,
-   dependency bodies are implemented first and the scheduler climbs toward
-   public roots. In both modes, independent nodes in the current frontier may
-   run in parallel according to `--workers`.
+   only the residue escalates to singleton calls. Independent nodes in the
+   current root-first frontier may run in parallel according to `--workers`.
    Phase 2 uses the same failure-scope policy as Phase 1: successful bodies stay
    committed, a failed subset is retried alone, and a batch that fails as a
    whole is repeatedly bisected through base-runner rounds before any remaining
    singleton is sent to the escalation runner.
-4. **Repair — evidence only.** A timed-out model call is treated as latency,
+3. **Repair — evidence only.** A timed-out model call is treated as latency,
    never as mathematical difficulty: batches are bisected, targeted declaration
    patches are used for small skeleton failures, and singletons are retried at
    higher effort. A base-model skeleton `NEEDS-DECOMPOSITION` response is
@@ -669,8 +677,7 @@ when `--runner` is explicitly set, the CLI default is the same runner, otherwise
 it uses the stronger half of the auto preset),
 `--escalation-effort` (codex effort for escalation calls, default `high`),
 `--timeout`/`--hard-timeout` (per-call budgets, defaults 300/600 s),
-`--proof-order` (`top-down` by default, or `bottom-up`; this controls both
-Phase 1 and Phase 2), `--no-ladder`, `--no-build`, `--continue`, and `--fresh`. For non-Codex runners,
+`--no-ladder`, `--no-build`, `--continue`, and `--fresh`. For non-Codex runners,
 `--reasoning-effort`/`--escalation-effort` do not change model strength; use
 different `--runner` and `--escalation-runner` model specs instead.
 Continuation is the default. `--continue` states it explicitly; `--fresh` is
@@ -724,21 +731,17 @@ Fast pipeline diagram:
 flowchart TD
     A["Published blueprint"] --> AD["Create or resume unpublished blueprint draft"]
     AD --> B["Validate draft blueprint structure"]
-    B --> T{"Traversal mode"}
-    T -->|Top down| P0["Initial pass model emits provisional declarations for every generated Lean name"]
-    P0 --> C0["Canonical ingestion: pipeline rebuilds the boilerplate module and assigns ownership"]
-    C0 --> BP0["Shared Phase 1 planning call proposes target signatures and declaration-only type helpers root-first"]
-    T -->|Bottom up| BP0
-    BP0 --> BPG["Persist untrusted plan as generation guidance; no duplicate plan-critic call"]
-    BPG -->|Top-down traversal| D["Model refines current root/dependency statement frontier"]
-    D --> TDC["Canonical ingestion, deterministic checks, and local Lean compilation"]
-    TDC --> TDH["Read-only critic checks the refined top-down contract group"]
-    TDH -->|Statement matches blueprint| I
-    TDH -->|Node needs separate declaration-level helpers| ND
-    TDH -->|Blueprint contract itself is incomplete| R
-    BPG -->|Bottom-up traversal| BU["Phase 1: recompute all pending nodes whose own generated dependencies are frozen"]
+    B --> BP0["Shared Phase 1 planning call proposes target signatures and declaration-only type helpers root-first"]
+    BP0 --> BPC["Deterministic plan closure: dependency authorization plus generated symbol/member table"]
+    BPC --> BPS{"Closure scheduling"}
+    BPS -->|Closed and dependency-ready| BPG["Persist untrusted plan as generation guidance; no duplicate plan-critic call"]
+    BPS -->|Blocked provider-consumer component reaches frontier| BPR["Correct the connected contracts together; unrelated closed work keeps running"]
+    BPR --> BPC
+    BPG --> BU["Phase 1: recompute all pending nodes whose own generated dependencies are frozen"]
     BU --> C1["Canonical ingestion and closure gate: targets plus exact plan-owned type interfaces only"]
-    C1 -->|Unplanned executable helper| PCR
+    C1 -->|Owner/helper cycle required by accepted plan| BPR
+    C1 -->|Model-invented executable helper| GRC["Correct the generated declaration under the unchanged closed plan"]
+    GRC --> C1
     C1 --> PA["Compile validated-contract groups in parallel"]
     PA -->|Failed| EF{"Same declarations compile under complete project environment?"}
     EF -->|Yes| IG["Keep declarations unchanged with resolved environment"]
@@ -761,18 +764,17 @@ flowchart TD
     ND --> R
     R --> RV["Revalidate repaired blueprint structure"]
     RV --> RC["Mark changed contracts for regeneration; defer unchanged descendants"]
-    RC --> PN["Phase 1 inserts provisional names for any newly added helpers"]
-    PN --> D
-    I --> N1["Advance Phase 1 in the selected graph direction"]
-    N1 -->|Unrefined contracts remain| D
+    RC --> BU
+    I --> N1["Advance the bottom-up Phase 1 dependency frontier"]
+    N1 -->|Unrefined contracts remain| BU
     N1 -->|All contracts frozen| RR["Recompile the complete integrated statement environment"]
-    RR -->|Higher contract became stale| D
-    RR -->|Passes| J["Phase 2: select the next deferred-body frontier in the same traversal direction"]
+    RR -->|Higher contract became stale| BU
+    RR -->|Passes| J["Phase 2: select the next top-down deferred-body frontier"]
     J --> K["Implement theorem proofs and definition bodies against frozen interfaces"]
     K --> L["Batched body-implementation model calls"]
     L --> C2["Canonical ingestion: extract tactic bodies by frozen declaration owner"]
     C2 --> M["Singleton escalation for residue"]
-    M --> N["Advance Phase 2 in the selected graph direction"]
+    M --> N["Advance Phase 2 from public results toward supporting declarations"]
     N -->|Deferred bodies remain| K
     N -->|No sorries remain| V["Run strict correctness audit: no sorry, axioms, vacuous True proofs"]
     V -->|Proof failed but statement is still valid| K

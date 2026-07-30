@@ -5,23 +5,15 @@ This is the fast successor to ``refine_blueprint_with_lean.py``. The blueprint
 remains the only mathematical source of truth and Lean remains the critic; what
 changes is *when* model calls happen and how much each one is asked to do:
 
-Traversal mode. ``top-down`` runs both refinement phases from public roots
-toward dependencies. ``bottom-up`` runs both phases from dependency leaves
-toward public roots. Phase 2 uses worker parallelism in either direction;
-bottom-up Phase 1 also parallelizes independent groups and routed fragments.
+Fixed traversal policy. Phase 1 freezes statements bottom-up from dependency
+leaves toward public results. Phase 2 fills deferred bodies top-down from public
+results toward supporting declarations. Phase 1 parallelizes independent groups
+and routed fragments; Phase 2 parallelizes independent nodes within each
+root-first wave.
 
-Initial declaration pass (top-down only). Create one complete provisional Lean
-file containing a declaration for every non-Mathlib blueprint node. Its only
-purpose is to make lower-level names available while roots elaborate. It runs
-once over the complete blueprint: no proof generation, statement refinement,
-semantic audit, blueprint edit, or compilation-repair loop belongs here.
-
-Phase 1 (statements and interfaces). Follow the selected traversal direction
-over the existing blueprint dependency graph and freeze exact Lean statements
-and interfaces corresponding one-to-one with the blueprint. Top-down replaces
-the provisional environment; bottom-up creates exact dependency-first sections
-directly and therefore does not need the initial pass.
-Before either traversal, one shared root-first planning call records compact
+Phase 1 (statements and interfaces). Traverse the existing blueprint dependency
+graph bottom-up and freeze exact Lean statements and interfaces corresponding
+one-to-one with the blueprint. One shared root-first planning call records compact
 per-node contract decisions. It does not generate Lean or change traversal;
 it prevents independent batches from redesigning the same interfaces. Entries
 are statement-fingerprinted, persisted, and selectively invalidated by repairs.
@@ -44,10 +36,12 @@ normalizes theorem-like commands, rejects duplicate names, gives local helpers
 stable node-owned global names, and records ownership. Raw model files are never
 persisted or merged directly.
 
-Phase 2 (implementations). Follow the same traversal direction used in Phase 1
-across every deferred body: theorem proofs and ``def``/``abbrev``
-implementations. Completed definition bodies receive a semantic blueprint
-audit before acceptance. For every frozen ``sorry``:
+Phase 2 (implementations). Follow a top-down traversal across every deferred
+body: theorem proofs and ``def``/``abbrev`` implementations. Higher proofs are
+therefore checked first against the complete frozen Phase-1 interface; filling
+a lower theorem body later does not alter that interface. Completed definition
+bodies receive a semantic blueprint audit before acceptance. For every frozen
+``sorry``:
 1. a deterministic tactic ladder (``rfl``/``omega``/``norm_num``/``ring``/
    ``simp``/``aesop``) runs first, with zero model cost;
 2. survivors are filled by batched model calls;
@@ -155,7 +149,8 @@ def _is_theorem_like_kind(kind: str | None) -> bool:
 DEFAULT_SECTION_SIZE = 12
 DEFAULT_PROOF_BATCH = 12
 DEFAULT_WORKERS = 3
-DEFAULT_PROOF_ORDER = "bottom-up"
+PHASE1_STATEMENT_ORDER = "bottom-up"
+PHASE2_PROOF_ORDER = "top-down"
 # Bounded per-section transaction: one base generation attempt plus at most
 # one escalated retry. Every stage (deterministic patch, compile patch, audit
 # correction) gets exactly one targeted fix before the attempt is spent; a
@@ -688,6 +683,22 @@ class SkeletonFinding:
     lean_name: str | None = None
     category: str = ""
     dependencies: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PlanClosureFinding:
+    """Mechanical plan inconsistency and the contract that can repair it.
+
+    ``consumer`` owns the invalid reference. ``provider`` is present only when
+    the inconsistency concerns another generated contract's member surface.
+    Keeping that ownership structured prevents correction from repeatedly
+    renaming a consumer reference without showing the model the provider it
+    must make consistent.
+    """
+
+    consumer: str
+    message: str
+    provider: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2010,7 +2021,7 @@ class Ctx:
     proof_batch: int
     workers: int
     use_ladder: bool
-    refinement_order: str = DEFAULT_PROOF_ORDER
+    refinement_order: str = PHASE1_STATEMENT_ORDER
     # Run-scoped adaptive Phase-1 section size. Only measured latency changes
     # capacity; a refusal about one named node is routed around that node.
     effective_section_size: int = 0
@@ -2238,6 +2249,49 @@ def _prune_stale_quarantine(ctx: Ctx) -> set[str]:
             ctx, stale, reason="statement_fingerprint_changed"
         )
     return stale
+
+
+def _apply_phase1_retry_scheduling(ctx: Ctx, request: RepairRequest) -> None:
+    """Apply generation evidence to scheduling without conflating plan shape.
+
+    Adaptive capacity and quarantine describe emitted statement-generation
+    behavior. A pre-generation contract-plan closure failure has emitted no
+    statements, so it must leave both controls unchanged; its corrected or
+    invalidated plan entry already supplies the next retry's state transition.
+    """
+    if request.plan_revision_required:
+        _record(
+            ctx.telemetry,
+            "phase1_plan_revision_retry_scheduled",
+            labels=request.labels,
+            scheduler_size=ctx.effective_section_size or ctx.section_size,
+            scheduler_unchanged=True,
+        )
+        return
+    if request.failure_route is None:
+        _quarantine_labels(ctx, request.labels, "phase1_generation_retry")
+        return
+
+    routes = request.failure_routes or [request.failure_route]
+    for route in routes:
+        if route.action in {"isolate", "singleton", "independent"}:
+            _quarantine_labels(
+                ctx,
+                route.failed_labels,
+                "phase1_generation_retry",
+            )
+        elif route.action == "bisect":
+            next_size = max(len(part) for part in route.parts)
+            if next_size < (ctx.effective_section_size or ctx.section_size):
+                ctx.effective_section_size = next_size
+                ctx.section_clean_streak = 0
+    _record(
+        ctx.telemetry,
+        "phase1_failure_routes_applied",
+        route_count=len(routes),
+        actions=[route.action for route in routes],
+        failing_groups=[list(route.failed_labels) for route in routes],
+    )
 
 
 def _prune_stale_generation_feedback(ctx: Ctx) -> set[str]:
@@ -3209,7 +3263,7 @@ def _save_state(
     retry_lifecycle: dict[str, dict[str, Any]] | None = None,
     design_plan_entries: dict[str, dict[str, Any]] | None = None,
     effective_section_size: int = 0,
-    refinement_order: str = DEFAULT_PROOF_ORDER,
+    refinement_order: str = PHASE1_STATEMENT_ORDER,
 ) -> None:
     entries = []
     for sec in sections:
@@ -3350,6 +3404,7 @@ def _save_state(
             "correction_escalation_fp": str(
                 entry.get("correction_escalation_fp") or ""
             ),
+            "closure_fp": str(entry.get("closure_fp") or ""),
         }
 
     path = _state_path(name)
@@ -3540,6 +3595,7 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
             "correction_escalation_fp": str(
                 entry.get("correction_escalation_fp") or ""
             ),
+            "closure_fp": str(entry.get("closure_fp") or ""),
         }
         for label, entry in raw_plan.items()
         if isinstance(entry, dict)
@@ -5196,6 +5252,67 @@ Target declarations:
 # Alignment audit (skeleton-aware)
 
 
+def _plan_owned_declaration_cycle_findings(
+    code: str, ctx: Ctx, labels: Iterable[str]
+) -> list[SkeletonFinding]:
+    """Detect impossible owner/helper cycles in emitted Phase-1 declarations."""
+    decls = _lean_declarations(code)
+    entries = getattr(ctx, "design_plan_entries", {})
+    findings: list[SkeletonFinding] = []
+    for label in labels:
+        target_name = _lean_name(label)
+        if target_name not in decls:
+            continue
+        helper_names: list[str] = []
+        for helper in (entries.get(label) or {}).get("helpers") or []:
+            raw_name = str(helper.get("name") or "").strip()
+            canonical = _owned_helper_name(ctx, raw_name, [label])
+            emitted = canonical if canonical in decls else raw_name
+            if emitted in decls:
+                helper_names.append(emitted)
+        local_names = [target_name, *helper_names]
+        graph = {
+            source: {
+                target
+                for target in local_names
+                if target != source
+                and _mentions_lean_symbol(decls[source].text, target)
+            }
+            for source in local_names
+        }
+
+        def reaches(source: str, target: str) -> bool:
+            todo = list(graph.get(source, set()))
+            seen: set[str] = set()
+            while todo:
+                current = todo.pop()
+                if current == target:
+                    return True
+                if current in seen:
+                    continue
+                seen.add(current)
+                todo.extend(graph.get(current, set()) - seen)
+            return False
+
+        cyclic_helpers = sorted(
+            helper
+            for helper in helper_names
+            if reaches(target_name, helper) and reaches(helper, target_name)
+        )
+        if cyclic_helpers:
+            findings.append(
+                SkeletonFinding(
+                    f"{label} interface plan creates an impossible declaration "
+                    f"cycle between `{target_name}` and plan-owned helper(s): "
+                    + ", ".join(f"`{name}`" for name in cyclic_helpers),
+                    label=label,
+                    lean_name=target_name,
+                    category="plan_contract_closure",
+                )
+            )
+    return findings
+
+
 def _skeleton_deterministic_findings(code: str, ctx: Ctx, labels: list[str]) -> list[SkeletonFinding]:
     """Coverage/kind checks for a section. Dependency-mention checks are only
     applied to declarations whose bodies are already complete; deferred theorem
@@ -5303,10 +5420,7 @@ def _skeleton_deterministic_findings(code: str, ctx: Ctx, labels: list[str]) -> 
             for lean_name, other_label in generated_by_name.items()
             if other_label != label
             and other_label not in allowed_dependencies
-            and re.search(
-                rf"(?<![A-Za-z0-9_'.]){re.escape(lean_name)}(?![A-Za-z0-9_'.])",
-                decl.text,
-            )
+            and _mentions_lean_symbol(decl.text, lean_name)
         )
         if unexpected:
             findings.append(
@@ -5333,6 +5447,7 @@ def _skeleton_deterministic_findings(code: str, ctx: Ctx, labels: list[str]) -> 
                         lean_name=lean_name,
                     )
                 )
+    findings.extend(_plan_owned_declaration_cycle_findings(code, ctx, labels))
     return findings
 
 
@@ -5630,6 +5745,7 @@ def _prune_stale_design_plan(ctx: Ctx) -> set[str]:
 
 
 DESIGN_PLAN_SCHEMA_VERSION = 5
+DESIGN_PLAN_CLOSURE_VERSION = 2
 
 # Phase 1 may introduce only declaration-only type interfaces. Ordinary helper
 # definitions and theorems would need bodies/proofs, but Phase 2 implements only
@@ -5790,8 +5906,219 @@ def _design_plan_audit_fingerprint(ctx: Ctx, label: str) -> str:
     ).hexdigest()
 
 
-def _design_plan_dependency_findings(ctx: Ctx, labels: Iterable[str]) -> list[str]:
-    """Check public-interface dependency authorization without a model call."""
+_PLAN_REVISION_FINDING_CATEGORIES = {
+    "plan_contract_closure",
+}
+
+
+def _findings_require_plan_revision(findings: Iterable[SkeletonFinding]) -> bool:
+    """Return whether candidate errors originate in the interface plan.
+
+    Only mechanically invalid accepted contracts belong here. An unplanned
+    helper invented by statement generation is a generation error when the
+    accepted contract never requested that declaration; routing it back to
+    plan correction repeatedly edits an already valid plan without addressing
+    the bad output. Every Phase-1 path uses this predicate so actual contract
+    closure failures do not fall through to compiler patching.
+    """
+    return any(
+        finding.category in _PLAN_REVISION_FINDING_CATEGORIES
+        for finding in findings
+    )
+
+
+def _mentions_lean_symbol(text: str, name: str) -> bool:
+    """Match a generated Lean name, including its use as a namespace prefix."""
+    return bool(
+        name
+        and re.search(
+            rf"(?<![A-Za-z0-9_'.]){re.escape(name)}(?![A-Za-z0-9_'])",
+            text,
+        )
+    )
+
+
+def _planned_target_members(signature: str, target_name: str) -> set[str]:
+    """Extract the member surface exposed by a planned target declaration.
+
+    This intentionally recognizes only declaration syntax whose dotted public
+    surface Lean creates deterministically: structure/class fields and
+    inductive constructors. It does not guess methods from prose or decisions.
+    """
+    match = re.search(
+        rf"\b(structure|class|inductive)\s+{re.escape(target_name)}"
+        rf"(?![A-Za-z0-9_'])[\s\S]*?\bwhere\b([\s\S]*)",
+        signature,
+    )
+    if not match:
+        return set()
+    kind, body = match.group(1), match.group(2)
+    if kind == "inductive":
+        return set(
+            re.findall(
+                r"(?:^|[;\n])\s*\|\s*([A-Za-z_][A-Za-z0-9_']*)",
+                body,
+            )
+        )
+    return set(
+        re.findall(
+            r"(?:^|[;\n])\s*([A-Za-z_][A-Za-z0-9_']*)\s*:",
+            body,
+        )
+    )
+
+
+def _design_plan_symbol_surfaces(
+    ctx: Ctx,
+) -> tuple[dict[str, set[str]], dict[str, str]]:
+    """Return planned generated symbols and the blueprint node owning each."""
+    entries = getattr(ctx, "design_plan_entries", {})
+    surfaces: dict[str, set[str]] = {}
+    owners: dict[str, str] = {}
+    for label, entry in entries.items():
+        if label not in ctx.nodes:
+            continue
+        target_name = _lean_name(label)
+        surfaces[target_name] = _planned_target_members(
+            str(entry.get("target_signature") or ""), target_name
+        )
+        owners[target_name] = label
+        for helper in entry.get("helpers") or []:
+            helper_name = str(helper.get("name") or "").strip()
+            if not helper_name:
+                continue
+            members = {
+                str(member).strip()
+                for member in helper.get("required_members") or []
+                if str(member).strip()
+            }
+            canonical = _owned_helper_name(ctx, helper_name, [label])
+            for spelling in (helper_name, canonical):
+                surfaces[spelling] = set(members)
+                owners[spelling] = label
+    return surfaces, owners
+
+
+def _design_plan_closure_fingerprint(ctx: Ctx, label: str) -> str:
+    """Fingerprint one contract against the complete planned symbol surface."""
+    surfaces, owners = _design_plan_symbol_surfaces(ctx)
+    material = {
+        "closure_version": DESIGN_PLAN_CLOSURE_VERSION,
+        "contract": _design_plan_audit_fingerprint(ctx, label),
+        "symbols": {
+            name: {"owner": owners[name], "members": sorted(members)}
+            for name, members in sorted(surfaces.items())
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _design_plan_contract_closure_issues(
+    ctx: Ctx, labels: Iterable[str]
+) -> list[PlanClosureFinding]:
+    """Reject mechanically unrealizable plan references before generation.
+
+    This is a symbol-table check, not a semantic audit. In particular, every
+    dotted reference to a generated target/helper must name a member exposed by
+    that planned declaration, and a helper reference must remain inside the
+    consumer's statement dependency closure.
+    """
+    entries = getattr(ctx, "design_plan_entries", {})
+    surfaces, owners = _design_plan_symbol_surfaces(ctx)
+    findings: list[PlanClosureFinding] = []
+    for label in labels:
+        signature = str((entries.get(label) or {}).get("target_signature") or "")
+        allowed = _transitive_statement_dependencies(ctx.nodes, label)
+        local: list[PlanClosureFinding] = []
+        target_name = _lean_name(label)
+        declared = [
+            (decl.kind, decl.name or "<anonymous>")
+            for decl in _parse_module(signature).decls
+        ]
+        target_declarations = [
+            (kind, name) for kind, name in declared if name == target_name
+        ]
+        extra_declarations = [
+            (kind, name) for kind, name in declared if name != target_name
+        ]
+        if len(target_declarations) != 1:
+            local.append(
+                PlanClosureFinding(
+                    label,
+                    f"{label}: target signature must declare exactly one canonical "
+                    f"target named `{target_name}`; found "
+                    + (
+                        str(len(target_declarations))
+                        if declared
+                        else "no declarations"
+                    ),
+                )
+            )
+        if extra_declarations:
+            rendered = ", ".join(
+                f"`{kind} {name}`" for kind, name in extra_declarations
+            )
+            local.append(
+                PlanClosureFinding(
+                    label,
+                    f"{label}: target signature declares additional public target(s): "
+                    f"{rendered}. One blueprint node owns exactly one canonical public "
+                    f"declaration, `{target_name}`. If the node defines several "
+                    "mathematical operations, package them as fields of one "
+                    "plan-owned structure/class interface and make the canonical "
+                    "target return that interface",
+                )
+            )
+        for symbol, members in surfaces.items():
+            dotted_members = set(
+                re.findall(
+                    rf"(?<![A-Za-z0-9_'.]){re.escape(symbol)}\."
+                    r"([A-Za-z_][A-Za-z0-9_']*)",
+                    signature,
+                )
+            )
+            for member in sorted(dotted_members - members):
+                local.append(
+                    PlanClosureFinding(
+                        label,
+                        f"{label}: target signature requires `{symbol}.{member}`, "
+                        f"but planned declaration `{symbol}` exposes no such member",
+                        provider=owners.get(symbol),
+                    )
+                )
+            owner = owners.get(symbol)
+            if owner and owner != label and symbol != _lean_name(owner):
+                if owner not in allowed and _mentions_lean_symbol(signature, symbol):
+                    local.append(
+                        PlanClosureFinding(
+                            label,
+                            f"{label}: target signature references helper `{symbol}` "
+                            f"owned by {owner}, outside its statement dependency closure",
+                        )
+                    )
+        findings.extend(local)
+    return findings
+
+
+def _design_plan_contract_closure_findings(
+    ctx: Ctx, labels: Iterable[str]
+) -> dict[str, list[str]]:
+    """Compatibility view of structured closure issues grouped by consumer."""
+    findings: dict[str, list[str]] = {}
+    for issue in _design_plan_contract_closure_issues(ctx, labels):
+        findings.setdefault(issue.consumer, []).append(issue.message)
+    return {
+        label: list(dict.fromkeys(messages))
+        for label, messages in findings.items()
+    }
+
+
+def _design_plan_unauthorized_reference_findings(
+    ctx: Ctx, labels: Iterable[str]
+) -> list[str]:
+    """Reject generated target references outside statement authorization."""
     entries = getattr(ctx, "design_plan_entries", {})
     generated = {
         _lean_name(other): other
@@ -5807,10 +6134,7 @@ def _design_plan_dependency_findings(ctx: Ctx, labels: Iterable[str]) -> list[st
             for lean_name, other in generated.items()
             if other != label
             and other not in allowed
-            and re.search(
-                rf"(?<![A-Za-z0-9_'.]){re.escape(lean_name)}(?![A-Za-z0-9_'.])",
-                signature,
-            )
+            and _mentions_lean_symbol(signature, lean_name)
         )
         if unexpected:
             findings.append(
@@ -5818,16 +6142,23 @@ def _design_plan_dependency_findings(ctx: Ctx, labels: Iterable[str]) -> list[st
                 "outside its statement dependency closure: "
                 + ", ".join(f"{dep} -> `{_lean_name(dep)}`" for dep in unexpected)
             )
+    return findings
+
+
+def _design_plan_dependency_findings(ctx: Ctx, labels: Iterable[str]) -> list[str]:
+    """Check complete public-interface dependency use without a model call."""
+    ordered = list(labels)
+    entries = getattr(ctx, "design_plan_entries", {})
+    findings = _design_plan_unauthorized_reference_findings(ctx, ordered)
+    for label in ordered:
+        signature = str((entries.get(label) or {}).get("target_signature") or "")
         missing: list[str] = []
         for dep in sorted(_statement_uses(ctx.nodes[label])):
             dep_node = ctx.nodes.get(dep)
             if dep_node is None:
                 continue
             expected = dep_node.lean_decl if dep_node.mathlibok else _lean_name(dep)
-            if expected and not re.search(
-                rf"(?<![A-Za-z0-9_'.]){re.escape(expected)}(?![A-Za-z0-9_'.])",
-                signature,
-            ):
+            if expected and not _mentions_lean_symbol(signature, expected):
                 missing.append(f"{dep} -> `{expected}`")
         if missing:
             findings.append(
@@ -5835,6 +6166,135 @@ def _design_plan_dependency_findings(ctx: Ctx, labels: Iterable[str]) -> list[st
                 "dependency/dependencies: " + ", ".join(missing)
             )
     return findings
+
+
+def _validate_design_plan_contract_closure(
+    ctx: Ctx, labels: Iterable[str]
+) -> dict[str, list[str]]:
+    """Validate and fingerprint the deterministic plan-to-generation handoff."""
+    entries = getattr(ctx, "design_plan_entries", {})
+    ordered = [label for label in labels if label in entries]
+    uncached = [
+        label
+        for label in ordered
+        if str(entries[label].get("closure_fp") or "")
+        != _design_plan_closure_fingerprint(ctx, label)
+    ]
+    if not uncached:
+        if ordered:
+            _record(
+                ctx.telemetry,
+                "phase1_design_plan_closure",
+                labels=ordered,
+                status="cache_hit",
+            )
+        return {}
+
+    findings = _design_plan_contract_closure_findings(ctx, uncached)
+    # Missing direct dependency mentions are judged on emitted declarations by
+    # the existing handoff/audit path. At this pre-generation boundary, only
+    # references that are mechanically unauthorized are closure failures.
+    for item in _design_plan_unauthorized_reference_findings(ctx, uncached):
+        label = next(
+            (candidate for candidate in uncached if item.startswith(f"{candidate}:")),
+            None,
+        )
+        if label is not None:
+            findings.setdefault(label, []).append(item)
+    for label in uncached:
+        if label not in findings:
+            entries[label]["closure_fp"] = _design_plan_closure_fingerprint(
+                ctx, label
+            )
+        else:
+            entries[label].pop("closure_fp", None)
+    _sync_design_plan(ctx)
+    _record(
+        ctx.telemetry,
+        "phase1_design_plan_closure",
+        labels=uncached,
+        status="rejected" if findings else "accepted",
+        rejected_labels=sorted(findings),
+        findings=[
+            finding
+            for label in sorted(findings)
+            for finding in findings[label]
+        ],
+    )
+    return findings
+
+
+def _design_plan_closure_repair_components(
+    ctx: Ctx, findings: dict[str, list[str]]
+) -> list[list[str]]:
+    """Connected provider-consumer units that must be corrected atomically.
+
+    Findings about a consumer's unauthorized dependency remain consumer-only.
+    Missing member-surface findings join the consumer to the provider that
+    owns that surface. Shared providers therefore combine all affected
+    consumers into one coherent correction instead of letting independent
+    calls invent mutually incompatible member names.
+    """
+    affected = set(findings)
+    adjacency: dict[str, set[str]] = {label: set() for label in affected}
+    for issue in _design_plan_contract_closure_issues(ctx, findings):
+        if issue.consumer not in findings or issue.provider is None:
+            continue
+        provider = issue.provider
+        if provider == issue.consumer or provider not in ctx.nodes:
+            continue
+        affected.add(provider)
+        adjacency.setdefault(issue.consumer, set()).add(provider)
+        adjacency.setdefault(provider, set()).add(issue.consumer)
+
+    ordered = _design_plan_order(ctx, affected)
+    position = {label: index for index, label in enumerate(ordered)}
+    components: list[list[str]] = []
+    unseen = set(affected)
+    while unseen:
+        seed = min(unseen, key=position.get)
+        todo = [seed]
+        component: set[str] = set()
+        while todo:
+            label = todo.pop()
+            if label in component:
+                continue
+            component.add(label)
+            todo.extend(adjacency.get(label, set()) - component)
+        unseen.difference_update(component)
+        components.append(
+            sorted(component, key=position.get)
+        )
+    return components
+
+
+def _closure_blocked_labels(
+    ctx: Ctx, findings: dict[str, list[str]]
+) -> set[str]:
+    """Contracts that cannot freeze while the current closure findings remain."""
+    return {
+        label
+        for component in _design_plan_closure_repair_components(ctx, findings)
+        for label in component
+    }
+
+
+def _closure_findings_for_scope(
+    ctx: Ctx,
+    findings: dict[str, list[str]],
+    scope: Iterable[str],
+) -> dict[str, list[str]]:
+    """Select complete closure components touching the requested labels."""
+    requested = set(scope)
+    selected_consumers: set[str] = set()
+    for component in _design_plan_closure_repair_components(ctx, findings):
+        if requested & set(component):
+            selected_consumers.update(label for label in component if label in findings)
+    return {
+        label: findings[label]
+        for label in findings
+        if label in selected_consumers
+    }
 
 
 def _design_plan_audit_prompt(ctx: Ctx, labels: list[str]) -> str:
@@ -6140,7 +6600,7 @@ def _audit_phase1_design_plan(
 def _correct_phase1_design_plan(
     ctx: Ctx, labels: list[str], evidence: str, *, escalated: bool = False
 ) -> bool:
-    """Revise only mistranslated plan entries using the critic's exact evidence."""
+    """Revise one connected set of interface contracts using exact evidence."""
     entries = getattr(ctx, "design_plan_entries", {})
     fingerprint = hashlib.sha256(
         json.dumps(
@@ -6187,10 +6647,13 @@ def _correct_phase1_design_plan(
     )
     prompt = f"""TASK: CORRECT-BLUEPRINT-INTERFACE-PLAN
 
-Correct only the rejected interface contracts below. The blueprint is the
-source of truth. Preserve every object, parameter, hypothesis, equation, and
-declaration-level property identified by the critic. Do not edit the blueprint
-and do not emit Lean bodies or proofs.
+Correct only the connected interface contracts below. Some requested labels
+may be provider contracts included because another requested contract refers
+to a missing member on their public surface. Make the complete requested set
+mutually consistent rather than merely renaming the consumer's missing member.
+The blueprint is the source of truth. Preserve every object, parameter,
+hypothesis, equation, and declaration-level property identified by the critic.
+Do not edit the blueprint and do not emit Lean bodies or proofs.
 
 Return exactly one JSON object using the same lossless schema as planning:
 {{
@@ -6209,8 +6672,12 @@ Include every requested label and no others. Helpers may only be auxiliary
 `structure`, `inductive`, or `class` interfaces needed to state the target.
 Never introduce a helper `def`, `abbrev`, `theorem`, or `lemma`: equations and
 properties belong to the target contract/decisions and are implemented in
-Phase 2. Preserve required type-interface helpers and decisions; do not emit
-Lean bodies or proofs.
+Phase 2. Each `target_signature` must contain exactly one top-level declaration,
+whose name is the requested node's required Lean name. When one blueprint node
+describes several operations, place those operations and their defining laws in
+one plan-owned `structure` or `class` helper and make the single canonical
+target return that interface. Preserve required type-interface helpers and
+decisions; do not emit Lean bodies or proofs.
 
 Critic evidence:
 {evidence[-12000:]}
@@ -6276,6 +6743,106 @@ Critic evidence:
         tier="escalation" if escalated else "base",
     )
     return True
+
+
+def _repair_phase1_design_plan_closure(
+    ctx: Ctx,
+    ordered: list[str],
+    closure_findings: dict[str, list[str]],
+    *,
+    repair_scope: Iterable[str] | None = None,
+) -> None:
+    """Repair only blocked provider-consumer components, then revalidate.
+
+    Every component gets at most one base and one escalation correction in
+    this invocation. Unrelated closed entries are never sent to the model or
+    invalidated. If both tiers fail, the whole unresolved component is removed
+    so the next bounded outer retry replans a coherent provider-consumer slice.
+    """
+    entries = getattr(ctx, "design_plan_entries", {})
+    scope = set(repair_scope or [])
+    remaining = (
+        _closure_findings_for_scope(ctx, closure_findings, scope)
+        if scope
+        else closure_findings
+    )
+    for escalated in (False, True):
+        components = _design_plan_closure_repair_components(ctx, remaining)
+        for component in components:
+            consumers = [label for label in component if label in remaining]
+            if not consumers:
+                continue
+            evidence = (
+                "Phase 1 interface-plan contract closure rejected:\n- "
+                + "\n- ".join(
+                    finding
+                    for label in consumers
+                    for finding in remaining[label]
+                )
+            )
+            providers = [label for label in component if label not in consumers]
+            if providers:
+                evidence += (
+                    "\nProvider contract(s) implicated by these findings: "
+                    + ", ".join(providers)
+                    + ". Correct provider and consumer surfaces together."
+                )
+            corrected = _correct_phase1_design_plan(
+                ctx, component, evidence, escalated=escalated
+            )
+            _record(
+                ctx.telemetry,
+                "phase1_outline_plan_closure_correction",
+                labels=component,
+                rejected_labels=consumers,
+                provider_labels=providers,
+                corrected=bool(corrected),
+                reason="deterministic_contract_closure",
+                tier="escalation" if escalated else "base",
+            )
+            if corrected:
+                validated = _validate_design_plan_contract_closure(ctx, ordered)
+                remaining = (
+                    _closure_findings_for_scope(ctx, validated, scope)
+                    if scope
+                    else validated
+                )
+            if not remaining:
+                return
+
+    if not remaining:
+        return
+    failed_components = _design_plan_closure_repair_components(ctx, remaining)
+    failed = list(
+        dict.fromkeys(label for component in failed_components for label in component)
+    )
+    for label in failed:
+        entries.pop(label, None)
+    _sync_design_plan(ctx)
+    _record(
+        ctx.telemetry,
+        "phase1_design_plan_invalidated",
+        labels=failed,
+        rejected_labels=sorted(remaining),
+        reason="contract_closure_correction_exhausted",
+    )
+    route = _route_lean_generation_failure(failed)
+    raise RepairRequest(
+        "Phase 1 cannot generate Lean from a mechanically impossible "
+        "interface plan. Base and escalation correction did not close "
+        "these connected provider-consumer contracts; their plan entries "
+        "were discarded for fresh planning on the next bounded retry:\n- "
+        + "\n- ".join(
+            finding
+            for label in sorted(remaining)
+            for finding in remaining[label]
+        ),
+        list(route.failed_labels),
+        section_labels=failed,
+        authorizes_blueprint_repair=False,
+        failure_route=route,
+        plan_revision_required=True,
+    )
 
 
 def _design_plan_context_labels(ctx: Ctx, labels: Iterable[str]) -> set[str]:
@@ -6406,6 +6973,13 @@ writer could otherwise get wrong. Do not collapse concrete blueprint objects
 into opaque predicates or package names unless the compact helper surface
 explicitly exposes the complete promised interface.
 
+Each `target_signature` must contain exactly one top-level declaration and it
+must use that node's required Lean name. A blueprint node may describe several
+related mathematical operations, but that does not authorize several public
+Lean targets for one node. Represent such a bundle with one plan-owned
+`structure` or `class` helper whose fields expose the operations and defining
+laws, then make the single canonical target return that interface.
+
 Every non-library name in `target_signature` must be the target's required
 Lean name, a generated dependency name from the dependency table, or a
 structure/inductive/class helper declared in that same contract. Do not put an
@@ -6436,8 +7010,12 @@ Target nodes to plan ({len(labels)} node(s), root-first planning order):
 
 
 def _ensure_phase1_design_plan(
-    ctx: Ctx, pending: set[str], sections: list[Section]
-) -> None:
+    ctx: Ctx,
+    pending: set[str],
+    sections: list[Section],
+    *,
+    defer_closure_repair: bool = False,
+) -> dict[str, list[str]]:
     """Create or extend the shared root-first contract plan for Phase 1.
 
     Traversal still controls declaration generation. This planning call is
@@ -6538,6 +7116,19 @@ def _ensure_phase1_design_plan(
             authorizes_blueprint_repair=False,
             failure_route=route,
         )
+    closure_findings = _validate_design_plan_contract_closure(ctx, ordered)
+    if closure_findings:
+        if defer_closure_repair:
+            _record(
+                ctx.telemetry,
+                "phase1_design_plan_closure_deferred",
+                labels=sorted(closure_findings),
+                blocked_labels=sorted(
+                    _closure_blocked_labels(ctx, closure_findings)
+                ),
+            )
+            return closure_findings
+        _repair_phase1_design_plan_closure(ctx, ordered, closure_findings)
     # Do not run a second model over the proposed plan. The plan guides
     # generation but is never accepted as evidence of correctness. Generated
     # declarations must satisfy deterministic contract checks, compile, and
@@ -6551,6 +7142,7 @@ def _ensure_phase1_design_plan(
         entry_count=len(ordered),
         acceptance_policy="compiled_declarations_final_audit",
     )
+    return {}
 
 
 def _bulk_skeleton_prompt(
@@ -8068,34 +8660,36 @@ def _freeze_section(
                 )
             patch_note = ""
             if findings:
-                plan_revision_required = any(
-                    finding.category == "unplanned_phase1_helper"
-                    for finding in findings
-                )
+                plan_revision_required = _findings_require_plan_revision(findings)
                 patched, patch_note = (None, "plan revision required")
                 if plan_revision_required:
                     evidence = _format_skeleton_findings(findings)
+                    plan_labels = (
+                        _isolated_deterministic_failure_labels(findings, labels)
+                        or labels
+                    )
                     corrected = _correct_phase1_design_plan(
-                        ctx, labels, evidence, escalated=False
+                        ctx, plan_labels, evidence, escalated=False
                     )
                     _record(
                         ctx.telemetry,
                         "phase1_outline_plan_closure_correction",
-                        labels=labels,
+                        labels=plan_labels,
                         corrected=bool(corrected),
-                        reason="unplanned_executable_helper",
+                        reason="deterministic_contract_closure",
                     )
                     if corrected:
                         _clear_retry_lifecycle(
-                            ctx, labels, stage="phase1_statement"
+                            ctx, plan_labels, stage="phase1_statement"
                         )
                         _prune_stale_generation_candidates(ctx)
                         raise RepairRequest(
-                            "Phase 1 outline plan required executable helper "
-                            "bodies and was corrected; regenerate only these "
-                            "statements under the closed plan.\n" + evidence[-8000:],
-                            labels,
-                            section_labels=labels,
+                            "Phase 1 outline plan was not closed over its "
+                            "generated declarations and was corrected; regenerate "
+                            "only these statements under the closed plan.\n"
+                            + evidence[-8000:],
+                            plan_labels,
+                            section_labels=plan_labels,
                             authorizes_blueprint_repair=False,
                         )
                 else:
@@ -9205,10 +9799,7 @@ def _generate_uncompiled_phase1_candidate(
     )
     findings += _skeleton_deterministic_findings(code, ctx, labels)
     if findings:
-        plan_revision_required = any(
-            finding.category == "unplanned_phase1_helper"
-            for finding in findings
-        )
+        plan_revision_required = _findings_require_plan_revision(findings)
         patched, note = (None, "plan revision required")
         if not plan_revision_required:
             patched, note = _targeted_patch_skeleton_decls(
@@ -10332,6 +10923,7 @@ def _audit_phase1_layer_candidates(
             "decomposition",
         },
         failure_route=failure_route if kind == "lean-generation" else None,
+        required_dependencies=audit_required_dependencies,
     )
 
 
@@ -10438,6 +11030,7 @@ def _semantic_first_failure_request(
             "decomposition",
         },
         failure_route=failure_route if kind == "lean-generation" else None,
+        required_dependencies=audit_required_dependencies,
     )
 
 
@@ -10532,10 +11125,8 @@ def _run_validated_contract_phase1_layer(
                 failures.append((index, request))
     candidates = [candidate for candidate in generated if candidate is not None]
     if failures:
-        # An executable helper in a Phase-1 candidate means the accepted
-        # outline contract was not closed over its permitted declarations.
-        # Correct those plan entries once, serially, before the ordinary retry;
-        # compiler-patching the helper would perform Phase-2 work in Phase 1.
+        # A plan-closure finding cannot be repaired honestly by compiler
+        # patching. Correct only the owning plan entries before ordinary retry.
         plan_requests = [
             request
             for _index, request in failures
@@ -10560,7 +11151,7 @@ def _run_validated_contract_phase1_layer(
                 "phase1_outline_plan_closure_correction",
                 labels=plan_labels,
                 corrected=bool(corrected),
-                reason="unplanned_executable_helper",
+                reason="deterministic_contract_closure",
             )
             if corrected:
                 _clear_retry_lifecycle(
@@ -10568,8 +11159,8 @@ def _run_validated_contract_phase1_layer(
                 )
                 _prune_stale_generation_candidates(ctx)
                 _log(
-                    "  corrected Phase 1 outline plan that required executable "
-                    "helper bodies: " + ", ".join(plan_labels)
+                    "  corrected mechanically unclosed Phase 1 outline plan: "
+                    + ", ".join(plan_labels)
                 )
         for candidate in candidates:
             _store_generation_candidates(
@@ -10664,8 +11255,38 @@ def _run_phase1(
     # Planning is root-aware regardless of traversal. Generation below still
     # follows ``refinement_order`` exactly; this only prevents local batches
     # from independently reinventing graph-wide interfaces.
-    _ensure_phase1_design_plan(ctx, pending, sections)
+    closure_findings = _ensure_phase1_design_plan(
+        ctx,
+        pending,
+        sections,
+        defer_closure_repair=True,
+    )
     _save_ctx_state(ctx, sections)
+    plan_order = _design_plan_order(ctx, pending)
+
+    def repair_blocked_contracts(frontier: Iterable[str]) -> None:
+        """Close only components that currently block useful graph work."""
+        nonlocal closure_findings
+        scope = set(frontier)
+        selected = _closure_findings_for_scope(ctx, closure_findings, scope)
+        if not selected:
+            return
+        blocked = sorted(_closure_blocked_labels(ctx, selected))
+        _log(
+            "==> Phase 1 contract closure: repairing blocked provider-consumer "
+            "component(s): " + ", ".join(blocked[:12])
+            + ("..." if len(blocked) > 12 else "")
+        )
+        _repair_phase1_design_plan_closure(
+            ctx,
+            plan_order,
+            closure_findings,
+            repair_scope=scope,
+        )
+        closure_findings = _validate_design_plan_contract_closure(
+            ctx, plan_order
+        )
+        _save_ctx_state(ctx, sections)
 
     if refinement_order == "bottom-up":
         alloc = _SectionNumberAllocator(
@@ -10701,6 +11322,20 @@ def _run_phase1(
                     section_labels=sorted(remaining),
                     authorizes_blueprint_repair=False,
                 )
+            blocked = _closure_blocked_labels(ctx, closure_findings)
+            eligible_targets = [label for label in targets if label not in blocked]
+            if not eligible_targets:
+                repair_blocked_contracts(targets)
+                continue
+            if len(eligible_targets) != len(targets):
+                _record(
+                    ctx.telemetry,
+                    "phase1_closed_work_scheduled_ahead_of_repairs",
+                    labels=eligible_targets,
+                    blocked_labels=[label for label in targets if label in blocked],
+                    frontier=frontier_no,
+                )
+            targets = eligible_targets
             targets = _coalesce_candidate_components(ctx, targets)
             _log(
                 f"==> Phase 1: refining bottom-up ready frontier {frontier_no} "
@@ -10791,6 +11426,9 @@ def _run_phase1(
         targets = [label for label in layer if label in pending]
         if not targets:
             continue
+        blocked = _closure_blocked_labels(ctx, closure_findings)
+        if set(targets) & blocked:
+            repair_blocked_contracts(targets)
         _log(
             f"==> Phase 1: refining top-down statement layer {layer_no} "
             f"({len(targets)} node(s))"
@@ -12893,16 +13531,6 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
-        "--proof-order",
-        choices=("top-down", "bottom-up"),
-        default=DEFAULT_PROOF_ORDER,
-        help=(
-            "Refinement traversal for both phases: top-down starts at public "
-            "roots and requires the initial declaration pass; bottom-up starts "
-            "at dependency leaves and skips that pass"
-        ),
-    )
-    parser.add_argument(
         "--reasoning-effort",
         choices=("low", "medium", "high", "xhigh"),
         default="medium",
@@ -12957,7 +13585,9 @@ def main(argv: list[str] | None = None) -> int:
         section_size=args.section_size,
         proof_batch=args.proof_batch_size,
         workers=args.workers,
-        proof_order=args.proof_order,
+        proof_order=PHASE2_PROOF_ORDER,
+        phase1_order=PHASE1_STATEMENT_ORDER,
+        phase2_order=PHASE2_PROOF_ORDER,
         phase1_validation_order="validated-contract_compile_final-audit",
         base_effort=args.reasoning_effort,
         escalation_effort=args.escalation_effort,
@@ -13010,7 +13640,7 @@ def main(argv: list[str] | None = None) -> int:
     _record_proof_graph_telemetry(
         telemetry,
         validation.nodes,
-        proof_order=args.proof_order,
+        proof_order=PHASE2_PROOF_ORDER,
         reason="initial",
     )
 
@@ -13038,7 +13668,7 @@ def main(argv: list[str] | None = None) -> int:
         proof_batch=args.proof_batch_size,
         workers=args.workers,
         use_ladder=args.ladder,
-        refinement_order=args.proof_order,
+        refinement_order=PHASE1_STATEMENT_ORDER,
     )
     ctx.refresh_nodes(validation.nodes)
 
@@ -13057,10 +13687,6 @@ def main(argv: list[str] | None = None) -> int:
 
     sections: list[Section] = _load_state(ctx, lean_command) if args.continue_run else []
     _prune_stale_generated(ctx, sections)
-    initial_declaration_completed = any(
-        sec.provisional_environment for sec in sections
-    )
-
     report_lines = [
         f"# Statements-First Formalization: `{args.name}`",
         "",
@@ -13068,7 +13694,8 @@ def main(argv: list[str] | None = None) -> int:
         f"- escalation runner: `{escalation_runner}` (effort `{args.escalation_effort}`)",
         f"- timeouts: `{args.timeout}s` base / `{args.hard_timeout}s` escalated",
         f"- section size: `{args.section_size}`; proof batch: `{args.proof_batch_size}`; workers: `{args.workers}`",
-        f"- proof order: `{args.proof_order}`",
+        f"- Phase 1 statement order: `{PHASE1_STATEMENT_ORDER}`",
+        f"- Phase 2 implementation order: `{PHASE2_PROOF_ORDER}`",
         f"- blueprint repair budget: `{args.max_trials}`",
         f"- library candidates: `{len(library_candidates)}`",
         "",
@@ -13079,7 +13706,6 @@ def main(argv: list[str] | None = None) -> int:
     escalation_note = ""
     stuck_sections: list[SectionStuckState] = []
     started = time.monotonic()
-    complete_skeleton_announced = False
     # A resumed state must prove that all individually refined contracts still
     # compile together before Phase 2 can use them. Keep this run-scoped so the
     # deterministic recheck is paid once per statement-state, not once per
@@ -13098,12 +13724,7 @@ def main(argv: list[str] | None = None) -> int:
                 label for label, node in ctx.nodes.items() if not node.mathlibok
             }
             frozen = _frozen_labels(sections)
-            reserved = _reserved_labels(sections)
-            missing_declarations = required_skeleton - reserved
-            if (
-                (args.proof_order == "bottom-up" or not missing_declarations)
-                and any(sec.deferred for sec in sections)
-            ):
+            if any(sec.deferred for sec in sections):
                 sections, more_reactivated, more_dropped = (
                     _reactivate_deferred_sections(
                         ctx, sections, drop_unready=True
@@ -13124,82 +13745,18 @@ def main(argv: list[str] | None = None) -> int:
             phase1_repair = False
             repair_authorized = True
 
-            if (
-                _requires_initial_declaration_pass(args.proof_order)
-                and missing_declarations
-            ):
-                if initial_declaration_completed:
-                    sections = _add_phase1_boilerplate_names(
-                        ctx, sections, missing_declarations
-                    )
-                else:
-                    print(
-                        "==> Initial declaration pass: creating boilerplate for "
-                        f"{len(missing_declarations)} node(s) "
-                        f"({len(reserved)} declarations already available)",
-                        flush=True,
-                    )
-                    sections = _run_initial_declaration_pass(
-                        ctx, sections, missing_declarations
-                    )
-                    initial_declaration_completed = True
-                phase1_integration_checked = False
-                _save_ctx_state(ctx, sections)
-                _print_pipeline_progress(
-                    ctx, sections, repair_trials, args.max_trials
-                )
-
             if evidence_for_repair is None:
-                if _requires_initial_declaration_pass(args.proof_order):
-                    # Root-first elaboration requires every lower generated
-                    # name to exist before Phase 1 can state a root contract.
-                    missing_skeleton = required_skeleton - _reserved_labels(sections)
-                    if missing_skeleton or any(sec.deferred for sec in sections):
-                        complete_skeleton_announced = False
-                        unavailable = set(missing_skeleton) | {
-                            label
-                            for sec in sections
-                            if sec.deferred
-                            for label in sec.labels
-                        }
-                        stale_sections = [
-                            sec
-                            for sec in sections
-                            if sec.deferred and set(sec.labels) & unavailable
-                        ]
-                        if stale_sections:
-                            stale_numbers = {sec.number for sec in stale_sections}
-                            sections = [
-                                sec for sec in sections if sec.number not in stale_numbers
-                            ]
-                            for sec in stale_sections:
-                                _discard_section_artifacts(sec.path)
-                            _save_ctx_state(ctx, sections)
-                        _log(
-                            "==> Initial Lean skeleton incomplete: "
-                            f"{len(unavailable)} node(s) still need boilerplate "
-                            "declarations"
-                        )
-                        continue
-                    if not complete_skeleton_announced:
-                        complete_skeleton_announced = True
-                        _log(
-                            "==> Initial Lean skeleton complete: every non-Mathlib "
-                            "blueprint node has a provisional Lean name; top-down "
-                            "Phase 1 compilation and statement refinement may begin"
-                        )
-
                 phase1_pending = required_skeleton - _frozen_labels(sections)
                 if phase1_pending:
                     print(
-                        f"==> Phase 1: refining statements {args.proof_order} for "
+                        f"==> Phase 1: refining statements {PHASE1_STATEMENT_ORDER} for "
                         f"{len(phase1_pending)} node(s) "
                         f"({len(required_skeleton) - len(phase1_pending)} already frozen)",
                         flush=True,
                     )
                     try:
                         sections = _run_phase1(
-                            ctx, sections, phase1_pending, args.proof_order
+                            ctx, sections, phase1_pending, PHASE1_STATEMENT_ORDER
                         )
                         integration_failures = _phase1_recompile_environment(
                             ctx, sections
@@ -13220,44 +13777,8 @@ def main(argv: list[str] | None = None) -> int:
                             _quarantine_labels(
                                 ctx, request.labels, "blueprint_repair_request"
                             )
-                        elif request.failure_route is not None:
-                            routes = request.failure_routes or [
-                                request.failure_route
-                            ]
-                            for route in routes:
-                                if route.action in {
-                                    "isolate",
-                                    "singleton",
-                                    "independent",
-                                }:
-                                    _quarantine_labels(
-                                        ctx,
-                                        route.failed_labels,
-                                        "phase1_generation_retry",
-                                    )
-                                elif route.action == "bisect":
-                                    next_size = max(
-                                        len(part) for part in route.parts
-                                    )
-                                    if next_size < (
-                                        ctx.effective_section_size
-                                        or ctx.section_size
-                                    ):
-                                        ctx.effective_section_size = next_size
-                                        ctx.section_clean_streak = 0
-                            _record(
-                                ctx.telemetry,
-                                "phase1_failure_routes_applied",
-                                route_count=len(routes),
-                                actions=[route.action for route in routes],
-                                failing_groups=[
-                                    list(route.failed_labels) for route in routes
-                                ],
-                            )
                         else:
-                            _quarantine_labels(
-                                ctx, request.labels, "phase1_generation_retry"
-                            )
+                            _apply_phase1_retry_scheduling(ctx, request)
                         repair_helpers = request.decomposition_helpers
                         # Defense in depth: no caller may widen an editable
                         # normalization scope beyond the labels whose evidence
@@ -13304,7 +13825,7 @@ def main(argv: list[str] | None = None) -> int:
                 if all_unproved:
                     proof_layer, frontier_labels, proof_roots = (
                         _next_implementation_frontier(
-                            ctx.nodes, all_unproved, args.proof_order
+                            ctx.nodes, all_unproved, PHASE2_PROOF_ORDER
                         )
                     )
                     frontier = set(frontier_labels)
@@ -13319,7 +13840,7 @@ def main(argv: list[str] | None = None) -> int:
                     ]
                 if unproved_by_section:
                     mode_note = (
-                        f"{args.proof_order} frontier {proof_layer} "
+                        f"{PHASE2_PROOF_ORDER} frontier {proof_layer} "
                         f"({len(frontier_labels)} node(s))"
                     )
                     print(
@@ -13330,7 +13851,8 @@ def main(argv: list[str] | None = None) -> int:
                     _record(
                         ctx.telemetry,
                         "proof_frontier_scheduled",
-                        proof_order=args.proof_order,
+                        proof_order=PHASE2_PROOF_ORDER,
+                        phase1_order=PHASE1_STATEMENT_ORDER,
                         layer=proof_layer,
                         labels=frontier_labels,
                         theorem_labels=[
@@ -13393,14 +13915,15 @@ def main(argv: list[str] | None = None) -> int:
                         _record(
                             ctx.telemetry,
                             "proof_frontier_result",
-                            proof_order=args.proof_order,
+                            proof_order=PHASE2_PROOF_ORDER,
+                            phase1_order=PHASE1_STATEMENT_ORDER,
                             layer=proof_layer,
                             labels=frontier_labels,
                             proved_labels=proved_now,
                             remaining_after=len(remaining_after),
                             status="accepted",
                         )
-                        if args.proof_order == "top-down" and proof_layer == 0:
+                        if proof_layer == 0:
                             admitted_dependencies = sorted(
                                 {
                                     dep
@@ -13796,12 +14319,13 @@ def main(argv: list[str] | None = None) -> int:
                     regeneration_labels=sorted(set(invalidated) - deferred_labels),
                     regeneration_count=len(set(invalidated) - deferred_labels),
                     kept_section_count=len(sections),
-                    proof_order=args.proof_order,
+                    proof_order=PHASE2_PROOF_ORDER,
+                    phase1_order=PHASE1_STATEMENT_ORDER,
                 )
                 _record_proof_graph_telemetry(
                     ctx.telemetry,
                     ctx.nodes,
-                    proof_order=args.proof_order,
+                    proof_order=PHASE2_PROOF_ORDER,
                     reason="post_repair",
                     focus_labels=invalidated | changed,
                 )
