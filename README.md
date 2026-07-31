@@ -386,12 +386,19 @@ properties stay on the target contract and its Phase-2 decisions. Statement-leve
 Phase 1 public signature, while their union still drives traversal and Phase 2.
 Dependency authorization is therefore deterministic rather than a critic-model
 judgment. Before generation, a deterministic contract-closure gate builds the
-complete planned symbol/member table. It rejects a generated dotted reference
-such as `A.member` when the planned declaration `A` exposes no `member`, use of
-a helper whose owning node is outside the consumer's statement dependency
-closure, generated target dependencies outside that same closure, and a target
-signature that declares anything other than the node's single canonical public
-Lean target. When one blueprint node defines several related operations, its
+complete planned symbol/member table. For each node it resolves every direct
+statement-level dependency to its canonical generated declaration or settled
+Mathlib name, then checks the parsed target declaration and every typed helper
+field or constructor. One finding reports the complete missing dependency set;
+proof-only dependencies and plan prose do not count. The same gate rejects a
+generated dotted reference such as `A.member` when the planned declaration `A`
+exposes no `member`, use of a helper whose owning node is outside the consumer's
+statement dependency closure, generated target dependencies outside that same
+closure, a generated alias for a `\mathlibok` node instead of that node's
+settled `\lean{...}` name (including aliases inside plan-owned helper member
+types), target/helper declaration cycles, and a target signature that declares
+anything other than the node's single canonical public Lean target.
+When one blueprint node defines several related operations, its
 plan must expose them through one plan-owned type interface returned by that
 canonical target; it cannot create additional public targets that Phase 2 does
 not own. Valid closure results are cached by plan fingerprint and add no model
@@ -404,11 +411,15 @@ rejected consumers first try the retained alternate component with no model
 call. The complete plan is rescored, and the substitution is used only if it
 strictly improves an unclosed plan (or remains mechanically closed when the
 trigger was the later semantic statement audit). If the alternate does not
-work, that connected component receives exactly one targeted base-model
-correction containing the exact findings. If it remains unclosed, the
-component's entries are discarded so the next bounded retry genuinely replans
-them. Unrelated contracts and accepted work remain intact, and an unchanged
-correction-cache hit cannot consume the retry budget in a no-work loop.
+work, all disjoint blocked components receive one targeted base-model
+correction concurrently, bounded by `--workers`. Every call starts from the
+same immutable selected-plan snapshot and receives its complete exact findings.
+Each result is parsed and mechanically rescored independently; successful
+components merge deterministically before one global closure rescore. A failed
+component discards only itself for bounded replanning and cannot roll back a
+successful sibling. Unrelated contracts and accepted work remain intact, and
+an unchanged correction-cache hit cannot consume the retry budget in a no-work
+loop. A completely closed plan adds no correction call.
 Because a plan-shape rejection contains no evidence about model-call capacity,
 it never shrinks the statement section size or quarantines the affected node;
 only an actual generation timeout or failure may train that scheduler.
@@ -608,16 +619,20 @@ dependencies, and direct consumers rather than the full graph-wide plan.
    Section capacity adapts from observed latency rather than mathematical
    guesses. A genuine batch timeout reduces later batch size; two complete
    batches accepted at the current capacity grow it back exponentially, up to
-   `--section-size`. Routed singletons and short tail sections do not count as
-   evidence that a broad batch is safe. A `NEEDS-DECOMPOSITION` response or
+   `--section-size`. An unattributed non-timeout failure is bisected only within
+   that exact statement-fingerprinted group; it does not reduce the capacity of
+   unrelated frontiers. The resulting local parts persist across `--continue`
+   and expire when one of their statements changes or the part freezes. Routed
+   singletons and short tail sections do not count as evidence that a broad
+   batch is safe. A `NEEDS-DECOMPOSITION` response or
    repeated normalized Lean failure naming one node quarantines that exact
    statement version as a singleton until it freezes. Each quarantine record
    stores the statement fingerprint and observed failure class. A blueprint
    repair that changes the statement automatically releases the old record, so
    `--continue` cannot permanently degrade later sections into one-node
    generation/audit calls. Unchanged failing statements remain isolated.
-   Quarantine, retry lifecycle, rejected revision candidates, and capacity are
-   saved to
+   Quarantine, local bisection parts, retry lifecycle, rejected revision
+   candidates, and capacity are saved to
    `skeleton_state.json` immediately
    when they change — and after every frozen part of a split section — so a
    killed or quota-limited run resumes with everything it learned; legacy
@@ -804,13 +819,14 @@ flowchart TD
     BPA --> BPSEL["Deterministically score coverage and contract closure"]
     BPB --> BPSEL
     BPSEL --> BPM["Select the better plan; substitute only improving provider-consumer components"]
-    BPM --> BPC["Deterministic plan closure: dependency authorization plus generated symbol/member table"]
+    BPM --> BPC["Complete deterministic plan closure: every statement dependency plus generated symbol/member/cycle checks"]
     BPC --> BPS{"Closure scheduling"}
     BPS -->|Closed and dependency-ready| BPG["Persist selected plan plus one-use alternate contracts as untrusted guidance"]
     BPS -->|Blocked component reaches frontier| BPAF["Try retained alternate component without a model call"]
-    BPAF -->|Still blocked| BPR["One targeted base correction with exact findings"]
+    BPAF -->|Still blocked| BPR["Correct disjoint blocked components concurrently from one immutable plan snapshot"]
     BPAF -->|Closed| BPC
-    BPR --> BPC
+    BPR --> BPMERGE["Validate each component; merge successful disjoint results; discard only failed components"]
+    BPMERGE --> BPC
     BPG --> BU["Phase 1: recompute all pending nodes whose own generated dependencies are frozen"]
     BU --> C1["Canonical ingestion and closure gate: targets plus exact plan-owned type interfaces only"]
     C1 -->|Owner/helper cycle required by accepted plan| BPR
@@ -1243,6 +1259,10 @@ The telemetry is raw observation data, not guessed labels. It stores:
   generated from those proposals, including post-audit plan revisions and
   candidate invalidation when an unchanged plan cannot produce an acceptable
   statement;
+- complete deterministic plan-closure evaluations, including required,
+  represented, and missing statement dependencies; provider-consumer repair
+  components; alternate use; concurrent correction-wave timing and merge
+  outcomes; and whether corrected contracts later froze successfully;
 - layer-level validated-contract transaction order, uncompiled candidate
   generation, fingerprint-safe candidate reuse, environment-fallback outcomes,
   bounded in-transaction compiler corrections, compilation/freeze events,

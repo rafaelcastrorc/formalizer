@@ -37,7 +37,9 @@ from formalize_blueprint import (  # noqa: E402
     _evaluate_design_plan_candidate,
     _merge_design_plan_candidates,
     _design_plan_prompt,
+    _design_plan_contract_closure_issues,
     _design_plan_contract_closure_findings,
+    _validate_design_plan_contract_closure,
     _ensure_phase1_design_plan,
     _findings_require_plan_revision,
     _generation_feedback_for,
@@ -64,6 +66,7 @@ from formalize_blueprint import (  # noqa: E402
     _prune_stale_generated,
     _prune_stale_generation_feedback,
     _prune_stale_generation_candidates,
+    _prune_stale_local_group_partitions,
     _prune_stale_quarantine,
     _prune_stale_retry_lifecycle,
     _parse_module,
@@ -88,6 +91,7 @@ from formalize_blueprint import (  # noqa: E402
     _compile_semantic_phase1_candidates,
     _compile_and_finalize_semantic_candidates,
     _correct_phase1_design_plan,
+    _repair_phase1_design_plan_closure,
     _reusable_uncompiled_candidate,
     _retained_generation_candidate_code,
     _salvage_partial_phase1_response,
@@ -1388,6 +1392,228 @@ theorem lem_c : Nat = Nat := by sorry
             {"def_inner_norm": "inner", "def_finite_real_arrays": "Fin"},
         )
 
+    def test_plan_closure_rejects_mathlib_alias_in_target_signature(self) -> None:
+        label = "def:consumer"
+        ctx = SimpleNamespace(
+            nodes={
+                "def:affine-map": node(
+                    "def:affine-map", mathlibok=True, lean_decl="AffineMap"
+                ),
+                label: node(label, uses={"def:affine-map"}),
+            },
+            stmt_fps={label: "consumer-v1"},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "statement_fp": "consumer-v1",
+                    "target_signature": "def def_consumer : def_affine_map",
+                    "helpers": [],
+                    "decisions": [],
+                }
+            },
+            design_plan="",
+            paper_text="",
+            telemetry=FakeTelemetry(),
+        )
+
+        findings = _validate_design_plan_contract_closure(ctx, [label])
+
+        self.assertIn(label, findings)
+        self.assertIn("Mathlib-owned def:affine-map", findings[label][0])
+        self.assertIn("`AffineMap`", findings[label][0])
+        self.assertNotIn("closure_fp", ctx.design_plan_entries[label])
+
+    def test_plan_closure_checks_mathlib_alias_in_helper_member_type(self) -> None:
+        label = "def:consumer"
+        ctx = SimpleNamespace(
+            nodes={
+                "def:affine-map": node(
+                    "def:affine-map", mathlibok=True, lean_decl="AffineMap"
+                ),
+                label: node(label, uses={"def:affine-map"}),
+            },
+            stmt_fps={label: "consumer-v1"},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "statement_fp": "consumer-v1",
+                    "target_signature": "def def_consumer : ConsumerInterface",
+                    "helpers": [
+                        {
+                            "name": "ConsumerInterface",
+                            "kind": "structure",
+                            "members": [
+                                {"name": "map", "type": "def_affine_map"}
+                            ],
+                            "required_members": ["map"],
+                            "purpose": "consumer interface",
+                        }
+                    ],
+                    "decisions": [],
+                }
+            },
+            design_plan="",
+            paper_text="",
+            telemetry=FakeTelemetry(),
+        )
+
+        findings = _validate_design_plan_contract_closure(ctx, [label])
+
+        self.assertIn(label, findings)
+        self.assertIn("generated alias `def_affine_map`", findings[label][0])
+        self.assertNotIn("closure_fp", ctx.design_plan_entries[label])
+
+    def test_plan_closure_accepts_settled_mathlib_name(self) -> None:
+        label = "def:consumer"
+        ctx = SimpleNamespace(
+            nodes={
+                "def:affine-map": node(
+                    "def:affine-map", mathlibok=True, lean_decl="AffineMap"
+                ),
+                label: node(label, uses={"def:affine-map"}),
+            },
+            stmt_fps={label: "consumer-v1"},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "statement_fp": "consumer-v1",
+                    "target_signature": "def def_consumer : AffineMap",
+                    "helpers": [],
+                    "decisions": [],
+                }
+            },
+            design_plan="",
+            paper_text="",
+            telemetry=FakeTelemetry(),
+        )
+
+        self.assertEqual(
+            _validate_design_plan_contract_closure(ctx, [label]),
+            {},
+        )
+        self.assertIn("closure_fp", ctx.design_plan_entries[label])
+
+    def test_plan_closure_reports_all_missing_statement_dependencies_once(self) -> None:
+        left = "def:left"
+        right = "def:right"
+        consumer = "lem:consumer"
+        ctx = SimpleNamespace(
+            nodes={
+                left: node(left),
+                right: node(right),
+                consumer: node(consumer, uses={left, right}),
+            },
+            design_plan_entries={
+                left: {"target_signature": "def def_left : Nat", "helpers": []},
+                right: {"target_signature": "def def_right : Nat", "helpers": []},
+                consumer: {
+                    "target_signature": "theorem lem_consumer : True",
+                    "helpers": [],
+                },
+            },
+        )
+
+        issues = [
+            issue
+            for issue in _design_plan_contract_closure_issues(ctx, [consumer])
+            if issue.missing_required_dependencies
+        ]
+
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(
+            set(issues[0].missing_required_dependencies),
+            {f"{left} -> `def_left`", f"{right} -> `def_right`"},
+        )
+        self.assertEqual(set(issues[0].providers), {left, right})
+
+    def test_plan_closure_ignores_proof_only_dependencies(self) -> None:
+        dependency = "def:proof-tool"
+        consumer = "lem:consumer"
+        proof_node = node(consumer, uses={dependency})
+        proof_node.statement_uses = set()
+        proof_node.proof_uses = {dependency}
+        ctx = SimpleNamespace(
+            nodes={dependency: node(dependency), consumer: proof_node},
+            design_plan_entries={
+                dependency: {
+                    "target_signature": "def def_proof_tool : Nat",
+                    "helpers": [],
+                },
+                consumer: {
+                    "target_signature": "theorem lem_consumer : True",
+                    "helpers": [],
+                },
+            },
+        )
+
+        self.assertEqual(
+            _design_plan_contract_closure_findings(ctx, [consumer]),
+            {},
+        )
+
+    def test_plan_closure_counts_typed_helper_member_dependencies(self) -> None:
+        dependency = "def:network"
+        consumer = "def:consumer"
+        ctx = SimpleNamespace(
+            nodes={
+                dependency: node(dependency),
+                consumer: node(consumer, uses={dependency}),
+            },
+            design_plan_entries={
+                dependency: {
+                    "target_signature": "def def_network : Nat",
+                    "helpers": [],
+                },
+                consumer: {
+                    "target_signature": "def def_consumer : ConsumerInterface",
+                    "helpers": [
+                        {
+                            "name": "ConsumerInterface",
+                            "kind": "structure",
+                            "members": [
+                                {"name": "network", "type": "def_network = 0"}
+                            ],
+                            "required_members": ["network"],
+                        }
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(
+            _design_plan_contract_closure_findings(ctx, [consumer]),
+            {},
+        )
+
+    def test_plan_closure_rejects_target_helper_cycle_before_generation(self) -> None:
+        label = "def:network"
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            design_plan_entries={
+                label: {
+                    "target_signature": "def def_network : NetworkInterface",
+                    "helpers": [
+                        {
+                            "name": "NetworkInterface",
+                            "kind": "structure",
+                            "members": [
+                                {"name": "owner", "type": "def_network = def_network"}
+                            ],
+                            "required_members": ["owner"],
+                        }
+                    ],
+                }
+            },
+        )
+
+        findings = _design_plan_contract_closure_findings(ctx, [label])
+
+        self.assertIn(label, findings)
+        self.assertIn(
+            "def_network -> NetworkInterface -> def_network",
+            "\n".join(findings[label]),
+        )
+
     def test_refused_node_isolated_without_bisecting_neighbors(self) -> None:
         labels = ["a", "b", "hard", "c", "d"]
         self.assertEqual(
@@ -2077,6 +2303,92 @@ def def_tab : Type := sorry
             ),
             telemetry.events,
         )
+
+    def test_bisection_partitions_only_the_failed_group(self) -> None:
+        labels = ["failed-a", "failed-b"]
+        telemetry = FakeTelemetry()
+        ctx = SimpleNamespace(
+            nodes={label: node(label) for label in labels},
+            telemetry=telemetry,
+            section_size=12,
+            effective_section_size=6,
+            section_clean_streak=1,
+            stmt_fps={label: f"fp-{label}" for label in labels},
+            quarantined_labels=set(),
+            quarantine={},
+            local_group_partitions={},
+        )
+        route = _route_lean_generation_failure(labels)
+        request = RepairRequest(
+            "unattributed two-node failure",
+            labels,
+            failure_route=route,
+            authorizes_blueprint_repair=False,
+        )
+
+        _apply_phase1_retry_scheduling(ctx, request)
+
+        self.assertEqual(ctx.effective_section_size, 6)
+        self.assertEqual(ctx.section_clean_streak, 1)
+        self.assertEqual(
+            ctx.local_group_partitions["failed-a"]["group"], ["failed-a"]
+        )
+        self.assertEqual(
+            ctx.local_group_partitions["failed-b"]["group"], ["failed-b"]
+        )
+        order = ["easy-a", "easy-b", "failed-a", "failed-b", "easy-c", "easy-d"]
+        self.assertEqual(
+            _next_phase1_group(
+                order, 0, 6, set(), ctx.local_group_partitions
+            ),
+            ["easy-a", "easy-b"],
+        )
+        self.assertEqual(
+            _next_phase1_group(
+                order, 2, 6, set(), ctx.local_group_partitions
+            ),
+            ["failed-a"],
+        )
+        self.assertEqual(
+            _next_phase1_group(
+                order, 3, 6, set(), ctx.local_group_partitions
+            ),
+            ["failed-b"],
+        )
+        self.assertEqual(
+            _next_phase1_group(
+                order, 4, 6, set(), ctx.local_group_partitions
+            ),
+            ["easy-c", "easy-d"],
+        )
+
+    def test_local_bisection_expires_when_a_statement_changes(self) -> None:
+        labels = ["failed-a", "failed-b"]
+        ctx = SimpleNamespace(
+            nodes={label: node(label) for label in labels},
+            telemetry=FakeTelemetry(),
+            section_size=12,
+            effective_section_size=6,
+            section_clean_streak=0,
+            stmt_fps={label: f"fp-{label}" for label in labels},
+            quarantined_labels=set(),
+            quarantine={},
+            local_group_partitions={},
+        )
+        request = RepairRequest(
+            "unattributed two-node failure",
+            labels,
+            failure_route=_route_lean_generation_failure(labels),
+            authorizes_blueprint_repair=False,
+        )
+        _apply_phase1_retry_scheduling(ctx, request)
+
+        ctx.stmt_fps["failed-a"] = "changed"
+        stale = _prune_stale_local_group_partitions(ctx)
+
+        self.assertIn("failed-a", stale)
+        self.assertNotIn("failed-a", ctx.local_group_partitions)
+        self.assertIn("failed-b", ctx.local_group_partitions)
 
     def test_phase1_allows_typed_definition_body_to_be_deferred(self) -> None:
         findings = _skeleton_code_findings(
@@ -3139,9 +3451,33 @@ end ModelOutput
                 _save_state(
                     "paper",
                     [section],
-                    {"cached": "statement", "hard": "hard-v1"},
+                    {
+                        "cached": "statement",
+                        "hard": "hard-v1",
+                        "peer": "peer-v1",
+                    },
                     {"cached": "contract"},
                     quarantined_labels={"hard"},
+                    local_group_partitions={
+                        "hard": {
+                            "partition_id": "part-a",
+                            "statement_fp": "hard-v1",
+                            "statement_fps": {
+                                "hard": "hard-v1",
+                                "peer": "peer-v1",
+                            },
+                            "group": ["hard", "peer"],
+                        },
+                        "peer": {
+                            "partition_id": "part-a",
+                            "statement_fp": "peer-v1",
+                            "statement_fps": {
+                                "hard": "hard-v1",
+                                "peer": "peer-v1",
+                            },
+                            "group": ["hard", "peer"],
+                        },
+                    },
                     generation_feedback={
                         "hard": {
                             "statement_fp": "hard-v1",
@@ -3201,7 +3537,7 @@ end ModelOutput
                     refinement_order="top-down",
                 )
             payload = json.loads(state.read_text(encoding="utf-8"))
-            self.assertEqual(payload["version"], 16)
+            self.assertEqual(payload["version"], 17)
             self.assertEqual(payload["refinement_order"], "top-down")
             self.assertEqual(
                 payload["scheduler"]["quarantine"],
@@ -3213,6 +3549,10 @@ end ModelOutput
                 },
             )
             self.assertEqual(payload["scheduler"]["effective_section_size"], 6)
+            self.assertEqual(
+                payload["scheduler"]["local_group_partitions"]["hard"]["group"],
+                ["hard", "peer"],
+            )
             self.assertEqual(
                 payload["scheduler"]["generation_feedback"]["hard"]["evidence"],
                 "audit rejected the declaration",
@@ -3260,11 +3600,20 @@ end ModelOutput
 
             ctx = SimpleNamespace(
                 name="paper",
-                nodes={"cached": node("cached"), "hard": node("hard")},
-                stmt_fps={"cached": "statement", "hard": "hard-v1"},
+                nodes={
+                    "cached": node("cached"),
+                    "hard": node("hard"),
+                    "peer": node("peer"),
+                },
+                stmt_fps={
+                    "cached": "statement",
+                    "hard": "hard-v1",
+                    "peer": "peer-v1",
+                },
                 contract_fps={"cached": "contract"},
                 quarantined_labels=set(),
                 quarantine={},
+                local_group_partitions={},
                 generation_feedback={},
                 generation_candidates={},
                 retry_lifecycle={},
@@ -3287,6 +3636,9 @@ end ModelOutput
                 ctx.quarantine["hard"]["failure_class"], "unspecified"
             )
             self.assertEqual(ctx.effective_section_size, 6)
+            self.assertEqual(
+                ctx.local_group_partitions["peer"]["group"], ["hard", "peer"]
+            )
             self.assertEqual(
                 ctx.generation_feedback["hard"]["evidence"],
                 "audit rejected the declaration",
@@ -3980,6 +4332,134 @@ end ModelOutput
             {provider, consumer},
         )
         self.assertEqual(invalidations[0]["rejected_labels"], [consumer])
+
+    def test_disjoint_plan_closure_components_correct_concurrently(self) -> None:
+        providers = ["def:a", "def:b"]
+        consumers = ["lem:a", "lem:b"]
+        nodes = {
+            providers[0]: node(providers[0]),
+            providers[1]: node(providers[1]),
+            consumers[0]: node(consumers[0], uses={providers[0]}),
+            consumers[1]: node(consumers[1], uses={providers[1]}),
+        }
+        entries = {
+            providers[0]: {"target_signature": "def def_a : Nat", "helpers": []},
+            providers[1]: {"target_signature": "def def_b : Nat", "helpers": []},
+            consumers[0]: {"target_signature": "theorem lem_a : True", "helpers": []},
+            consumers[1]: {"target_signature": "theorem lem_b : True", "helpers": []},
+        }
+        ctx = SimpleNamespace(
+            name="test",
+            nodes=nodes,
+            stmt_fps={label: f"{label}-v1" for label in nodes},
+            design_plan="",
+            design_plan_entries=copy.deepcopy(entries),
+            design_plan_alternates={},
+            paper_text="",
+            telemetry=FakeTelemetry(),
+            workers=2,
+        )
+        findings = _validate_design_plan_contract_closure(ctx, list(nodes))
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def correct(isolated, labels, _evidence, **_kwargs):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.03)
+            for consumer, provider in zip(consumers, providers):
+                if consumer in labels:
+                    isolated.design_plan_entries[consumer]["target_signature"] = (
+                        f"theorem {_lean_name(consumer)} : "
+                        f"{_lean_name(provider)} = {_lean_name(provider)}"
+                    )
+            with lock:
+                active -= 1
+            return True
+
+        with patch(
+            "formalize_blueprint._correct_phase1_design_plan",
+            side_effect=correct,
+        ):
+            _repair_phase1_design_plan_closure(
+                ctx, list(nodes), findings
+            )
+
+        self.assertEqual(peak, 2)
+        self.assertIn("def_a", ctx.design_plan_entries[consumers[0]]["target_signature"])
+        self.assertIn("def_b", ctx.design_plan_entries[consumers[1]]["target_signature"])
+        waves = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_design_plan_closure_wave"
+        ]
+        self.assertEqual(waves[-1]["worker_count"], 2)
+        self.assertEqual(waves[-1]["component_count"], 2)
+
+    def test_failed_closure_component_does_not_discard_successful_sibling(self) -> None:
+        good_provider, bad_provider = "def:good", "def:bad"
+        good_consumer, bad_consumer = "lem:good", "lem:bad"
+        nodes = {
+            good_provider: node(good_provider),
+            bad_provider: node(bad_provider),
+            good_consumer: node(good_consumer, uses={good_provider}),
+            bad_consumer: node(bad_consumer, uses={bad_provider}),
+        }
+        ctx = SimpleNamespace(
+            name="test",
+            nodes=nodes,
+            stmt_fps={label: f"{label}-v1" for label in nodes},
+            design_plan="",
+            design_plan_entries={
+                good_provider: {
+                    "target_signature": "def def_good : Nat",
+                    "helpers": [],
+                },
+                bad_provider: {
+                    "target_signature": "def def_bad : Nat",
+                    "helpers": [],
+                },
+                good_consumer: {
+                    "target_signature": "theorem lem_good : True",
+                    "helpers": [],
+                },
+                bad_consumer: {
+                    "target_signature": "theorem lem_bad : True",
+                    "helpers": [],
+                },
+            },
+            design_plan_alternates={},
+            paper_text="",
+            telemetry=FakeTelemetry(),
+            workers=2,
+        )
+        findings = _validate_design_plan_contract_closure(ctx, list(nodes))
+
+        def correct(isolated, labels, _evidence, **_kwargs):
+            if good_consumer not in labels:
+                return False
+            isolated.design_plan_entries[good_consumer]["target_signature"] = (
+                "theorem lem_good : def_good = def_good"
+            )
+            return True
+
+        with patch(
+            "formalize_blueprint._correct_phase1_design_plan",
+            side_effect=correct,
+        ):
+            with self.assertRaises(RepairRequest):
+                _repair_phase1_design_plan_closure(
+                    ctx, list(nodes), findings
+                )
+
+        self.assertIn(good_provider, ctx.design_plan_entries)
+        self.assertIn(good_consumer, ctx.design_plan_entries)
+        self.assertIn("def_good", ctx.design_plan_entries[good_consumer]["target_signature"])
+        self.assertNotIn(bad_provider, ctx.design_plan_entries)
+        self.assertNotIn(bad_consumer, ctx.design_plan_entries)
 
     def test_deferred_closure_blocks_provider_component_not_unrelated_work(self) -> None:
         provider = "def:network"

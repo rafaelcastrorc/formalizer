@@ -4,6 +4,108 @@ This file records the most recent behavioral changes to Auto-Blueprint. Each
 entry states the observed problem, its root cause, the implemented solution,
 and the verification performed. New changes should be added above older ones.
 
+## 2026-07-30: Complete Contract Closure Before Statement Generation
+
+### Observed issue
+
+The existing closure gate rejected unauthorized generated references and
+missing provider members, but it did not enforce the converse: every direct
+statement-level blueprint dependency had to appear somewhere in the planned
+target or its typed helper interface. A mechanically incomplete plan could
+therefore reach statement generation and reveal omitted dependencies one at a
+time through generation, compilation, and semantic-audit retries. Independent
+blocked closure components were also corrected serially even though the graph
+already proved they shared no provider or consumer.
+
+### Implemented solution
+
+- The existing closure evaluation now resolves every direct statement
+  dependency to its canonical generated declaration or settled Mathlib name.
+- Exact Lean identifier matching scans the parsed target declaration and every
+  typed helper field or constructor. Proof-only dependencies and free-form plan
+  prose do not constrain this check.
+- One structured finding reports the complete missing set and joins the
+  consumer to every implicated generated provider in the existing closure
+  graph. Existing member, ownership, alias, duplicate-target, unauthorized
+  reference, and target/helper-cycle checks remain active.
+- Retained alternates are still tried first without a model call. Remaining
+  disjoint components are corrected concurrently, bounded by `--workers`, from
+  one immutable selected-plan snapshot. Each response is parsed and rescored
+  independently; successful components merge deterministically, while a failed
+  component discards only itself.
+- The closure fingerprint version was incremented so continuation revalidates
+  old plans. Healthy closed plans incur no new model or critic call.
+
+### Telemetry and verification
+
+- Closure events now include complete required, represented, and missing
+  dependency sets. Correction waves record component/provider labels,
+  concurrency, timing, pre/post scores, merge results, and later statement-
+  freeze outcomes.
+- Classifier dataset export includes closure-wave and closure-outcome events.
+- Regressions cover aggregate missing dependencies, proof-only exclusion,
+  Mathlib names, typed helper coverage, pre-generation cycles, concurrent
+  disjoint repair, and failed-component isolation.
+
+## 2026-07-30: Reject Generated Aliases for Mathlib-Owned Plan Dependencies
+
+### Observed issue
+
+The design-plan prompt correctly told models that `def:affine-map` is
+Mathlib-owned as `AffineMap`, but the deterministic plan-closure validator did
+not enforce that rule. In `run-20260730-191253.log`, `def_affine_map` therefore
+survived planning and reached Lean, which reported it as an unknown identifier.
+The later refusal handler could diagnose this mapping, but only after generation
+and compilation time had already been spent.
+
+### Implemented solution
+
+- The existing deterministic plan-closure gate now rejects a generated label
+  alias whenever the corresponding blueprint node is marked `\mathlibok` and
+  has a different settled `\lean{...}` declaration.
+- The check covers both canonical target signatures and types of members in
+  plan-owned helper interfaces.
+- It does not require proof-only Mathlib dependencies to appear in public
+  contracts; it only rejects the wrong name when the plan actually uses it.
+- The closure fingerprint version was incremented so persisted plans are
+  revalidated on continuation. No model call was added.
+
+### Verification
+
+- Regression coverage rejects `def_affine_map` in a target signature and in a
+  helper member type, while accepting the settled `AffineMap` spelling.
+- The complete repository suite passes.
+
+## 2026-07-30: Keep Failure Bisection Local to Its Contract Group
+
+### Observed issue
+
+In `run-20260730-191253.log`, Phase 1 had recovered its adaptive section size
+to six. An unresolved two-contract group containing `lem:faces-preserve-Pk`
+and `constr:delta3-rhombic` was then bisected into two singletons. The scheduler
+copied that local part size into the run-global capacity, so the next unrelated
+17-contract frontier was scheduled entirely as singleton calls. Only four of
+those contracts were quarantined.
+
+### Implemented solution
+
+- A non-timeout `bisect` route no longer changes `effective_section_size`.
+- The resulting parts are stored as local, statement-fingerprinted scheduling
+  constraints for only the failed group.
+- Broad groups stop at a local-part boundary; each failed part is retried as
+  routed while unrelated contracts retain the current global capacity.
+- Local parts persist through `--continue` and are released after they freeze
+  or any participating statement changes.
+- Genuine batch timeouts retain the existing adaptive capacity behavior because
+  they are measured evidence that the requested batch did not fit its timeout.
+
+### Verification
+
+- Regression coverage reproduces the two-node bisection with global capacity
+  six and verifies that unrelated neighbors remain broadly grouped.
+- Persistence and statement-fingerprint invalidation are covered.
+- The complete repository suite passes: 172 tests.
+
 ## 2026-07-30: Preserve Compiler Transactions Without Weakening Phase 1
 
 ### Observed issue

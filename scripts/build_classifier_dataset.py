@@ -145,6 +145,8 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
             "phase1_design_plan_closure",
             "phase1_design_plan_closure_deferred",
             "phase1_outline_plan_closure_correction",
+            "phase1_design_plan_closure_wave",
+            "phase1_design_plan_closure_outcome",
         }:
             phase1_design_plan_events.append(event)
         elif etype == "statement_audit":

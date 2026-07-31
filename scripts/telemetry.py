@@ -19,6 +19,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 import uuid
 import urllib.error
@@ -110,6 +111,7 @@ class TelemetryRun:
         self.upload_url = os.environ.get("AUTO_BLUEPRINT_TELEMETRY_URL", "").strip()
         self.upload_token = os.environ.get("AUTO_BLUEPRINT_TELEMETRY_TOKEN", "").strip()
         self.seq = 0
+        self._lock = threading.RLock()
 
         if self.enabled:
             try:
@@ -139,70 +141,72 @@ class TelemetryRun:
     def record(self, event: str, **fields: Any) -> dict[str, Any]:
         if not self.enabled:
             return {}
-        self.seq += 1
-        reserved = {"event", "run_id", "seq", "project", "blueprint", "timestamp"}
-        safe_fields = {
-            (f"{key}_data" if key in reserved else key): value
-            for key, value in fields.items()
-        }
-        payload: dict[str, Any] = {
-            "event": event,
-            "run_id": self.run_id,
-            "seq": self.seq,
-            "project": self.project,
-            "blueprint": self.blueprint,
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            **safe_fields,
-        }
-        line = json.dumps(payload, ensure_ascii=False, default=_json_default)
-        try:
-            with self.run_path.open("a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
-        except OSError:
+        with self._lock:
+            self.seq += 1
+            reserved = {"event", "run_id", "seq", "project", "blueprint", "timestamp"}
+            safe_fields = {
+                (f"{key}_data" if key in reserved else key): value
+                for key, value in fields.items()
+            }
+            payload: dict[str, Any] = {
+                "event": event,
+                "run_id": self.run_id,
+                "seq": self.seq,
+                "project": self.project,
+                "blueprint": self.blueprint,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                **safe_fields,
+            }
+            line = json.dumps(payload, ensure_ascii=False, default=_json_default)
+            try:
+                with self.run_path.open("a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
+            except OSError:
+                return payload
+            self._queue({"kind": "event", "payload": payload})
+            if event in {
+                "model_call",
+                "lean_attempt",
+                "statement_audit",
+                "initial_declaration_section",
+                "initial_declaration_retry",
+                "phase1_statement_refined",
+                "phase1_integration_recheck",
+                "blueprint_repair_applied",
+                "blueprint_repair_noop",
+                "blueprint_repair_result",
+                "repair_invalidation",
+                "proof_frontier_result",
+                "pipeline_progress",
+                "skeleton_audit_patch",
+                "adaptive_section_size",
+                "skeleton_refusal_isolated",
+                "skeleton_refusal_rejected",
+                "skeleton_compile_stagnation",
+                "skeleton_semantic_stagnation",
+                "duplicate_model_exchange",
+                "singleton_compile_escalation",
+                "partial_sections_preserved",
+                "blueprint_repair_scope",
+                "deferred_section_recheck",
+                "run_end",
+            }:
+                self.flush_upload_queue(max_items=50, timeout=2.0)
             return payload
-        self._queue({"kind": "event", "payload": payload})
-        if event in {
-            "model_call",
-            "lean_attempt",
-            "statement_audit",
-            "initial_declaration_section",
-            "initial_declaration_retry",
-            "phase1_statement_refined",
-            "phase1_integration_recheck",
-            "blueprint_repair_applied",
-            "blueprint_repair_noop",
-            "blueprint_repair_result",
-            "repair_invalidation",
-            "proof_frontier_result",
-            "pipeline_progress",
-            "skeleton_audit_patch",
-            "adaptive_section_size",
-            "skeleton_refusal_isolated",
-            "skeleton_refusal_rejected",
-            "skeleton_compile_stagnation",
-            "skeleton_semantic_stagnation",
-            "duplicate_model_exchange",
-            "singleton_compile_escalation",
-            "partial_sections_preserved",
-            "blueprint_repair_scope",
-            "deferred_section_recheck",
-            "run_end",
-        }:
-            self.flush_upload_queue(max_items=50, timeout=2.0)
-        return payload
 
     def store_text(self, kind: str, text: str, *, ext: str = "txt") -> StoredArtifact:
         digest = sha256_text(text)
         safe_kind = _safe_name(kind)
         path = self.artifacts_dir / safe_kind / f"{digest}.{ext.lstrip('.')}"
         if self.enabled:
-            try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                if not path.exists():
-                    path.write_text(text, encoding="utf-8")
-                self._queue_artifact(safe_kind, digest, text)
-            except OSError:
-                pass
+            with self._lock:
+                try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    if not path.exists():
+                        path.write_text(text, encoding="utf-8")
+                    self._queue_artifact(safe_kind, digest, text)
+                except OSError:
+                    pass
         return StoredArtifact(kind=safe_kind, sha256=digest, path=path, chars=len(text))
 
     def _queue_artifact(self, safe_kind: str, digest: str, text: str) -> None:
