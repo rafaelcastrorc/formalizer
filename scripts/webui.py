@@ -27,6 +27,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -55,6 +56,8 @@ MODEL_SUGGESTIONS = {
 }
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+# Library names reach a subprocess argument, so keep them to a safe charset.
+LIB_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 MODEL_SUGGESTION_CACHE: dict[str, object] = {"at": 0.0, "data": {}}
 MODEL_SUGGESTION_TTL_S = 30
@@ -824,14 +827,220 @@ def build_command(action: str, p: dict) -> list[str]:
             cmd.append("--strict")
         return cmd
 
+    if action == "libraries":
+        # Adopting a resolved set rewrites lean-toolchain, the managed block
+        # of lakefile.lean, and the manifest; lean_libs.py snapshots all three
+        # and restores them if any step fails. It runs through the normal job
+        # runner so it can never overlap a formalization run.
+        libs = [n for n in (p.get("libs") or []) if LIB_NAME_RE.match(n)]
+        cmd = [py, str(SCRIPTS / "lean_libs.py"), "apply", "--yes"]
+        # No explicit list => apply the saved selection (the CLI default). Only
+        # pass --libs when the caller really named a set, so the CLI's guard
+        # against applying a narrower-than-selected set stays meaningful.
+        if libs:
+            cmd += ["--libs", ",".join(libs)]
+        if p.get("no_build"):
+            cmd.append("--no-build")
+        return cmd
+
     raise ValueError(f"unknown action: {action}")
 
 
-def lean_status_payload() -> dict:
+def libraries_payload(refresh: bool = False) -> dict:
+    """Installed Lean libraries plus the newest mutually-compatible set.
+
+    Resolution is a pure read of each library's `lean-toolchain` history, so
+    it is safe to run on a UI poll; it is cached for a day because the answer
+    only moves when a library publishes a new toolchain.
+    """
+    try:
+        import lean_libs
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": f"resolver unavailable: {exc}"}
+    try:
+        current = lean_libs.current_state()
+        known = sorted(lean_libs.KNOWN_LIBS)
+        # Project-level: a library you intend to adopt must be in the
+        # resolution BEFORE it is installed, or the resolver keeps proposing a
+        # toolchain that library cannot use.
+        selected = lean_libs.selected_libraries()
+        cached = lean_libs.load_cache()
+        fresh = (
+            cached
+            and not refresh
+            and cached.get("libs") == selected
+            and time.time() - cached.get("resolved_at", 0) < lean_libs.CACHE_TTL_S
+        )
+        if fresh:
+            resolution = cached
+        else:
+            res, _states = lean_libs.resolve(selected, quiet=True)
+            resolution = res.to_dict() | {"libs": selected, "current": current}
+            lean_libs.save_cache(resolution)
+        age_s = int(time.time() - resolution.get("resolved_at", 0))
+        return {
+            "ok": True,
+            "current": current,
+            "known": known,
+            "selected": selected,
+            "resolution": resolution,
+            "checked_age_s": age_s,
+            # Every pinned library must be present at its pin - checking only
+            # Mathlib's rev would report "up to date" while a newly selected
+            # library was never installed.
+            "up_to_date": bool(
+                resolution.get("feasible")
+                and resolution.get("toolchain") == current.get("toolchain")
+                and lean_libs._pins_satisfied(resolution.get("pins") or {}, current)
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)}
+
+
+def _meta_libraries(meta_path: Path) -> list[str]:
+    try:
+        import yaml
+
+        data = yaml.safe_load(meta_path.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001
+        return []
+    libs = data.get("libraries")
+    if isinstance(libs, str):
+        libs = [part.strip() for part in libs.split(",")]
+    return [str(x).strip() for x in libs if str(x).strip()] if isinstance(libs, list) else []
+
+
+_META_LIBS_HEADER = [
+    "# Lean libraries searched for candidate declarations, highest priority",
+    "# first. Managed by the web UI's Lean libraries tab.",
+]
+
+
+def _set_meta_libraries(meta_path: Path, libs: list[str]) -> None:
+    """Rewrite a blueprint's `libraries:` order in place.
+
+    Edited as text rather than via a yaml round-trip: meta.yml is
+    comment-documented for humans and safe_load/dump would strip every comment.
+    """
+    lines = meta_path.read_text(encoding="utf-8").splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        # Strip the previously written header too, or every save appends
+        # another copy of it.
+        if lines[i] in _META_LIBS_HEADER:
+            i += 1
+            continue
+        if re.match(r"^libraries\s*:", lines[i]):
+            i += 1
+            while i < len(lines) and re.match(r"^\s*-\s", lines[i]):
+                i += 1  # drop an existing block-style list
+            continue
+        out.append(lines[i])
+        i += 1
+    while out and not out[-1].strip():
+        out.pop()
+    if libs:
+        out.extend(_META_LIBS_HEADER)
+        out.append("libraries: [" + ", ".join(libs) + "]")
+    meta_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def blueprint_libraries_payload(name: str, order: list[str] | None = None) -> dict:
+    """Per-blueprint search priority (meta.yml `libraries:`).
+
+    Distinct from the project-level selected set: selection decides what is
+    INSTALLED and kept mutually compatible, this decides what Generate/Refine
+    SEARCH, and in what order, for one paper.
+    """
+    try:
+        import lean_libs
+
+        meta_path = BLUEPRINTS_DIR / name / "meta.yml"
+        if not meta_path.is_file():
+            return {"ok": False, "message": f"no meta.yml for {name}"}
+        installed = lean_libs.selected_libraries()
+        if order is not None:
+            keep: list[str] = []
+            for lib in order:  # ignore unknown/uninstalled, preserve given order
+                if lib in installed and lib not in keep:
+                    keep.append(lib)
+            _set_meta_libraries(meta_path, keep)
+        current = _meta_libraries(meta_path)
+        return {
+            "ok": True,
+            "name": name,
+            "available": installed,
+            "order": current,
+            # No declared order => the selected set, in selection order.
+            "effective": current or installed,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)}
+
+
+def library_update_brief(refresh: bool = False) -> dict:
+    """What is installed vs. what the resolver says should be, per library.
+
+    Reads the cached resolution by default so the Lean status box stays fast:
+    resolving hits the network (mirror fetches). `refresh` forces a re-resolve.
+    """
+    try:
+        import lean_libs
+
+        selected = lean_libs.selected_libraries()
+        cached = None if refresh else lean_libs.load_cache()
+        if cached and cached.get("libs") != selected:
+            cached = None  # resolved for a different set; not comparable
+        if cached and time.time() - cached.get("resolved_at", 0) >= lean_libs.CACHE_TTL_S:
+            cached = None  # past the daily TTL: re-check upstream unprompted
+        if cached is None:
+            res, _states = lean_libs.resolve(selected, quiet=True)
+            cached = res.to_dict() | {"libs": selected}
+            lean_libs.save_cache(cached)
+        cur = lean_libs.current_state()
+        checkouts = cur.get("checkouts", {})
+        pins = cached.get("pins") or {}
+        stale = cached.get("staleness_days") or {}
+        rows = []
+        for name in selected:
+            want = pins.get(name)
+            have = checkouts.get(name.lower())
+            rows.append({
+                "name": name,
+                "installed": have,
+                "resolved": want,
+                # Not installed at all, or installed at a different revision.
+                "needs_update": bool(want) and have != want,
+                "behind_days": stale.get(name),
+            })
+        tc_now, tc_want = cur.get("toolchain"), cached.get("toolchain")
+        return {
+            "ok": True,
+            "feasible": bool(cached.get("feasible")),
+            "reason": cached.get("reason") or "",
+            "toolchain": tc_want,
+            "toolchain_installed": tc_now,
+            "toolchain_changes": bool(tc_want) and tc_now != tc_want,
+            "rows": rows,
+            "needs_update": any(r["needs_update"] for r in rows)
+                            or (bool(tc_want) and tc_now != tc_want),
+            "checked_age_s": int(time.time() - cached.get("resolved_at", 0)),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)}
+
+
+def lean_status_payload(refresh_libs: bool = False) -> dict:
     """Return a JSON-ready Lean setup status for the browser UI."""
     try:
         result = check_lean_environment(REPO_ROOT, lean_command=default_lean_command(REPO_ROOT))
-        return result.to_dict()
+        payload = result.to_dict()
+        # Setup can be "ready" while libraries are behind: report both here so
+        # one panel answers "can Lean run?" and "is anything out of date?".
+        payload["libraries"] = library_update_brief(refresh=refresh_libs)
+        return payload
     except Exception as exc:  # noqa: BLE001 - status endpoint should explain all setup failures
         return {
             "ok": False,
@@ -949,7 +1158,39 @@ class Handler(BaseHTTPRequestHandler):
                 "job": job_status,
             })
         elif path == "/api/lean/status":
-            self.send_json(lean_status_payload())
+            params = {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
+            self.send_json(lean_status_payload(refresh_libs=params.get("refresh") == "1"))
+        elif path == "/api/libraries":
+            # urlencoded: the browser sends commas as %2C, and a raw split would
+            # hand LIB_NAME_RE one undecodable blob and quietly select nothing.
+            params = {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
+            if params.get("select"):
+                try:
+                    import lean_libs
+
+                    names = [
+                        n for n in params["select"].split(",") if LIB_NAME_RE.match(n)
+                    ]
+                    lean_libs.set_selected_libraries(names)
+                except Exception:  # noqa: BLE001
+                    pass
+            self.send_json(
+                libraries_payload(
+                    refresh=params.get("refresh") == "1" or bool(params.get("select"))
+                )
+            )
+        elif path == "/api/blueprint-libraries":
+            params = {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
+            name = params.get("name", "")
+            if not LIB_NAME_RE.match(name):
+                self.send_json({"ok": False, "message": "bad blueprint name"})
+            else:
+                order = None
+                if "order" in params:
+                    order = [
+                        n for n in params["order"].split(",") if LIB_NAME_RE.match(n)
+                    ]
+                self.send_json(blueprint_libraries_payload(name, order))
         elif path == "/api/log":
             params = dict(kv.split("=", 1) for kv in query.split("&") if "=" in kv)
             offset = int(params.get("offset", 0))
@@ -1053,6 +1294,9 @@ PAGE = r"""<!doctype html>
   .stop { background: transparent; color: var(--bad); border: 1px solid var(--bad);
           padding: 7px 14px; border-radius: 7px; cursor: pointer; display: none; }
   .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  table.libs { border-collapse: collapse; margin: .5rem 0; font-size: 13px; }
+  table.libs th, table.libs td { text-align: left; padding: 3px 14px 3px 0; }
+  table.libs th { color: var(--muted); font-weight: 500; }
   .error { color: var(--bad); font-size: 13px; margin-top: 10px; min-height: 18px; }
   .leanbox { border: 1px solid var(--border); border-radius: 7px; padding: 9px;
              margin-top: 10px; font-size: 12.5px; color: var(--muted); background: var(--bg); }
@@ -1061,6 +1305,15 @@ PAGE = r"""<!doctype html>
   .leanbox button { margin-top: 7px; border: 1px solid var(--border); border-radius: 6px;
                     background: transparent; color: var(--text); padding: 5px 9px; cursor: pointer; }
   .leanbox code { color: var(--text); }
+  /* NOTE: this page is a Python raw string, so a CSS escape like '\25B8' would
+     need care; use the literal glyph instead. */
+  .leanbox summary { cursor: pointer; list-style: none; user-select: none; }
+  .leanbox summary::-webkit-details-marker { display: none; }
+  .leanbox summary::before { content: '▸'; display: inline-block; width: 1em;
+                             transition: transform .12s; }
+  .leanbox details[open] > summary::before { transform: rotate(90deg); }
+  .leanbox .badge { border: 1px solid currentColor; border-radius: 999px;
+                    padding: 0 6px; margin-left: 6px; font-size: 11px; }
   .status { font-size: 13px; margin-left: auto; }
   .status.running { color: var(--accent); } .status.done { color: var(--ok); }
   .status.failed, .status.stopped { color: var(--bad); }
@@ -1134,10 +1387,11 @@ PAGE = r"""<!doctype html>
 </main>
 <script>
 const TABS = [
-  {id:'generate', label:'Generate'},
-  {id:'refine',   label:'Refine with Lean'},
-  {id:'validate', label:'Validate'},
-  {id:'build',    label:'Build site'},
+  {id:'generate',  label:'Generate'},
+  {id:'refine',    label:'Refine with Lean'},
+  {id:'validate',  label:'Validate'},
+  {id:'build',     label:'Build site'},
+  {id:'libraries', label:'Lean libraries'},
 ];
 let state = {blueprints: [], backends: [], efforts: [], model_suggestions: {}, runner_defaults: {}};
 let active = 'generate';
@@ -1582,8 +1836,10 @@ const FORMS = {
     <input type="number" id="f_section_size" value="12" min="1">
     <label>Max blueprint-repair trials</label>
     <input type="number" id="f_trials" value="100" min="1">
-    <div class="leanbox" id="leanStatus">Lean setup not checked.
-      <br><button type="button" onclick="checkLean()">Check Lean setup</button>
+    <div class="leanbox" id="leanStatus">
+      <details><summary>Lean setup not checked.</summary>
+        <button type="button" onclick="checkLean()">Check Lean setup</button>
+      </details>
     </div>
     <div class="check"><input type="checkbox" id="f_continue" checked><label for="f_continue">Continue unpublished refinement <span class="hint">(reuses the blueprint draft, frozen statements, and accepted proofs)</span></label></div>
     ${paperField(false)}
@@ -1602,6 +1858,20 @@ const FORMS = {
     <div class="hint">Select blueprints to rebuild (none = full rebuild).</div>
     ${bpChecks()}
     <div class="check"><input type="checkbox" id="f_strict"><label for="f_strict">Strict (fail if any blueprint fails)</label></div>`,
+  libraries: () => `
+    <div class="hint">A Lean project has one toolchain, and every library pins one.
+      The resolver reads each library's <code>lean-toolchain</code> history and picks the
+      newest version they all support &mdash; nothing is hardcoded, so this moves forward
+      on its own as libraries publish new versions.</div>
+    <div id="libs_body">checking&hellip;</div>
+    <hr style="margin:1rem 0;border:0;border-top:1px solid var(--line,#333)">
+    <div class="hint"><b>Search priority</b> &mdash; which libraries Generate and Refine
+      search for existing declarations, and in what order. Set per blueprint, because
+      different papers want different libraries first. Highest priority at the top;
+      unchecked libraries are not searched at all.</div>
+    <label class="lbl" for="f_libbp">Blueprint</label>
+    <select id="f_libbp" onchange="loadBlueprintLibs()">${bpSelect()}</select>
+    <div id="bplibs_body">&nbsp;</div>`,
 };
 
 function renderTabs(){
@@ -1610,9 +1880,154 @@ function renderTabs(){
 }
 function setTab(id){ active = id; renderTabs(); renderForm(); renderProgress(); }
 
+async function loadLibraries(refresh){
+  const body = el('libs_body');
+  if (!body) return;
+  body.innerHTML = refresh ? 'checking upstream&hellip;' : 'checking&hellip;';
+  let d;
+  try {
+    d = await (await fetch('/api/libraries' + (refresh ? '?refresh=1' : ''))).json();
+  } catch (e) { body.textContent = 'resolver unreachable'; return; }
+  if (!d.ok){ body.textContent = d.message || 'resolver failed'; return; }
+  const cur = d.current || {}, r = d.resolution || {};
+  const age = d.checked_age_s < 90 ? 'just now'
+            : d.checked_age_s < 5400 ? Math.round(d.checked_age_s/60) + ' min ago'
+            : Math.round(d.checked_age_s/3600) + ' h ago';
+  let html = '<table class="libs"><tr><th>library</th><th>pinned</th><th>behind head</th></tr>';
+  if (r.feasible){
+    for (const [name, sha] of Object.entries(r.pins || {})){
+      const d0 = (r.staleness_days || {})[name];
+      html += `<tr><td>${esc(name)}</td><td><code>${esc(sha.slice(0,12))}</code></td>`
+           +  `<td>${d0 === 0 ? 'head' : d0 + 'd'}</td></tr>`;
+    }
+  }
+  html += '</table>';
+  const label = r.feasible
+    ? `resolved toolchain <code>${esc((r.toolchain||'').split(':').pop())}</code>`
+    : `<b>no common toolchain</b> &mdash; ${esc(r.reason || '')}`;
+  const groups = !r.feasible && r.groups
+    ? '<div class="hint">' + Object.entries(r.groups).map(([tc, ns]) =>
+        `${esc(tc.split(':').pop())}: ${ns.map(esc).join(', ')}`).join('<br>') + '</div>'
+    : '';
+  const status = d.up_to_date
+    ? '<span class="dot built"></span> up to date'
+    : (r.feasible ? '<b>differs from installed</b> &mdash; applying rebuilds Lean state' : '');
+  const picker = (d.known || []).map(n => {
+    const on = (d.selected || []).includes(n);
+    const lock = n === 'mathlib' ? ' disabled' : '';
+    return `<label style="margin-right:1rem"><input type="checkbox" class="libpick" value="${esc(n)}"`
+         + `${on ? ' checked' : ''}${lock} onchange="selectLibraries()"> ${esc(n)}</label>`;
+  }).join('');
+  body.innerHTML = `
+    <div class="hint">Keep compatible:</div><div style="margin:.3rem 0">${picker}</div>`;
+  body.innerHTML += `
+    <div>installed: <code>${esc((cur.toolchain||'?').split(':').pop())}</code>
+         &middot; mathlib <code>${esc(String(cur.mathlib_rev||'').slice(0,12))}</code></div>
+    <div style="margin:.35rem 0">${label} &middot; checked ${age} ${status}</div>
+    ${groups}${html}
+    <button type="button" onclick="loadLibraries(true)">Check now</button>
+    ${(!d.up_to_date && r.feasible)
+        ? ` <button type="button" onclick="applyLibraries(${JSON.stringify(d.selected).replace(/"/g,'&quot;')})">Apply &amp; rebuild</button>`
+        : ''}`;
+}
+
+// Per-blueprint search priority (meta.yml `libraries:`). Kept separate from the
+// selected set above: selection decides what is installed, this decides what
+// Generate/Refine search, and in what order, for one paper.
+let bplibs = {name:'', order:[], available:[]};
+
+async function loadBlueprintLibs(){
+  const body = el('bplibs_body'), sel = el('f_libbp');
+  if (!body || !sel || !sel.value) { if (body) body.innerHTML = ''; return; }
+  body.innerHTML = 'loading&hellip;';
+  let d;
+  try {
+    d = await (await fetch('/api/blueprint-libraries?name=' + encodeURIComponent(sel.value))).json();
+  } catch (e) { body.textContent = 'unreachable'; return; }
+  if (!d.ok){ body.textContent = d.message || 'failed'; return; }
+  bplibs = {name: d.name, order: d.order || [], available: d.available || []};
+  renderBlueprintLibs(d);
+}
+
+function renderBlueprintLibs(d){
+  const body = el('bplibs_body');
+  if (!body) return;
+  // Ranked libraries first in their chosen order, then the unranked ones.
+  const rest = bplibs.available.filter(n => !bplibs.order.includes(n));
+  const rows = bplibs.order.map((n,i) => {
+    const up   = i === 0 ? ' disabled' : '';
+    const down = i === bplibs.order.length - 1 ? ' disabled' : '';
+    return `<tr><td><input type="checkbox" checked onchange="toggleLib('${esc(n)}')"></td>`
+         + `<td>${i+1}</td><td>${esc(n)}</td>`
+         + `<td><button type="button" onclick="moveLib(${i},-1)"${up}>&uarr;</button>`
+         + `<button type="button" onclick="moveLib(${i},1)"${down}>&darr;</button></td></tr>`;
+  }).join('');
+  const restRows = rest.map(n =>
+    `<tr><td><input type="checkbox" onchange="toggleLib('${esc(n)}')"></td>`
+    + `<td>&mdash;</td><td>${esc(n)}</td><td></td></tr>`).join('');
+  const note = bplibs.order.length
+    ? `searched: <code>${bplibs.order.map(esc).join(' &gt; ')}</code>`
+    : `no override &mdash; searched in selection order: `
+      + `<code>${(bplibs.available || []).map(esc).join(' &gt; ')}</code>`;
+  body.innerHTML = `<table class="libs">`
+    + `<tr><th>use</th><th>rank</th><th>library</th><th>order</th></tr>`
+    + rows + restRows + `</table><div class="hint" style="margin-top:.4rem">${note}</div>`;
+}
+
+function moveLib(i, delta){
+  const j = i + delta, o = bplibs.order;
+  if (j < 0 || j >= o.length) return;
+  [o[i], o[j]] = [o[j], o[i]];
+  renderBlueprintLibs();
+  saveBlueprintLibs();
+}
+
+function toggleLib(name){
+  const i = bplibs.order.indexOf(name);
+  if (i >= 0) bplibs.order.splice(i, 1); else bplibs.order.push(name);
+  renderBlueprintLibs();
+  saveBlueprintLibs();
+}
+
+async function saveBlueprintLibs(){
+  try {
+    await fetch('/api/blueprint-libraries?name=' + encodeURIComponent(bplibs.name)
+                + '&order=' + encodeURIComponent(bplibs.order.join(',')));
+  } catch (e) {}
+}
+
+async function selectLibraries(){
+  const picked = [...document.querySelectorAll('.libpick')]
+    .filter(c => c.checked || c.disabled).map(c => c.value);
+  const body = el('libs_body');
+  if (body) body.innerHTML = 'resolving&hellip;';
+  try {
+    await fetch('/api/libraries?select=' + encodeURIComponent(picked.join(',')));
+  } catch (e) {}
+  loadLibraries(false);
+}
+
+async function applyLibraries(libs){
+  if (!confirm('Adopt the resolved library set?\n\nThis rewrites lean-toolchain and the '
+             + 'managed block of lakefile.lean, then rebuilds. Frozen Lean statements '
+             + 'built against the old toolchain will need re-verifying.\n\n'
+             + 'lean_libs.py restores every file it touched if any step fails.')) return;
+  const r = await fetch('/api/run', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({action:'libraries', libs})});
+  const j = await r.json();
+  if (j.error){ el('error').textContent = j.error; return; }
+  el('log').textContent = ''; offset = 0; resetStages();
+}
+
 function renderForm(){
   el('form').innerHTML = FORMS[active]();
   el('error').textContent = '';
+  // The libraries tab drives its own actions; params() has no case for it and
+  // would otherwise fall through to `build`, so a click on Run would silently
+  // rebuild the site.
+  const runBtn = el('runBtn');
+  if (runBtn) runBtn.style.display = (active === 'libraries') ? 'none' : '';
+  if (active === 'libraries') loadLibraries(false);
   effortToggle();
   const fast = el('f_fast');
   if (fast) fast.onchange = toggleFastFields;
@@ -1751,28 +2166,90 @@ async function runLeanSetup(){
   resetStages();
 }
 
-async function checkLean(){
+// Library freshness, rendered inside the same Lean status box: one panel
+// answers both "can Lean run?" and "is anything out of date?".
+function libUpdateHtml(L){
+  if (!L || !L.ok) return '';
+  if (!L.feasible){
+    return `<div style="margin-top:7px"><b>No common toolchain</b> &mdash; ${esc(L.reason || '')}`
+         + `<br><button type="button" onclick="checkLean(true)">Re-check upstream</button></div>`;
+  }
+  const age = L.checked_age_s < 90 ? 'just now'
+            : L.checked_age_s < 5400 ? Math.round(L.checked_age_s/60) + ' min ago'
+            : Math.round(L.checked_age_s/3600) + ' h ago';
+  let rows = '';
+  for (const r of (L.rows || [])){
+    const have = r.installed ? r.installed.slice(0,10) : '(not installed)';
+    const want = r.resolved ? r.resolved.slice(0,10) : '?';
+    const behind = (r.behind_days === 0) ? 'head'
+                 : (r.behind_days == null ? '' : r.behind_days + 'd behind head');
+    rows += `<tr><td>${esc(r.name)}</td>`
+         +  `<td><code>${esc(have)}</code></td>`
+         +  `<td>${r.needs_update ? '&rarr; <code>' + esc(want) + '</code>' : 'current'}</td>`
+         +  `<td class="hint">${esc(behind)}</td></tr>`;
+  }
+  const tc = L.toolchain_changes
+    ? `<div><b>toolchain</b> <code>${esc((L.toolchain_installed||'').split(':').pop())}</code>`
+      + ` &rarr; <code>${esc((L.toolchain||'').split(':').pop())}</code>`
+      + ` &mdash; changing it rebuilds the Lean state</div>`
+    : `<div class="hint">toolchain <code>${esc((L.toolchain||'').split(':').pop())}</code></div>`;
+  const action = L.needs_update
+    ? ` <button type="button" onclick="applyLibraries()">Update libraries</button>`
+    : '';
+  return `<div style="margin-top:9px">`
+       + (L.needs_update ? `<b>Updates available</b>` : `Libraries up to date`)
+       + ` <span class="hint">&middot; checked ${age}</span>`
+       + `<table class="libs" style="margin-top:5px">`
+       + `<tr><th>library</th><th>installed</th><th>resolved</th><th></th></tr>${rows}</table>`
+       + tc
+       + `<button type="button" onclick="checkLean(true)">Check for updates</button>${action}</div>`;
+}
+
+// Whether the Lean box is expanded. Held in JS because checkLean() replaces the
+// box's innerHTML, which would otherwise snap it shut on every refresh.
+let leanOpen = false;
+
+function leanDetails(summaryHtml, bodyHtml){
+  return `<details ${leanOpen ? 'open' : ''} ontoggle="leanOpen = this.open">`
+       + `<summary>${summaryHtml}</summary>${bodyHtml}</details>`;
+}
+
+async function checkLean(refreshLibs){
   const box = el('leanStatus');
   if (!box) return;
   box.className = 'leanbox';
-  box.innerHTML = 'Checking Lean/Lake/Mathlib setup…';
+  box.innerHTML = refreshLibs
+    ? 'Checking upstream for library updates…'
+    : 'Checking Lean/Lake/Mathlib setup…';
   try {
-    const r = await fetch('/api/lean/status');
+    const r = await fetch('/api/lean/status' + (refreshLibs ? '?refresh=1' : ''));
     const j = await r.json();
     const cmd = (j.command || []).join(' ');
     const detail = (j.stderr || j.stdout || '').trim().split('\n').slice(-5).join('\n');
     box.className = 'leanbox ' + (j.ok ? 'ok' : 'bad');
-    box.innerHTML = `${esc(j.message || (j.ok ? 'Lean setup ready' : 'Lean setup failed'))}` +
-      (j.elapsed_s ? ` · ${Number(j.elapsed_s).toFixed(1)}s` : '') +
-      (cmd ? `<br><code>${esc(cmd)}</code>` : '') +
-      (detail ? `<pre style="white-space:pre-wrap;margin:7px 0 0">${esc(detail)}</pre>` : '') +
-      `<br><button type="button" onclick="checkLean()">Check again</button>` +
-      (j.ok ? '' : ` <button type="button" onclick="runLeanSetup()">Run Lean setup</button>`);
+    const L = j.libraries;
+    // Keep the headline outside the fold: collapsed still has to answer
+    // "is Lean ready" and "is anything out of date".
+    const badge = (L && L.ok && L.feasible && L.needs_update)
+      ? `<span class="badge">updates available</span>`
+      : (L && L.ok && !L.feasible ? `<span class="badge">no common toolchain</span>` : '');
+    // Something needing attention opens the box; a clean check leaves it as-is.
+    if (!j.ok || (L && L.ok && (L.needs_update || !L.feasible))) leanOpen = true;
+    box.innerHTML = leanDetails(
+      `${esc(j.message || (j.ok ? 'Lean setup ready' : 'Lean setup failed'))}` +
+        (j.elapsed_s ? ` · ${Number(j.elapsed_s).toFixed(1)}s` : '') + badge,
+      (cmd ? `<code>${esc(cmd)}</code>` : '') +
+        (detail ? `<pre style="white-space:pre-wrap;margin:7px 0 0">${esc(detail)}</pre>` : '') +
+        `<br><button type="button" onclick="checkLean()">Check again</button>` +
+        (j.ok ? '' : ` <button type="button" onclick="runLeanSetup()">Run Lean setup</button>`) +
+        libUpdateHtml(L));
   } catch (e) {
     box.className = 'leanbox bad';
-    box.innerHTML = `Could not check Lean setup: ${esc(String(e))}` +
-      `<br><button type="button" onclick="checkLean()">Check again</button>` +
-      ` <button type="button" onclick="runLeanSetup()">Run Lean setup</button>`;
+    leanOpen = true;
+    box.innerHTML = leanDetails(
+      `Could not check Lean setup: ${esc(String(e))}`,
+      `<button type="button" onclick="checkLean()">Check again</button>` +
+      ` <button type="button" onclick="runLeanSetup()">Run Lean setup</button>`);
   }
 }
 

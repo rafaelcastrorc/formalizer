@@ -677,23 +677,94 @@ def _lean_module_for(root: Path, path: Path) -> str:
     return ".".join(rel.parts)
 
 
-def _library_roots() -> list[tuple[str, Path]]:
-    """Return local Lean library roots; CS Lib is included when installed."""
-    roots: list[tuple[str, Path]] = []
-    mathlib = REPO_ROOT / ".lake" / "packages" / "mathlib" / "Mathlib"
-    if mathlib.is_dir():
-        roots.append(("Mathlib", mathlib))
+# Packages that are build machinery or transitive plumbing rather than a
+# source of citable mathematics. Everything else installed under
+# .lake/packages is offered as a searchable library.
+_NON_LIBRARY_PACKAGES = {
+    "cli", "importgraph", "proofwidgets", "qq", "plausible", "leansearchclient",
+}
+
+
+def _package_source_root(pkg_dir: Path) -> Path | None:
+    """The directory holding a package's .lean sources.
+
+    By convention a Lake package `foo` exposes `Foo/`; fall back to any single
+    capitalised directory, then to the package root.
+    """
+    name = pkg_dir.name.replace("-", "").replace("_", "")
+    # Case-insensitive: packages camel-case their source dir in ways
+    # `capitalize()` cannot guess (physlib -> PhysLib, cslib -> Cslib).
+    for child in sorted(pkg_dir.iterdir()):
+        if child.is_dir() and child.name.replace("-", "").replace("_", "").lower() == name.lower():
+            return child
+    subdirs = [
+        d for d in sorted(pkg_dir.iterdir())
+        if d.is_dir() and d.name[:1].isupper() and not d.name.startswith(".")
+    ]
+    if len(subdirs) == 1:
+        return subdirs[0]
+    return pkg_dir if any(pkg_dir.glob("*.lean")) else None
+
+
+def _blueprint_library_preference(name: str) -> list[str]:
+    """Ordered `libraries:` from the blueprint's meta.yml, if it declares one.
+
+    Different papers want different libraries first - a CS paper wants cslib
+    ahead of Mathlib, a physics paper physlib - so this is per blueprint, not
+    a global setting. Absent or malformed means "no preference".
+    """
+    meta = REPO_ROOT / "blueprints" / name / "meta.yml"
+    if not meta.is_file():
+        return []
+    try:
+        import yaml  # local import: only needed when a blueprint is named
+
+        data = yaml.safe_load(meta.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return []
+    libs = data.get("libraries")
+    if isinstance(libs, str):
+        libs = [part.strip() for part in libs.split(",")]
+    if not isinstance(libs, list):
+        return []
+    return [str(item).strip() for item in libs if str(item).strip()]
+
+
+def _library_roots(preferred: list[str] | None = None) -> list[tuple[str, Path]]:
+    """Local Lean library roots, ordered by preference.
+
+    `preferred` is the blueprint's `libraries:` list (see meta.yml) - the
+    FIRST entry is searched first and receives the largest share of the
+    candidate budget. Installed libraries not named there follow in a stable
+    order, so adding a library never silently drops one.
+    """
     packages = REPO_ROOT / ".lake" / "packages"
+    found: dict[str, Path] = {}
     if packages.is_dir():
         for child in sorted(packages.iterdir()):
-            low = child.name.lower().replace("-", "").replace("_", "")
-            if "cslib" not in low:
+            if not child.is_dir() or child.name.startswith("."):
                 continue
-            for candidate in (child / "CSLib", child / "Cslib", child / "CsLib", child):
-                if candidate.is_dir():
-                    roots.append(("CSLib", candidate))
-                    break
-    return roots
+            key = child.name.lower().replace("-", "").replace("_", "")
+            if key in _NON_LIBRARY_PACKAGES:
+                continue
+            root = _package_source_root(child)
+            if root is not None:
+                found[key] = root
+
+    if not preferred:
+        # No declared preference: Mathlib only. Selecting a library installs it
+        # and keeps it toolchain-compatible; making it SEARCHED is a separate,
+        # explicit per-blueprint choice (`libraries:` in meta.yml), so that
+        # installing a library never silently changes candidate selection for
+        # blueprints that never asked for it.
+        return [(found["mathlib"].name, found["mathlib"])] if "mathlib" in found else []
+
+    ordered: list[tuple[str, Path]] = []
+    for want in preferred:
+        key = want.lower().replace("-", "").replace("_", "")
+        if key in found:
+            ordered.append((found[key].name, found.pop(key)))
+    return ordered
 
 
 def _search_terms_from_blueprint(nodes: dict[str, Node], blueprint_blocks: dict[str, str]) -> list[str]:
@@ -896,7 +967,49 @@ def _python_library_candidates(
     return candidates
 
 
+def _library_quotas(roots: list[tuple[str, Path]], max_candidates: int) -> list[int]:
+    """Split the candidate budget across libraries by preference rank.
+
+    One ripgrep across all roots hands every slot to whichever library has the
+    most files - Mathlib has 8,291, so a smaller specialised library would
+    never appear at all and "search this library first" would have no
+    observable effect. Rank 1 gets ~half, the rest split what remains, and
+    every library is guaranteed at least one slot.
+    """
+    n = len(roots)
+    if n <= 1:
+        return [max_candidates] * n
+    quotas: list[int] = []
+    remaining = max_candidates
+    for i in range(n):
+        if i == n - 1:
+            quotas.append(max(1, remaining))
+            break
+        share = max(1, round(remaining / 2)) if i == 0 else max(1, round(remaining / (n - i)))
+        share = min(share, remaining - (n - i - 1))  # leave >=1 for each library after
+        quotas.append(max(1, share))
+        remaining -= quotas[-1]
+    return quotas
+
+
 def _rg_library_candidates(
+    roots: list[tuple[str, Path]],
+    terms: list[str],
+    *,
+    max_candidates: int,
+) -> list[LibraryCandidate]:
+    """Search each library separately so preference order actually binds."""
+    if len(roots) > 1:
+        out: list[LibraryCandidate] = []
+        for (name, root), quota in zip(roots, _library_quotas(roots, max_candidates)):
+            out.extend(
+                _rg_library_candidates_single([(name, root)], terms, max_candidates=quota)
+            )
+        return out[:max_candidates]
+    return _rg_library_candidates_single(roots, terms, max_candidates=max_candidates)
+
+
+def _rg_library_candidates_single(
     roots: list[tuple[str, Path]],
     terms: list[str],
     *,
@@ -981,9 +1094,9 @@ def _search_local_lean_libraries(
     *,
     term_runner=None,
 ) -> tuple[str, list[LibraryCandidate]]:
-    """Search local Mathlib/CS Lib once for the current blueprint version."""
-    roots = _library_roots()
-    root_names = ", ".join(name for name, _root in roots) or "(none)"
+    """Search the blueprint's preferred Lean libraries, in preference order."""
+    roots = _library_roots(_blueprint_library_preference(name))
+    root_names = " > ".join(root_name for root_name, _root in roots) or "(none)"
     print(f"==> Searching local Lean libraries for candidate declarations ({root_names})", flush=True)
     blueprint_blocks = _node_tex_blocks(nodes)
     terms = _search_terms_from_blueprint(nodes, blueprint_blocks)
