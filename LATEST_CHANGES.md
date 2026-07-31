@@ -4,6 +4,330 @@ This file records the most recent behavioral changes to Auto-Blueprint. Each
 entry states the observed problem, its root cause, the implemented solution,
 and the verification performed. New changes should be added above older ones.
 
+## 2026-07-30: Preserve Compiler Transactions Without Weakening Phase 1
+
+### Observed issue
+
+The monotonic candidate lifecycle used one saved slot both for the best rollback
+candidate and for the compiler's current correction. A deterministic-clean
+patch that changed the Lean diagnostics but did not immediately reduce their
+count was rejected as `no_measurable_progress`. The next call therefore edited
+the older failure again. Logs showed repeated corrections of the same contracts
+even though later patches depended on the preceding compiler rewrite.
+
+### Implemented solution
+
+- The persisted lifecycle now has two explicit roles: a stable monotonic
+  best candidate and a separate deterministic-clean compiler transaction.
+- A compiler intermediate may seed the next correction without replacing the
+  best candidate, counting as frozen, or bypassing any Phase 1 gate.
+- A compiling or measurably improved intermediate is promoted normally and
+  clears the transaction; a deterministic regression is still discarded.
+- Semantic correction that exposes a mechanically invalid plan-owned interface
+  now routes to the existing scoped plan-revision transaction with its exact
+  finding instead of restarting Lean generation under the stale plan.
+- State persistence, telemetry, and classifier export distinguish
+  `accepted_as_working` from `accepted_as_best`.
+
+### Why this preserves the documented workflow
+
+Phase 1 still freezes exact statements bottom-up only after deterministic
+checks, Lean compilation and integration, and the independent statement audit.
+The working compiler candidate is untrusted scratch state. Phase 2 remains the
+only phase that fills proofs and deferred bodies.
+
+### Verification
+
+- Added regressions for retaining a same-error-count compiler intermediate,
+  promoting it only after compilation, persisting it through `--continue`,
+  exporting its telemetry state, and routing a semantic plan-closure conflict
+  to scoped plan revision.
+- The complete test suite passes: 170 tests.
+
+## 2026-07-30: Make Phase 1 Candidate Refinement Monotonic
+
+### Observed issue
+
+Long Phase 1 runs repeatedly corrected the same declarations without retaining
+all prior progress. A patch could fix one deterministic requirement while
+dropping another, and individual deterministic, compiler, salvage, or semantic
+branches could overwrite the saved candidate differently. Outer retries then
+paid for another generation call under the same statement and plan.
+
+### Implemented solution
+
+- The existing per-node candidate cache is now the single persisted candidate
+  lifecycle; no second cache or provider-specific path was added.
+- Every proposed candidate is canonically ingested and evaluated by the full
+  existing deterministic Phase 1 gate. Shared-helper components move atomically.
+- Candidate replacement requires monotonic deterministic progress: no newly
+  violated obligation and at least one removed violation. Identical candidates
+  only merge new evidence. A compiler-success transition and a targeted
+  semantic-correction transition are tracked explicitly without bypassing their
+  later Lean and critic gates.
+- Compiler failure stores the actual post-patch code and exact Lean output.
+  Semantic failure stores the compiling code and exact critic evidence.
+- Deterministically regressing proposals remain telemetry/evidence records.
+  The previous best remains the rollback seed; a deterministic-clean compiler
+  intermediate may continue as an untrusted working transaction until it
+  compiles or makes measurable progress. Feedback is cumulative and
+  deduplicated for the current statement fingerprint.
+- A plan revision starts a new plan-fingerprint epoch and re-evaluates the old
+  compiling code only as an untrusted correction seed. A statement edit prunes
+  stale state. `--continue` restores the lifecycle; `--fresh` removes it.
+- Generation can no longer choose the blank bulk prompt merely because the
+  separate feedback map is empty when a retained candidate exists.
+
+### Telemetry and verification
+
+- `phase1_candidate_transition` records parent/candidate hashes, statement and
+  plan fingerprints, complete obligation sets, newly satisfied and regressed
+  obligations, selection outcome, source, tier, and Lean/semantic status.
+- Dataset export now writes
+  `fast_phase1_candidate_transition_examples.jsonl` for future ranking and
+  routing classifiers without invented confidence labels.
+- Added regression coverage for deterministic regression rejection, monotonic
+  replacement, and exact compiler/semantic evidence retention. The existing
+  Phase 1 routing suite remains green.
+
+## 2026-07-30: Select and Merge Two Independent Initial Plans
+
+### Observed issue
+
+Repeated fresh runs could receive materially different plans from the same
+full-context planning prompt. A coherent response let Phase 1 advance, while an
+under-specified or mechanically inconsistent response sent the same paper into
+long component-correction chains. Treating one nondeterministic response as the
+only initial plan made run time depend too heavily on that single sample.
+
+### Implemented solution
+
+- A fresh multi-node run now generates exactly two complete root-first plan
+  candidates concurrently with the configured base runner. The planner prompt
+  and schema are unchanged.
+- Existing deterministic coverage, helper ownership, dependency authorization,
+  and contract-closure checks score both candidates globally.
+- The better complete plan is selected. Rejected provider-consumer components
+  may be replaced from the alternate candidate only when rescoring the complete
+  merged plan proves a strict mechanical improvement. Plans are never mixed
+  arbitrarily node by node.
+- The non-selected contract for each node is retained. A later rejected
+  component tries that alternate once, with zero model calls, before the
+  existing correction path runs.
+- If neither candidate supplies a closed component, only that component gets
+  one base-model correction with exact findings. The previous automatic second
+  escalation correction was removed; unresolved entries are replanned by the
+  existing bounded outer transaction.
+- Selective replanning after blueprint edits remains single-candidate, so the
+  tournament cost is paid only for a fresh shared plan.
+- Telemetry records both raw model calls, candidate scores and findings,
+  selected and merged components, alternate substitutions, and their downstream
+  acceptance. The selected plan and unused alternates are persisted for
+  `--continue`.
+- The existing pre-edit dependency-cycle guard is unchanged.
+
+### Why this preserves correctness
+
+Candidate scoring and merging accept no Lean statement. The selected plan is
+still untrusted generation guidance. Every emitted declaration must pass the
+same deterministic gates, Lean compilation, and independent blueprint
+statement-alignment audit before Phase 1 freezes it.
+
+## 2026-07-30: Separate Plan Defects from Blueprint Decomposition
+
+### Observed issue
+
+A Phase 1 statement could be semantically rejected because its untried design
+plan omitted a required interface, yet the first rejection immediately edited
+the blueprint. Structural contracts could then loop: generation emitted a
+plan-owned structure plus the canonical target as a transparent type alias,
+the generic deferred-body gate rejected the alias, and replacing it with an
+opaque `sorry` target lost the structure required by consumers. Separately, a
+critic-requested dependency edge could close a cycle and was discovered only
+after editing and revalidating the draft.
+
+### Root cause
+
+- `needs_decomposition` bypassed the existing evidence-driven plan-revision
+  lifecycle even when the current plan had never been revised.
+- Phase 1 treated every completed target `def` as implementation work, including
+  a definition whose entire purpose was to expose its plan-owned structural
+  type interface.
+- Dependency repairs and decomposition direction were validated too late and
+  reported only as generic blueprint failures.
+
+### Implemented solution
+
+- The first decomposition verdict for an untried plan now performs one scoped
+  plan revision using the exact statement-audit evidence. Only a repeated
+  verdict under that revised plan can mutate the blueprint.
+- Phase 1 accepts one narrow completed-definition form: a canonical type-valued
+  target may transparently alias its own plan-owned `structure`, `inductive`,
+  or `class`. Arbitrary completed definitions remain rejected.
+- Proposed `\uses` repairs are checked against the existing graph before any
+  source edit. Cycle rejection includes the exact path and is passed into the
+  bounded blueprint-repair call.
+- Decomposition is accepted only when each newly introduced helper is upstream
+  of a repaired target. Reversed or disconnected helpers roll back with exact
+  deterministic evidence.
+- Healthy runs gain no model calls and the initial planner schema is unchanged.
+
+### Verification
+
+- Added regressions for structural aliases, arbitrary completed definitions,
+  plan-first decomposition routing, cyclic edge rejection, and decomposition
+  orientation.
+- Targeted Phase 1 routing tests pass: 156 tests.
+
+## 2026-07-30: Require Typed Phase 1 Helper Contracts
+
+### Observed issue
+
+Phase 1 interface plans stored only the names of fields and constructors owned
+by auxiliary `structure`, `inductive`, and `class` helpers. The closure check
+therefore accepted a helper surface such as `p1_linear_map`, `p1_rewrite`, and
+`p1_mem` without deciding their Lean types. Statement generation had to invent
+those types and repeatedly mistranslated index-sensitive coordinate maps even
+though the blueprint and later critic feedback were concrete.
+
+### Implemented solution
+
+- The design-plan schema now requires every helper member to provide both its
+  stable name and complete Lean-ish type.
+- Untyped, malformed, duplicate, or excessively large helper-member contracts
+  invalidate that plan response instead of being silently discarded.
+- Generation and compiler-repair prompts render the accepted typed members
+  verbatim. Persisted plans retain the same typed representation.
+- Contract closure now recognizes that a canonical target returning an owned
+  helper interface exposes that helper's fields as value projections. For
+  example, `def def_Pk : PkInterface` exposes `def_Pk.inPk` when `inPk` is a
+  declared `PkInterface` member; this prevents unrelated consumers from being
+  grouped into a false repair.
+- The schema version was increased, so older untyped cached plans are replanned
+  automatically.
+- Refinement routing, compilation order, and semantic-audit order are unchanged.
+
+### Verification
+
+- Added regression coverage for typed helper-member parsing/rendering and for
+  rejecting name-only or otherwise unimplementable helper contracts.
+- The complete test suite passes: 156 tests.
+
+## 2026-07-30: Make Phase 1 Design Planning JSON-Only and Complete
+
+### Observed issue
+
+In `.auto-blueprint/formalization/simplex/run-20260730-005058.log`, the first
+two design-plan calls each returned `{"contracts":[]}`. Telemetry showed the
+same prompt and response hashes both times. They consumed two outer retries
+without producing any Phase 1 contract. The third response contained all 62
+contracts, but the contradictory prompt had also asked the planning model to
+follow Lean-code and decomposition output rules.
+
+### Root cause
+
+The JSON-only design-plan prompt reused `_common_rules`, which is written for
+Lean generation and instructs the model to return a Lean code block or an
+alternate decomposition response. The planner therefore received mutually
+exclusive output contracts. A zero-contract JSON response was parsed as a
+successful response, and its exact rejection was not included in the next
+prompt.
+
+### Implemented solution
+
+- Design planning now uses dedicated JSON-only rules. It contains no Lean-code
+  or alternate-output instructions.
+- A successful-status response containing zero usable contracts is recorded as
+  `invalid_empty_contracts`, not `ok`.
+- The planner retries that malformed response once inside the same planning
+  transaction with explicit completeness feedback. The retry prompt therefore
+  cannot be byte-identical to the rejected prompt.
+- Regression tests verify both prompt consistency and the zero-contract retry.
+
+## 2026-07-30: Preserve Every Authorized Repair from a Parallel Frontier
+
+### Observed issue
+
+In `.auto-blueprint/formalization/simplex/run-20260729-235906.log`, Phase 1
+twice logged that `def:relu-network` had exhausted statement translation and
+was being routed to blueprint decomposition. The next frontier nevertheless
+scheduled the same contract for statement generation again. A simultaneous
+deterministic dependency repair was executed while the decomposition request
+disappeared.
+
+### Root cause
+
+The parallel-frontier handoff collected every failure but selected only the
+first request authorized to edit the blueprint. When dependency-edge,
+blueprint, or decomposition failures arrived together, list order could
+silently discard the other authorized actions even though their evidence and
+routing decisions were correct.
+
+### Implemented solution
+
+- All authorized requests from the frontier are now aggregated with their
+  labels, exact evidence, accepted sibling sections, decomposition helpers,
+  and required dependency edges intact.
+- The aggregate distinguishes dependency-only labels from labels requiring a
+  model-driven blueprint repair. The outer transaction applies deterministic
+  edges and still executes simultaneous blueprint/decomposition work instead
+  of treating those actions as mutually exclusive.
+- Telemetry records the combined request count and both resulting scopes.
+- A regression test reproduces a decomposition request arriving beside a
+  dependency-edge repair and verifies that neither action is lost.
+
+## 2026-07-29: Route Repeated Phase 1 Semantic Failure to Decomposition
+
+### Observed issue
+
+In `.auto-blueprint/formalization/simplex/run-20260729-221008.log`, a small
+set of contracts repeatedly consumed most of Phase 1. Three labels alone
+accounted for 37 statement-patch calls and about 1,906 seconds of model time.
+Their rejected declarations repeatedly expanded concrete mathematical
+constructions inline or hid them behind arbitrary witnesses because the
+blueprint exposed no reusable declaration-level interface for those objects.
+
+### Root cause
+
+The statement critic returned one classification for an entire audited batch,
+and both Phase 1 audit consumers treated semantic exhaustion differently. One
+path revised an interface plan once; the semantic-first path could revise it
+again indefinitely. A missing blueprint interface could therefore be routed as
+another Lean translation attempt, especially when its audit batch also
+contained an ordinary Lean encoding error.
+
+### Implemented solution
+
+- Every rejected issue now carries its own routing classification. Mixed audit
+  batches preserve Lean-only candidates while sending only independently
+  justified blueprint/decomposition labels to repair.
+- Both Phase 1 audit consumers now share one exhaustion transition. The first
+  exhaustion revises the saved interface plan from the exact critic evidence.
+  If the same statement exhausts both model tiers again under that revised
+  plan, only that node enters the existing blueprint-decomposition transaction.
+- Decomposition covers missing named mathematical objects, operations,
+  relations, and substantial intermediate statements, including contracts
+  otherwise expressible only by duplicating a large executable term or using
+  an arbitrary witness. Ordinary Lean syntax, typing, and API errors remain
+  Lean-generation corrections.
+- The plan-revision count is bound to the blueprint statement fingerprint and
+  persisted across `--continue`; a real blueprint statement change resets the
+  lifecycle naturally.
+
+### Correctness, latency, and telemetry
+
+This changes routing, not acceptance. Every resulting blueprint draft is still
+validated, and every regenerated declaration still passes deterministic gates,
+Lean compilation, integration, and the independent statement audit before it
+freezes. No additional model call is introduced: routing consumes the existing
+statement-audit result and prevents repeated generation under an interface
+already rejected after revision.
+
+Telemetry now records per-label `routed_kinds`, mixed-batch repair/deferred
+subsets, the statement fingerprint, source audit path, and exact evidence when
+semantic exhaustion enters decomposition. Regression tests cover mixed routing,
+one-revision exhaustion, and persistence of the revision count.
+
 ## 2026-07-29: Preserve Dependency Repairs Across Phase 1 Audit Routing
 
 ### Observed issue

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import sys
 import json
 import re
@@ -33,6 +34,9 @@ from formalize_blueprint import (  # noqa: E402
     _dependency_contract_table,
     _delivered_decl_texts,
     _design_plan_block,
+    _evaluate_design_plan_candidate,
+    _merge_design_plan_candidates,
+    _design_plan_prompt,
     _design_plan_contract_closure_findings,
     _ensure_phase1_design_plan,
     _findings_require_plan_revision,
@@ -70,6 +74,8 @@ from formalize_blueprint import (  # noqa: E402
     _planned_helper_owner_by_name,
     _plan_owned_declaration_cycle_findings,
     _candidate_is_reusable_uncompiled,
+    _candidate_transition_decision,
+    _decomposition_orientation_findings,
     _isolated_deterministic_failure_labels,
     _quarantine_labels,
     _reactivate_deferred_sections,
@@ -83,9 +89,11 @@ from formalize_blueprint import (  # noqa: E402
     _compile_and_finalize_semantic_candidates,
     _correct_phase1_design_plan,
     _reusable_uncompiled_candidate,
+    _retained_generation_candidate_code,
     _salvage_partial_phase1_response,
     _semantic_repair_candidate,
     _semantic_first_failure_request,
+    _route_exhausted_phase1_semantics,
     _revise_semantic_candidates,
     _revise_exhausted_phase1_contracts,
     _run_validated_contract_phase1_layer,
@@ -190,6 +198,236 @@ class PhaseOneRoutingTests(unittest.TestCase):
         ctx.stmt_fps["lem:a"] = "statement-v2"
         self.assertEqual(_prune_stale_generation_feedback(ctx), {"lem:a"})
         self.assertEqual(_generation_feedback_for(ctx, ["lem:a"]), "")
+
+    def test_candidate_transition_requires_monotonic_deterministic_progress(self) -> None:
+        previous = {
+            "code": "old",
+            "candidate_hash": "old-hash",
+            "deterministic_violations": ["missing:a"],
+        }
+        regressing = {
+            "candidate_hash": "new-hash",
+            "deterministic_violations": ["missing:b"],
+            "lean_status": "unknown",
+        }
+        improving = {
+            "candidate_hash": "better-hash",
+            "deterministic_violations": [],
+            "lean_status": "unknown",
+        }
+
+        accepted, reason, regressed, improved = _candidate_transition_decision(
+            previous, regressing
+        )
+        self.assertFalse(accepted)
+        self.assertEqual(reason, "deterministic_regression")
+        self.assertEqual(regressed, {"missing:b"})
+        self.assertEqual(improved, {"missing:a"})
+
+        accepted, reason, regressed, improved = _candidate_transition_decision(
+            previous, improving
+        )
+        self.assertTrue(accepted)
+        self.assertEqual(reason, "deterministic_progress")
+        self.assertEqual(regressed, set())
+        self.assertEqual(improved, {"missing:a"})
+
+    def test_candidate_store_keeps_best_code_when_proposal_regresses(self) -> None:
+        label = "def:network"
+        telemetry = FakeTelemetry()
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "network-v1"},
+            design_plan_entries={},
+            generation_candidates={},
+            generation_feedback={},
+            telemetry=telemetry,
+        )
+        best = "def def_network : Nat := sorry"
+        regressing = "theorem def_network : True := sorry"
+
+        _store_generation_candidates(
+            ctx, [label], best, source="initial", all_labels=[label]
+        )
+        best_hash = ctx.generation_candidates[label]["candidate_hash"]
+        _store_generation_candidates(
+            ctx, [label], regressing, source="patch", all_labels=[label]
+        )
+
+        self.assertEqual(ctx.generation_candidates[label]["code"], best)
+        self.assertEqual(
+            ctx.generation_candidates[label]["candidate_hash"], best_hash
+        )
+        transitions = [
+            fields
+            for event, fields in telemetry.events
+            if event == "phase1_candidate_transition"
+        ]
+        self.assertFalse(transitions[-1]["accepted_as_best"])
+        self.assertTrue(transitions[-1]["regressed_obligations"])
+        self.assertIn("did not improve", ctx.generation_feedback[label]["evidence"])
+
+    def test_correction_baseline_uses_retained_candidate_after_regression(self) -> None:
+        label = "def:network"
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "network-v1"},
+            design_plan_entries={},
+            generation_candidates={},
+            generation_feedback={},
+            telemetry=FakeTelemetry(),
+            unavailable_imports=set(),
+        )
+        best = "def def_network : Nat := sorry"
+        regressing = "theorem def_network : True := sorry"
+
+        _store_generation_candidates(
+            ctx, [label], best, source="initial", all_labels=[label]
+        )
+        _store_generation_candidates(
+            ctx, [label], regressing, source="compiler_patch", all_labels=[label]
+        )
+
+        retained = _retained_generation_candidate_code(ctx, [label])
+        self.assertIn(best, retained)
+        self.assertNotIn(regressing, retained)
+
+    def test_compiler_intermediate_survives_without_replacing_best(self) -> None:
+        label = "def:network"
+        telemetry = FakeTelemetry()
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "network-v1"},
+            design_plan_entries={},
+            generation_candidates={},
+            generation_feedback={},
+            telemetry=telemetry,
+        )
+        best = "def def_network : Nat := sorry"
+        intermediate = "def def_network : Nat := by\n  sorry"
+        first_error = "Candidate.lean:2:8: error: unknown identifier 'old_name'"
+        next_error = "Candidate.lean:2:8: error: unknown identifier 'missing_name'"
+
+        _store_generation_candidates(
+            ctx, [label], best, source="initial", all_labels=[label]
+        )
+        _store_generation_candidates(
+            ctx,
+            [label],
+            best,
+            source="validated_contract_compile_baseline",
+            all_labels=[label],
+            lean_status="failed",
+            lean_output=first_error,
+        )
+        _store_generation_candidates(
+            ctx,
+            [label],
+            intermediate,
+            source="validated_contract_compiler_check",
+            all_labels=[label],
+            lean_status="failed",
+            lean_output=next_error,
+        )
+
+        entry = ctx.generation_candidates[label]
+        self.assertEqual(entry["code"], best)
+        self.assertEqual(entry["working_candidate"]["code"], intermediate)
+        self.assertIn(intermediate, _generation_candidates_for(ctx, [label]))
+        transition = [
+            fields
+            for event, fields in telemetry.events
+            if event == "phase1_candidate_transition"
+        ][-1]
+        self.assertFalse(transition["accepted_as_best"])
+        self.assertTrue(transition["accepted_as_working"])
+
+    def test_compiling_intermediate_promotes_and_clears_transaction(self) -> None:
+        label = "def:network"
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "network-v1"},
+            design_plan_entries={},
+            generation_candidates={},
+            generation_feedback={},
+            telemetry=FakeTelemetry(),
+        )
+        best = "def def_network : Nat := sorry"
+        intermediate = "def def_network : Nat := by\n  sorry"
+
+        _store_generation_candidates(
+            ctx,
+            [label],
+            best,
+            source="validated_contract_compile_baseline",
+            all_labels=[label],
+            lean_status="failed",
+            lean_output="Candidate.lean:1:1: error: unresolved placeholder",
+        )
+        _store_generation_candidates(
+            ctx,
+            [label],
+            intermediate,
+            source="validated_contract_compiler_check",
+            all_labels=[label],
+            lean_status="failed",
+            lean_output="Candidate.lean:1:1: error: same count, later diagnostic",
+        )
+        _store_generation_candidates(
+            ctx,
+            [label],
+            intermediate,
+            source="validated_contract_compiler_check",
+            all_labels=[label],
+            lean_status="passed",
+        )
+
+        entry = ctx.generation_candidates[label]
+        self.assertEqual(entry["code"], intermediate)
+        self.assertEqual(entry["lean_status"], "passed")
+        self.assertEqual(entry["working_candidate"], {})
+
+    def test_candidate_store_retains_exact_compiler_and_semantic_evidence(self) -> None:
+        label = "def:network"
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "network-v1"},
+            design_plan_entries={},
+            generation_candidates={},
+            generation_feedback={},
+            telemetry=FakeTelemetry(),
+        )
+        code = "def def_network : Nat := sorry"
+        _store_generation_candidates(
+            ctx, [label], code, source="initial", all_labels=[label]
+        )
+        _store_generation_candidates(
+            ctx,
+            [label],
+            code,
+            source="compile",
+            all_labels=[label],
+            lean_status="failed",
+            lean_output="Candidate.lean:4:2: error: type mismatch",
+        )
+        _store_generation_candidates(
+            ctx,
+            [label],
+            code,
+            source="audit",
+            all_labels=[label],
+            repair_stage="semantic_rejected",
+            lean_status="passed",
+            semantic_status="rejected",
+            semantic_evidence="the declaration drops the network depth",
+        )
+
+        entry = ctx.generation_candidates[label]
+        self.assertEqual(entry["lean_status"], "passed")
+        self.assertIn("type mismatch", entry["lean_output"])
+        self.assertEqual(entry["semantic_status"], "rejected")
+        self.assertIn("network depth", entry["semantic_evidence"])
+        self.assertEqual(entry["revision"], 1)
 
     def test_generation_candidate_is_reused_only_for_same_statement(self) -> None:
         telemetry = FakeTelemetry()
@@ -560,6 +798,94 @@ theorem lem_c : Nat = Nat := by sorry
         self.assertEqual(rejected, {"def:bundled"})
         self.assertEqual(helpers, ["P holds for the defined f"])
 
+    def test_alignment_audit_routes_mixed_batch_per_node(self) -> None:
+        bundled = "def:bundled"
+        translated = "lem:translated"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={bundled: node(bundled), translated: node(translated)},
+            tex_blocks={
+                bundled: "Define the construction and its concrete interface.",
+                translated: "The translated equality holds.",
+            },
+            paper_text="",
+            telemetry=FakeTelemetry(),
+            base_timeout=10,
+            base_effort="medium",
+            hard_timeout=20,
+            escalation_effort="high",
+        )
+        response = CallResult(
+            status="ok",
+            text=json.dumps(
+                {
+                    "accepted": False,
+                    "classification": "mixed",
+                    "issues": [
+                        {
+                            "node": bundled,
+                            "severity": "reject",
+                            "classification": "needs_decomposition",
+                            "reason": "The construction has no named interface.",
+                            "missing_helpers": [
+                                "define the construction used by the theorem"
+                            ],
+                        },
+                        {
+                            "node": translated,
+                            "severity": "reject",
+                            "classification": "lean_translation_issue",
+                            "reason": "The generated equality reverses its operands.",
+                            "missing_helpers": [],
+                        },
+                    ],
+                }
+            ),
+        )
+        code = (
+            "def def_bundled : Nat := 0\n"
+            "theorem lem_translated : True := by sorry\n"
+        )
+        with patch("formalize_blueprint._call_model", return_value=response):
+            audit = _model_alignment_audit(ctx, [bundled, translated], code)
+
+        self.assertIsNotNone(audit)
+        self.assertEqual(audit.kind, "mixed")
+        self.assertEqual(audit.labels_for("decomposition"), {bundled})
+        self.assertEqual(audit.labels_for("lean-generation"), {translated})
+        self.assertEqual(
+            audit.helpers_for({bundled}),
+            ["define the construction used by the theorem"],
+        )
+
+        candidates = [
+            Phase1LayerCandidate(
+                labels=[bundled, translated],
+                parsed=_parse_module(code),
+                import_modules=[],
+                generation_tier="base",
+            )
+        ]
+        with patch(
+            "formalize_blueprint._record_retry_failure", return_value=set()
+        ), patch(
+            "formalize_blueprint._store_generation_candidates"
+        ), patch(
+            "formalize_blueprint._store_generation_feedback"
+        ), patch(
+            "formalize_blueprint._quarantine_labels"
+        ):
+            request = _semantic_first_failure_request(
+                ctx, 3, candidates, audit, []
+            )
+
+        self.assertTrue(request.authorizes_blueprint_repair)
+        self.assertEqual(request.labels, [bundled])
+        self.assertEqual(
+            request.decomposition_helpers,
+            ["define the construction used by the theorem"],
+        )
+
     def test_alignment_audit_does_not_rewrite_blueprint_for_representation_error(self) -> None:
         label = "def:polytope"
         ctx = SimpleNamespace(
@@ -757,6 +1083,61 @@ theorem lem_c : Nat = Nat := by sorry
                 r"\uses{def:minkowski-join, def:polytope}",
                 content.read_text(encoding="utf-8"),
             )
+
+    def test_cyclic_dependency_edge_is_rejected_before_file_edit(self) -> None:
+        provider = "def:provider"
+        consumer = "def:consumer"
+        with tempfile.TemporaryDirectory() as tmp:
+            content = Path(tmp) / "content.tex"
+            original = (
+                "\\begin{definition}\n"
+                f"  \\label{{{provider}}}\n"
+                "  Provider.\n"
+                "\\end{definition}\n"
+            )
+            content.write_text(original, encoding="utf-8")
+            provider_node = node(provider)
+            provider_node.file = content
+            consumer_node = node(consumer, uses={provider})
+            consumer_node.file = content
+            ctx = SimpleNamespace(
+                nodes={provider: provider_node, consumer: consumer_node},
+                telemetry=FakeTelemetry(),
+            )
+
+            with patch("formalize_blueprint._validate_draft") as validate:
+                changed = _apply_required_dependency_edges(
+                    ctx, {provider: {consumer}}
+                )
+
+            self.assertEqual(changed, set())
+            self.assertEqual(content.read_text(encoding="utf-8"), original)
+            validate.assert_not_called()
+            rejection = ctx.last_dependency_edge_rejections[provider][consumer]
+            self.assertIn(f"{consumer} -> {provider}", rejection)
+            self.assertIn("would close the cycle", rejection)
+
+    def test_decomposition_helpers_must_be_upstream_of_repaired_target(self) -> None:
+        target = "def:cpwl"
+        helper = "def:finite-subdivision"
+        before = {target: node(target)}
+
+        valid_target = node(target, uses={helper})
+        valid_after = {target: valid_target, helper: node(helper)}
+        self.assertEqual(
+            _decomposition_orientation_findings(before, valid_after, [target]),
+            [],
+        )
+
+        reversed_after = {
+            target: node(target),
+            helper: node(helper, uses={target}),
+        }
+        findings = _decomposition_orientation_findings(
+            before, reversed_after, [target]
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertIn("instead of being their dependency", findings[0])
 
     def test_semantic_correction_routes_confirmed_dependency_to_blueprint(self) -> None:
         target = "def:formal-difference"
@@ -1321,6 +1702,58 @@ def def_polytope (n : Nat) : Type := sorry
         self.assertIn(helper_name, downstream.decls[0].text)
         self.assertNotIn("def_polytope.Polytope", downstream.decls[0].text)
 
+    def test_phase1_accepts_transparent_alias_to_owned_structural_contract(self) -> None:
+        label = "def:finite-subdivision"
+        target = _lean_name(label)
+        ctx = SimpleNamespace(
+            name="simplex",
+            nodes={label: node(label)},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "helpers": [
+                        {
+                            "name": "FiniteSubdivisionInterface",
+                            "kind": "structure",
+                            "members": [
+                                {"name": "cells", "type": "Finset Nat"},
+                            ],
+                            "required_members": ["cells"],
+                        }
+                    ],
+                }
+            },
+        )
+        owners = _planned_helper_owner_by_name(ctx, [label])
+        helper = next(iter(owners))
+        code = (
+            f"structure {helper} (n : Nat) where\n"
+            "  cells : Finset Nat\n\n"
+            f"def {target} (n : Nat) : Type := {helper} n\n"
+        )
+
+        findings = _skeleton_code_findings(
+            code,
+            {target: "definition"},
+            {target: label},
+            owners,
+        )
+
+        self.assertEqual(findings, [])
+
+    def test_phase1_still_rejects_arbitrary_completed_definition_body(self) -> None:
+        label = "def:value"
+        target = _lean_name(label)
+        findings = _skeleton_code_findings(
+            f"def {target} : Nat := 7\n",
+            {target: "definition"},
+            {target: label},
+            {},
+        )
+        self.assertTrue(
+            any("implementation belongs in Phase 2" in item.message for item in findings)
+        )
+
     def test_planned_helper_ownership_overrides_adjacency_during_slicing(self) -> None:
         labels = ["def:relu-network", "def:tab"]
         ctx = SimpleNamespace(
@@ -1557,6 +1990,53 @@ def def_tab : Type := sorry
                 [SkeletonFinding("invalid plan", category="plan_contract_closure")]
             )
         )
+
+    def test_semantic_correction_routes_plan_contract_conflict_to_plan_revision(self) -> None:
+        label = "def:network"
+        parsed = _parse_module("def def_network : Nat := sorry")
+        candidate = Phase1LayerCandidate(
+            labels=[label],
+            parsed=parsed,
+            import_modules=[],
+            generation_tier="base",
+            sessions={},
+        )
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={label: node(label)},
+            design_plan_entries={},
+            base_timeout=120,
+            hard_timeout=300,
+            telemetry=FakeTelemetry(),
+        )
+        plan_finding = SkeletonFinding(
+            "the accepted plan omits a required provider member",
+            label=label,
+            lean_name="def_network",
+            category="plan_contract_closure",
+        )
+
+        with patch(
+            "formalize_blueprint._targeted_patch_skeleton_decls",
+            return_value=(parsed, "patched"),
+        ), patch(
+            "formalize_blueprint._skeleton_code_findings",
+            return_value=[plan_finding],
+        ), patch(
+            "formalize_blueprint._skeleton_deterministic_findings",
+            return_value=[],
+        ):
+            with self.assertRaises(RepairRequest) as raised:
+                _revise_semantic_candidates(
+                    ctx,
+                    [candidate],
+                    {label},
+                    "the statement audit requires the missing member",
+                    [],
+                )
+
+        self.assertTrue(raised.exception.plan_revision_required)
+        self.assertFalse(raised.exception.authorizes_blueprint_repair)
 
     def test_plan_revision_retry_does_not_shrink_or_quarantine_generation(self) -> None:
         label = "def:relu-function"
@@ -2675,6 +3155,14 @@ end ModelOutput
                             "code": "theorem hard : True := sorry",
                             "source": "statement_alignment",
                             "required_dependencies": ["dependency"],
+                            "working_candidate": {
+                                "code": "theorem hard : True := by sorry",
+                                "candidate_hash": "working-hash",
+                                "source": "validated_contract_compiler_check",
+                                "lean_status": "failed",
+                                "lean_output": "error: unresolved identifier",
+                                "lean_error_count": 1,
+                            },
                         }
                     },
                     retry_lifecycle={
@@ -2696,14 +3184,24 @@ end ModelOutput
                             "target_signature": "hard : True",
                             "helpers": [],
                             "decisions": ["exact contract"],
+                            "semantic_revision_count": 1,
                             "closure_fp": "closed-plan-v1",
+                        }
+                    },
+                    design_plan_alternates={
+                        "hard": {
+                            "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                            "statement_fp": "hard-v1",
+                            "target_signature": "hard : False",
+                            "helpers": [],
+                            "decisions": ["alternate contract"],
                         }
                     },
                     effective_section_size=6,
                     refinement_order="top-down",
                 )
             payload = json.loads(state.read_text(encoding="utf-8"))
-            self.assertEqual(payload["version"], 14)
+            self.assertEqual(payload["version"], 16)
             self.assertEqual(payload["refinement_order"], "top-down")
             self.assertEqual(
                 payload["scheduler"]["quarantine"],
@@ -2729,6 +3227,11 @@ end ModelOutput
                 ["dependency"],
             )
             self.assertEqual(
+                payload["scheduler"]["generation_candidates"]["hard"]
+                ["working_candidate"]["code"],
+                "theorem hard : True := by sorry",
+            )
+            self.assertEqual(
                 payload["scheduler"]["retry_lifecycle"][
                     "phase1_statement:hard"
                 ]["state"],
@@ -2741,6 +3244,16 @@ end ModelOutput
             self.assertEqual(
                 payload["scheduler"]["design_plan_entries"]["hard"]["closure_fp"],
                 "closed-plan-v1",
+            )
+            self.assertEqual(
+                payload["scheduler"]["design_plan_entries"]["hard"]
+                ["semantic_revision_count"],
+                1,
+            )
+            self.assertEqual(
+                payload["scheduler"]["design_plan_alternates"]["hard"]
+                ["target_signature"],
+                "hard : False",
             )
             self.assertTrue(payload["sections"][0]["deferred"])
             self.assertEqual(payload["sections"][0]["refined_labels"], [])
@@ -2757,6 +3270,7 @@ end ModelOutput
                 retry_lifecycle={},
                 design_plan="",
                 design_plan_entries={},
+                design_plan_alternates={},
                 effective_section_size=0,
                 section_size=12,
                 refinement_order="top-down",
@@ -2786,6 +3300,10 @@ end ModelOutput
                 ["dependency"],
             )
             self.assertEqual(
+                ctx.generation_candidates["hard"]["working_candidate"]["code"],
+                "theorem hard : True := by sorry",
+            )
+            self.assertEqual(
                 ctx.retry_lifecycle["phase1_statement:hard"]["state"],
                 "escalation",
             )
@@ -2796,6 +3314,14 @@ end ModelOutput
             self.assertEqual(
                 ctx.design_plan_entries["hard"]["closure_fp"],
                 "closed-plan-v1",
+            )
+            self.assertEqual(
+                ctx.design_plan_entries["hard"]["semantic_revision_count"],
+                1,
+            )
+            self.assertEqual(
+                ctx.design_plan_alternates["hard"]["target_signature"],
+                "hard : False",
             )
             compile_mock.assert_not_called()
 
@@ -3104,7 +3630,7 @@ end ModelOutput
             _ensure_phase1_design_plan(ctx, set(nodes), [])
 
         self.assertEqual(set(ctx.design_plan_entries), set(nodes))
-        self.assertEqual(call_model.call_count, 1)
+        self.assertEqual(call_model.call_count, 2)
         local_plan = _design_plan_block(ctx, ["def:leaf"])
         self.assertIn("def def_leaf : Nat", local_plan)
         self.assertIn("lem_middle (n : Nat) : def_leaf", local_plan)
@@ -3138,6 +3664,171 @@ end ModelOutput
             ctx.design_plan_entries["lem:middle"]["statement_fp"],
             "lem:middle-v2",
         )
+
+    def test_design_plan_prompt_has_no_generation_output_mode(self) -> None:
+        label = "def:leaf"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={label: node(label)},
+            stmt_blocks={label: "Define the exact leaf object."},
+            unavailable_imports=set(),
+            library_candidates=[],
+            library_context="",
+        )
+
+        prompt = _design_plan_prompt(
+            ctx,
+            [label],
+            [],
+            [],
+            timeout_s=120,
+        )
+
+        self.assertIn("Return JSON only", prompt)
+        self.assertNotIn("NEEDS-DECOMPOSITION", prompt)
+        self.assertNotIn("return the Lean code block", prompt)
+
+    def test_design_plan_candidates_merge_only_complete_closure_components(self) -> None:
+        provider = "def:network"
+        consumer = "lem:representable"
+        unrelated = "def:scalar"
+        nodes = {
+            provider: node(provider),
+            consumer: node(consumer, uses={provider}),
+            unrelated: node(unrelated),
+        }
+        ctx = SimpleNamespace(
+            nodes=nodes,
+            stmt_fps={label: f"{label}-v1" for label in nodes},
+            design_plan="",
+            design_plan_entries={},
+        )
+        plan_a = {
+            provider: {
+                "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                "statement_fp": f"{provider}-v1",
+                "target_signature": "structure def_network where\n  realizes : Prop",
+                "helpers": [],
+                "decisions": [],
+            },
+            consumer: {
+                "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                "statement_fp": f"{consumer}-v1",
+                "target_signature": "theorem lem_representable : def_network.Representable",
+                "helpers": [],
+                "decisions": [],
+            },
+            unrelated: {
+                "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                "statement_fp": f"{unrelated}-v1",
+                "target_signature": "def def_scalar : Nat",
+                "helpers": [],
+                "decisions": [],
+            },
+        }
+        plan_b = copy.deepcopy(plan_a)
+        plan_b[provider]["target_signature"] = (
+            "structure def_network where\n  Representable : Prop"
+        )
+        plan_b[unrelated]["target_signature"] = (
+            "def def_scalar : Nat\ndef extra_scalar : Nat"
+        )
+        ordered = [consumer, provider, unrelated]
+        candidate_a = _evaluate_design_plan_candidate(ctx, ordered, plan_a, "A")
+        candidate_b = _evaluate_design_plan_candidate(ctx, ordered, plan_b, "B")
+
+        self.assertLess(candidate_b.score, candidate_a.score)
+        merged, components = _merge_design_plan_candidates(
+            ctx, ordered, candidate_b, candidate_a
+        )
+
+        self.assertTrue(merged.closed)
+        self.assertEqual(merged.entries[provider], plan_b[provider])
+        self.assertEqual(merged.entries[unrelated], plan_a[unrelated])
+        self.assertEqual(components, [[unrelated]])
+
+    def test_rejected_closed_contract_tries_retained_alternate_without_model(self) -> None:
+        label = "def:leaf"
+        selected = {
+            "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+            "statement_fp": "def:leaf-v1",
+            "target_signature": "def def_leaf : Nat",
+            "helpers": [],
+            "decisions": ["selected"],
+        }
+        alternate = {
+            **selected,
+            "target_signature": "def def_leaf : Int",
+            "decisions": ["alternate"],
+        }
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "def:leaf-v1"},
+            design_plan="",
+            design_plan_entries={label: selected},
+            design_plan_alternates={label: alternate},
+            telemetry=FakeTelemetry(),
+        )
+
+        with patch("formalize_blueprint._call_model") as call_model:
+            changed = _correct_phase1_design_plan(
+                ctx, [label], "statement audit rejected the selected contract"
+            )
+
+        self.assertTrue(changed)
+        call_model.assert_not_called()
+        self.assertIn("Int", ctx.design_plan_entries[label]["target_signature"])
+        self.assertNotIn(label, ctx.design_plan_alternates)
+
+    def test_empty_design_plan_retries_once_with_completeness_feedback(self) -> None:
+        label = "def:leaf"
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "def:leaf-v1"},
+            design_plan="",
+            design_plan_entries={},
+            telemetry=FakeTelemetry(),
+            base_timeout=120,
+            base_effort="medium",
+        )
+        empty = CallResult(status="ok", text='{"contracts":[]}')
+        valid = CallResult(
+            status="ok",
+            text=json.dumps(
+                {
+                    "contracts": [
+                        {
+                            "label": label,
+                            "target_signature": "def def_leaf : Nat",
+                            "helpers": [],
+                            "decisions": ["exact leaf object"],
+                        }
+                    ]
+                }
+            ),
+        )
+
+        with patch(
+            "formalize_blueprint._sections_for_deps", return_value=[]
+        ), patch(
+            "formalize_blueprint._design_plan_prompt", return_value="plan prompt"
+        ) as prompt, patch(
+            "formalize_blueprint._call_model", side_effect=[empty, valid]
+        ) as call_model:
+            _ensure_phase1_design_plan(ctx, {label}, [])
+
+        self.assertEqual(call_model.call_count, 2)
+        self.assertIn(
+            "zero usable contracts",
+            prompt.call_args_list[1].kwargs["feedback"],
+        )
+        self.assertIn(label, ctx.design_plan_entries)
+        statuses = [
+            fields["status"]
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_design_plan_result"
+        ]
+        self.assertEqual(statuses, ["invalid_empty_contracts", "ok"])
 
     def test_design_plan_closure_is_corrected_before_statement_generation(self) -> None:
         provider = "def:network"
@@ -3185,9 +3876,12 @@ end ModelOutput
             ),
         )
 
-        def correct(_ctx, labels, evidence, *, escalated=False):
+        def correct(
+            _ctx, labels, evidence, *, escalated=False, try_alternate=True
+        ):
             self.assertEqual(set(labels), {provider, consumer})
             self.assertFalse(escalated)
+            self.assertFalse(try_alternate)
             self.assertIn("def_network.Representable", evidence)
             self.assertIn("Provider contract(s) implicated", evidence)
             _ctx.design_plan_entries[consumer]["target_signature"] = (
@@ -3211,7 +3905,7 @@ end ModelOutput
         self.assertIn("closure_fp", ctx.design_plan_entries[provider])
         self.assertIn("closure_fp", ctx.design_plan_entries[consumer])
 
-    def test_unclosed_plan_is_escalated_then_invalidated_for_fresh_planning(self) -> None:
+    def test_unclosed_plan_gets_one_correction_then_invalidates_component(self) -> None:
         provider = "def:network"
         consumer = "lem:representable"
         nodes = {
@@ -3271,7 +3965,7 @@ end ModelOutput
 
         self.assertEqual(
             [call.kwargs["escalated"] for call in correction.call_args_list],
-            [False, True],
+            [False],
         )
         self.assertNotIn(provider, ctx.design_plan_entries)
         self.assertNotIn(consumer, ctx.design_plan_entries)
@@ -3465,7 +4159,7 @@ end ModelOutput
                 "helpers": [{
                     "name": "NetworkData",
                     "kind": "structure",
-                    "required_members": ["width"],
+                    "members": [{"name": "width", "type": "Nat"}],
                     "purpose": "stores the concrete network interface",
                 }],
                 "decisions": ["The target exposes concrete network data."],
@@ -3473,6 +4167,10 @@ end ModelOutput
         )
 
         self.assertEqual(parsed[label]["helpers"][0]["name"], "NetworkData")
+        self.assertEqual(
+            parsed[label]["helpers"][0]["members"],
+            [{"name": "width", "type": "Nat"}],
+        )
         self.assertEqual(
             parsed[label]["decisions"],
             ["The target exposes concrete network data."],
@@ -3482,7 +4180,33 @@ end ModelOutput
         ctx.design_plan = ""
         block = _design_plan_block(ctx, [label])
         self.assertIn("structure NetworkData", block)
+        self.assertIn("width : Nat", block)
         self.assertIn("The target exposes concrete network data", block)
+
+    def test_design_plan_rejects_helper_members_without_types(self) -> None:
+        label = "def:network"
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "network-v1"},
+        )
+
+        parsed = _parse_design_plan_entries(
+            ctx,
+            [label],
+            json.dumps({"contracts": [{
+                "label": label,
+                "target_signature": "def_network (n : Nat) : Prop",
+                "helpers": [{
+                    "name": "NetworkData",
+                    "kind": "structure",
+                    "required_members": ["width"],
+                    "purpose": "stores the concrete network interface",
+                }],
+                "decisions": [],
+            }]}),
+        )
+
+        self.assertEqual(parsed, {})
 
     def test_design_plan_closure_rejects_missing_generated_member(self) -> None:
         provider = "def:network"
@@ -3618,6 +4342,47 @@ end ModelOutput
             {},
         )
 
+    def test_design_plan_closure_accepts_projection_from_returned_owned_helper(self) -> None:
+        provider = "def:Pk"
+        consumer = "lem:Pk-member"
+        ctx = SimpleNamespace(
+            name="test",
+            nodes={
+                provider: node(provider),
+                consumer: node(consumer, uses={provider}),
+            },
+            design_plan_entries={
+                provider: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "target_signature": "def def_Pk : PkInterface",
+                    "helpers": [
+                        {
+                            "name": "PkInterface",
+                            "kind": "structure",
+                            "members": [{"name": "inPk", "type": "Nat -> Prop"}],
+                            "required_members": ["inPk"],
+                            "purpose": "membership interface",
+                        }
+                    ],
+                    "decisions": [],
+                },
+                consumer: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "target_signature": (
+                        "theorem lem_Pk_member : "
+                        "def_Pk.inPk 0 = def_Pk.inPk 0"
+                    ),
+                    "helpers": [],
+                    "decisions": [],
+                },
+            },
+        )
+
+        self.assertEqual(
+            _design_plan_contract_closure_findings(ctx, [provider, consumer]),
+            {},
+        )
+
     def test_design_plan_closure_allows_dependency_owned_helper(self) -> None:
         provider = "def:network"
         consumer = "lem:network-width"
@@ -3695,7 +4460,7 @@ def def_network : NetworkData := sorry
         self.assertEqual(findings[0].category, "plan_contract_closure")
         self.assertIn("impossible declaration cycle", findings[0].message)
 
-    def test_design_plan_discards_helpers_that_phase2_cannot_implement(self) -> None:
+    def test_design_plan_rejects_helpers_that_phase2_cannot_implement(self) -> None:
         label = "def:scalar-relu"
         ctx = SimpleNamespace(
             nodes={label: node(label)},
@@ -3725,19 +4490,18 @@ def def_network : NetworkData := sorry
             }]}),
         )
 
-        self.assertEqual(parsed[label]["helpers"], [])
-        self.assertEqual(
-            parsed[label]["decisions"],
-            ["Implement the target pointwise as max 0 t."],
-        )
+        self.assertEqual(parsed, {})
 
     def test_exhausted_semantic_rejection_revises_plan_and_resets_only_node(self) -> None:
         label = "def:relu-function"
         other = "def:other"
         ctx = SimpleNamespace(
+            nodes={label: node(label), other: node(other)},
+            stmt_fps={label: "relu-v1", other: "other-v1"},
             design_plan_entries={
                 label: {
                     "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "statement_fp": "relu-v1",
                     "target_signature": "def_relu_function : OldInterface",
                 }
             },
@@ -3751,7 +4515,16 @@ def def_network : NetworkData := sorry
                     "stage": "phase1_statement",
                 },
             },
-            generation_candidates={label: {"code": "old"}, other: {"code": "keep"}},
+            generation_candidates={
+                label: {
+                    "statement_fp": "relu-v1",
+                    "plan_fp": "old-plan",
+                    "code": "def def_relu_function : Unit := sorry",
+                    "component_labels": [label],
+                    "generation_tier": "base",
+                },
+                other: {"code": "keep"},
+            },
             quarantined_labels={label, other},
             quarantine={label: {}, other: {}},
             telemetry=FakeTelemetry(),
@@ -3780,6 +4553,99 @@ def def_network : NetworkData := sorry
         self.assertIn(other, ctx.generation_candidates)
         self.assertNotIn(label, ctx.quarantined_labels)
         self.assertIn(other, ctx.quarantined_labels)
+        self.assertEqual(
+            ctx.design_plan_entries[label]["semantic_revision_count"], 1
+        )
+
+    def test_second_semantic_exhaustion_routes_only_revised_node_to_decomposition(
+        self,
+    ) -> None:
+        repeated = "def:repeated"
+        first_exhaustion = "lem:first-exhaustion"
+        ctx = SimpleNamespace(
+            design_plan_entries={
+                repeated: {"semantic_revision_count": 1},
+                first_exhaustion: {"semantic_revision_count": 0},
+            },
+            stmt_fps={repeated: "repeated-v1", first_exhaustion: "first-v1"},
+            telemetry=FakeTelemetry(),
+        )
+        with patch(
+            "formalize_blueprint._revise_exhausted_phase1_contracts",
+            return_value={first_exhaustion},
+        ) as revise:
+            decomposition, revised, unresolved = (
+                _route_exhausted_phase1_semantics(
+                    ctx,
+                    [repeated, first_exhaustion],
+                    "exact semantic rejection",
+                    layer_no=4,
+                    source="test",
+                )
+            )
+
+        self.assertEqual(decomposition, {repeated})
+        self.assertEqual(revised, {first_exhaustion})
+        self.assertEqual(unresolved, set())
+        revise.assert_called_once_with(
+            ctx, {first_exhaustion}, "exact semantic rejection"
+        )
+        events = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_semantic_exhaustion_decomposition"
+        ]
+        self.assertEqual(events[-1]["labels"], [repeated])
+        self.assertEqual(events[-1]["source"], "test")
+
+    def test_first_decomposition_verdict_revises_plan_before_blueprint(self) -> None:
+        label = "def:cpwl"
+        ctx = SimpleNamespace(
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "semantic_revision_count": 0,
+                }
+            },
+            telemetry=FakeTelemetry(),
+        )
+        candidate = Phase1LayerCandidate(
+            labels=[label],
+            parsed=_parse_module("def def_cpwl : Prop := sorry\n"),
+            import_modules=[],
+            generation_tier="base",
+            sessions={},
+        )
+        audit = AlignmentAuditResult(
+            kind="decomposition",
+            reason="the planned interface hides the finite subdivision data",
+            rejected={label},
+            helpers=["finite subdivision data"],
+            kinds_by_label={label: "decomposition"},
+            helpers_by_label={label: ["finite subdivision data"]},
+            reasons_by_label={
+                label: "the planned interface hides the finite subdivision data"
+            },
+        )
+
+        with patch(
+            "formalize_blueprint._revise_exhausted_phase1_contracts",
+            return_value={label},
+        ) as revise:
+            request = _semantic_first_failure_request(
+                ctx, 0, [candidate], audit, []
+            )
+
+        revise.assert_called_once_with(
+            ctx,
+            {label},
+            "Blueprint contract audit rejected:\n"
+            "- the planned interface hides the finite subdivision data",
+        )
+        self.assertFalse(request.authorizes_blueprint_repair)
+        self.assertEqual(request.labels, [label])
+        self.assertEqual(request.decomposition_helpers, [])
+        self.assertEqual(request.failure_route.action, "independent")
 
     def test_semantic_rejection_repairs_saved_candidate_before_generation(self) -> None:
         label = "def:network"
@@ -4453,6 +5319,64 @@ def def_network : NetworkData := sorry
         finalize.assert_called_once()
         self.assertEqual(raised.exception.labels, ["def:b"])
         self.assertEqual(raised.exception.frozen_sections, [accepted])
+
+    def test_parallel_frontier_preserves_decomposition_beside_dependency_repair(self) -> None:
+        decomposition = RepairRequest(
+            "def:relu-network needs an explicit computation helper",
+            ["def:relu-network"],
+            decomposition_helpers=["define the alternating ReLU composition"],
+            authorizes_blueprint_repair=True,
+        )
+        dependency = RepairRequest(
+            "lem:valuation-identity must use the concrete polytope contracts",
+            ["lem:valuation-identity"],
+            authorizes_blueprint_repair=True,
+            required_dependencies={
+                "lem:valuation-identity": {"def:polytope", "def:support-newton"}
+            },
+        )
+        ctx = SimpleNamespace(workers=2, telemetry=FakeTelemetry())
+
+        def generate(_ctx, group, _sections):
+            if group == ["def:relu-network"]:
+                raise decomposition
+            raise dependency
+
+        with patch(
+            "formalize_blueprint._generate_uncompiled_phase1_candidate",
+            side_effect=generate,
+        ):
+            with self.assertRaises(RepairRequest) as raised:
+                _run_validated_contract_phase1_layer(
+                    ctx,
+                    1,
+                    [["def:relu-network"], ["lem:valuation-identity"]],
+                    [],
+                    _SectionNumberAllocator(1),
+                )
+
+        request = raised.exception
+        self.assertTrue(request.authorizes_blueprint_repair)
+        self.assertEqual(
+            set(request.labels),
+            {"def:relu-network", "lem:valuation-identity"},
+        )
+        self.assertEqual(request.model_repair_labels, ["def:relu-network"])
+        self.assertEqual(
+            request.required_dependencies,
+            {
+                "lem:valuation-identity": {
+                    "def:polytope",
+                    "def:support-newton",
+                }
+            },
+        )
+        self.assertIn(
+            "define the alternating ReLU composition",
+            request.decomposition_helpers,
+        )
+        self.assertIn("def:relu-network needs", request.evidence)
+        self.assertIn("lem:valuation-identity must", request.evidence)
 
     def test_partial_response_salvages_deterministically_valid_declaration(self) -> None:
         labels = ["lem:a", "lem:b"]
@@ -5156,6 +6080,28 @@ def def_network : NetworkData := sorry
                 "labels": ["def:b"],
                 "code_chars": 321,
             },
+            {
+                "event": "phase1_candidate_transition",
+                "run_id": "run-1",
+                "blueprint": "paper",
+                "labels": ["def:b"],
+                "statement_fps": {"def:b": "fp-b"},
+                "plan_fps": {"def:b": "plan-b"},
+                "candidate_hash": "candidate-b",
+                "parent_candidate_hashes": ["candidate-a"],
+                "source": "deterministic_patch",
+                "generation_tier": "base",
+                "accepted_as_best": False,
+                "accepted_as_working": True,
+                "decision_reasons": ["deterministic_regression"],
+                "deterministic_obligations": ["requires:a", "requires:b"],
+                "satisfied_obligations": ["requires:a"],
+                "remaining_obligations": ["requires:b"],
+                "newly_satisfied": [],
+                "regressed_obligations": ["requires:b"],
+                "lean_status": "unknown",
+                "semantic_status": "unknown",
+            },
         ]
         rows = build_datasets(events)["fast_phase1_layer_examples"]
         self.assertEqual(len(rows), 1)
@@ -5168,6 +6114,15 @@ def def_network : NetworkData := sorry
         self.assertEqual(lifecycle[0]["statement_fp"], "fp-b")
         self.assertEqual(lifecycle[1]["code_chars"], 321)
         self.assertEqual(lifecycle[2]["event"], "phase1_retry_candidate_injected")
+        transitions = build_datasets(events)[
+            "fast_phase1_candidate_transition_examples"
+        ]
+        self.assertEqual(len(transitions), 1)
+        self.assertFalse(transitions[0]["accepted_as_best"])
+        self.assertTrue(transitions[0]["accepted_as_working"])
+        self.assertEqual(
+            transitions[0]["regressed_obligations"], ["requires:b"]
+        )
 
 
 if __name__ == "__main__":

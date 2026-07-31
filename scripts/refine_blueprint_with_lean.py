@@ -1561,11 +1561,17 @@ STATEMENT-PHASE CONVENTIONS (this audit runs BEFORE any proofs are written):
         classification_options += ' | "needs_decomposition"'
         decomposition_guidance = """
 Use `needs_decomposition` when the blueprint is mathematically concrete but one
-node bundles several declaration-level obligations that must become separate
-blueprint nodes for faithful Lean formalization. For example, a node may define
-a concrete function and also assert substantial properties of that function.
-List the exact missing helper statements in `missing_helpers`; do not use this
-classification merely because proving a faithful single statement is difficult.
+node requires a named mathematical object, operation, relation, or substantial
+intermediate obligation that no existing blueprint dependency exposes. This
+includes a statement that can be represented only by duplicating a large
+executable construction inside its type or by hiding that construction behind
+an arbitrary witness/placeholder. Such missing interfaces must become explicit
+blueprint nodes before Lean generation continues. For example, a node may refer
+to several concrete terms defined only in its prose proof, or quantify over an
+object's parameters without any dependency exposing those parameters.
+List the exact definitions or helper statements needed in `missing_helpers`.
+Do not use this classification merely because a faithful, already self-contained
+Lean statement is syntactically difficult or its eventual proof is difficult.
 """
     return f"""TASK: BLUEPRINT-CONTRACT-AUDIT
 
@@ -1594,11 +1600,12 @@ Return exactly one JSON object:
 If anything should block publication, return:
 {{
   "accepted": false,
-  "classification": {classification_options},
+  "classification": {classification_options} | "mixed",
   "issues": [
     {{
       "node": "label",
       "severity": "reject",
+      "classification": {classification_options},
       "reason": "specific reason",
       "missing_helpers": ["precise statement of each helper node needed"],
       "required_dependencies": [
@@ -1611,7 +1618,9 @@ If anything should block publication, return:
   ]
 }}
 
-Use `lean_translation_issue` only when the blueprint is already concrete enough
+Classify every rejected node independently in its issue object. Use the
+top-level classification only as a summary; return `mixed` when issue
+classifications differ. Use `lean_translation_issue` only when the blueprint is already concrete enough
 and the generated Lean simply mistranslated it. Use `blueprint_issue` when a
 faithful Lean implementation would require making the blueprint more concrete:
 adding missing semantics, hypotheses, parameters, promised behavior,

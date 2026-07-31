@@ -1351,12 +1351,17 @@ function stageFromLine(line){
   if ((m = line.match(/==> Initial declaration retry (\d+)\/(\d+):/))) {
     return `Initial pass · retry ${m[1]}/${m[2]}`;
   }
+  if ((m = line.match(/==> Phase 1 design plan: generating two independent full-context candidates concurrently \((\d+) nodes\)/))) {
+    return `Phase 1 · compare two contract plans (${m[1]} nodes)`;
+  }
   if ((m = line.match(/==> Model call: ([a-z_]+) \((\d+) node\(s\), timeout (\d+)s/))) {
     const purpose = {
       initial_declaration_generation: 'initial declaration generation',
       skeleton_generation: 'skeleton generation',
       skeleton_design_pass: 'skeleton design',
       phase1_design_plan: 'Phase 1 statement plan',
+      phase1_design_plan_candidate_a: 'Phase 1 contract-plan candidate A',
+      phase1_design_plan_candidate_b: 'Phase 1 contract-plan candidate B',
       phase1_design_plan_audit: 'Phase 1 contract-plan audit',
       phase1_design_plan_correction: 'Phase 1 contract-plan correction',
       phase1_statement_generation: 'Phase 1 statement generation',

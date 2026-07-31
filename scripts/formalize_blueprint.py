@@ -13,10 +13,12 @@ root-first wave.
 
 Phase 1 (statements and interfaces). Traverse the existing blueprint dependency
 graph bottom-up and freeze exact Lean statements and interfaces corresponding
-one-to-one with the blueprint. One shared root-first planning call records compact
-per-node contract decisions. It does not generate Lean or change traversal;
-it prevents independent batches from redesigning the same interfaces. Entries
-are statement-fingerprinted, persisted, and selectively invalidated by repairs.
+one-to-one with the blueprint. A bounded pair of concurrent root-first planning
+calls records compact per-node contract decisions. Their mechanically coherent
+provider-consumer components are selected and merged before generation; the
+alternate is retained as a zero-call fallback. Planning does not generate Lean
+or change traversal. Entries are statement-fingerprinted, persisted, and
+selectively invalidated by repairs.
 All compilation-driven interface correction, deterministic coverage checking,
 statement alignment, and any required blueprint repair happen here. Bottom-up
 sections remain in-memory candidates while deterministic checks run, compile
@@ -64,6 +66,7 @@ only inside the internal scratch skeleton, which is never published.
 from __future__ import annotations
 
 import argparse
+import copy
 import concurrent.futures
 import contextlib
 import hashlib
@@ -701,6 +704,31 @@ class PlanClosureFinding:
     provider: str | None = None
 
 
+@dataclass
+class DesignPlanCandidate:
+    """One independently generated full-plan candidate and its mechanical score."""
+
+    candidate_id: str
+    entries: dict[str, dict[str, Any]]
+    missing: list[str]
+    findings: dict[str, list[str]]
+    blocked: set[str]
+    components: list[list[str]]
+
+    @property
+    def score(self) -> tuple[int, int, int, int]:
+        return (
+            len(self.missing),
+            len(self.blocked),
+            sum(len(items) for items in self.findings.values()),
+            len(self.components),
+        )
+
+    @property
+    def closed(self) -> bool:
+        return not self.missing and not self.findings
+
+
 @dataclass(frozen=True)
 class AlignmentAuditResult:
     """Semantic rejection plus dependency evidence for failure routing.
@@ -715,6 +743,9 @@ class AlignmentAuditResult:
     rejected: set[str]
     helpers: list[str]
     required_dependencies: dict[str, set[str]] = field(default_factory=dict)
+    kinds_by_label: dict[str, str] = field(default_factory=dict)
+    helpers_by_label: dict[str, list[str]] = field(default_factory=dict)
+    reasons_by_label: dict[str, str] = field(default_factory=dict)
 
     def __iter__(self):
         yield self.kind
@@ -724,6 +755,56 @@ class AlignmentAuditResult:
 
     def __getitem__(self, index: int):
         return (self.kind, self.reason, self.rejected, self.helpers)[index]
+
+    def labels_for(self, *kinds: str) -> set[str]:
+        wanted = set(kinds)
+        return {
+            label
+            for label in self.rejected
+            if self.kinds_by_label.get(label, self.kind) in wanted
+        }
+
+    def helpers_for(self, labels: Iterable[str]) -> list[str]:
+        selected_labels = list(labels)
+        selected = list(
+            dict.fromkeys(
+                helper
+                for label in selected_labels
+                for helper in self.helpers_by_label.get(label, [])
+            )
+        )
+        if not selected and self.kind == "decomposition":
+            return list(self.helpers)
+        return selected
+
+    def reason_for(self, labels: Iterable[str]) -> str:
+        selected = [
+            self.reasons_by_label[label]
+            for label in labels
+            if label in self.reasons_by_label
+        ]
+        if not selected:
+            return self.reason
+        return "Blueprint contract audit rejected:\n- " + "\n- ".join(selected)
+
+
+def _coerce_alignment_audit_result(
+    audit: AlignmentAuditResult | tuple,
+) -> AlignmentAuditResult:
+    """Normalize the historical tuple form at the audit-consumer boundary."""
+    if isinstance(audit, AlignmentAuditResult):
+        return audit
+    values = tuple(audit)
+    if len(values) < 4:
+        raise ValueError("alignment audit result must contain at least four fields")
+    required_dependencies = values[4] if len(values) > 4 else {}
+    return AlignmentAuditResult(
+        str(values[0]),
+        str(values[1]),
+        set(values[2]),
+        list(values[3]),
+        required_dependencies,
+    )
 
 
 def _parse_module(code: str) -> ParsedModule:
@@ -1414,6 +1495,62 @@ def _may_defer_target_body(decl: DeclBlock, expected_kind: str | None) -> bool:
     return decl.kind in {"def", "abbrev"}
 
 
+def _is_phase1_structural_target_alias(
+    decl: DeclBlock,
+    expected_kind: str | None,
+    parsed: ParsedModule,
+    owner_by_name: dict[str, str],
+    explicit_owner_by_name: dict[str, str] | None,
+) -> bool:
+    """Whether a completed target body is only a transparent type interface.
+
+    Phase 1 normally defers every target ``def`` body. A type-valued blueprint
+    definition is different when its mathematical contract is a plan-owned
+    structure/class/inductive: ``def target : Type := OwnedInterface`` merely
+    gives that complete interface its canonical blueprint name. It contains no
+    executable implementation for Phase 2 to fill.
+
+    Keep this exception deliberately narrow. The right-hand side must be a
+    direct application of one structural helper owned by the same blueprint
+    node; arbitrary completed definitions remain forbidden.
+    """
+    if (
+        not expected_kind
+        or _is_theorem_like_kind(expected_kind)
+        or decl.kind not in {"def", "abbrev"}
+        or _has_terminal_sorry(decl.text)
+        or ":=" not in decl.text
+    ):
+        return False
+    result_type = _planned_target_result_type(decl.text, decl.name or "")
+    if not re.match(r"^(?:Type(?:\s+[A-Za-z0-9_'.]+)?|Sort\s+\S+)$", result_type):
+        return False
+
+    owner = owner_by_name.get(decl.name or "")
+    if not owner:
+        return False
+    helper_kinds = {
+        helper.name: helper.kind
+        for helper in parsed.decls
+        if helper.name and helper.kind in {"structure", "class", "inductive"}
+    }
+    owned_helpers = [
+        name
+        for name, helper_owner in (explicit_owner_by_name or {}).items()
+        if helper_owner == owner and name in helper_kinds
+    ]
+    rhs = decl.text.split(":=", 1)[1].strip()
+    for helper in owned_helpers:
+        simple_application = re.fullmatch(
+            rf"@?{re.escape(helper)}"
+            r"(?:\s+(?:[A-Za-z_][A-Za-z0-9_'.]*|\([^()\n]*\)|\{[^{}\n]*\}))*",
+            rhs,
+        )
+        if simple_application:
+            return True
+    return False
+
+
 def _splice_proof(decl_text: str, proof: str) -> str:
     """Replace a terminal ``:= sorry`` with a tactic body; header untouched."""
     base = _TERMINAL_SORRY_RE.sub("", decl_text.rstrip()).rstrip()
@@ -1644,6 +1781,13 @@ def _skeleton_code_findings(
             and not _is_theorem_like_kind(expected_kind)
             and decl.kind in {"def", "abbrev"}
             and not _has_terminal_sorry(decl.text)
+            and not _is_phase1_structural_target_alias(
+                decl,
+                expected_kind,
+                parsed,
+                owner_by_name,
+                explicit_owner_by_name,
+            )
         ):
             findings.append(
                 decl_finding(
@@ -1889,6 +2033,7 @@ class RepairRequest(Exception):
         failure_routes: Iterable[FailureScopeDecision] | None = None,
         plan_revision_required: bool = False,
         required_dependencies: dict[str, set[str]] | None = None,
+        model_repair_labels: Iterable[str] | None = None,
     ):
         super().__init__(evidence[:500])
         self.evidence = evidence
@@ -1917,6 +2062,18 @@ class RepairRequest(Exception):
             for label, dependencies in (required_dependencies or {}).items()
             if dependencies
         }
+        # Some authorized requests can be completed deterministically by adding
+        # missing dependency edges; others require the repair model to change or
+        # decompose blueprint contracts. Keep those scopes separate so combining
+        # concurrent failures cannot silently replace one action with the other.
+        if model_repair_labels is None:
+            self.model_repair_labels = (
+                list(labels)
+                if authorizes_blueprint_repair and not self.required_dependencies
+                else []
+            )
+        else:
+            self.model_repair_labels = list(dict.fromkeys(model_repair_labels))
 
 
 def _aggregate_retry_requests(
@@ -1986,6 +2143,78 @@ def _aggregate_retry_requests(
             request.plan_revision_required for request in ordered
         ),
         required_dependencies=dependencies,
+    )
+
+
+def _aggregate_authorized_repair_requests(
+    requests: Iterable[RepairRequest],
+    *,
+    frozen_sections: Iterable["Section"] = (),
+) -> RepairRequest:
+    """Merge every independently authorized repair from one parallel frontier.
+
+    Parallel generation can surface dependency-edge, blueprint, and
+    decomposition failures together. The outer loop performs one transaction,
+    but it must retain every authorized action instead of selecting whichever
+    exception happened to be first in a list.
+    """
+    ordered = list(requests)
+    if not ordered:
+        raise ValueError("cannot aggregate an empty set of repair requests")
+    if any(not request.authorizes_blueprint_repair for request in ordered):
+        raise ValueError("only blueprint-authorized requests can be aggregated")
+
+    labels = list(
+        dict.fromkeys(label for request in ordered for label in request.labels)
+    )
+    model_labels = list(
+        dict.fromkeys(
+            label
+            for request in ordered
+            for label in request.model_repair_labels
+        )
+    )
+    helpers = list(
+        dict.fromkeys(
+            helper
+            for request in ordered
+            for helper in request.decomposition_helpers
+        )
+    )
+    dependencies: dict[str, set[str]] = {}
+    for request in ordered:
+        for label, required in request.required_dependencies.items():
+            dependencies.setdefault(label, set()).update(required)
+    sections_by_key: dict[tuple[int, str], Section] = {}
+    for section in [
+        *frozen_sections,
+        *(section for request in ordered for section in request.frozen_sections),
+    ]:
+        sections_by_key[(section.number, str(section.path))] = section
+    section_labels = list(
+        dict.fromkeys(
+            label for request in ordered for label in request.section_labels
+        )
+    )
+    context_labels = list(
+        dict.fromkeys(
+            label for request in ordered for label in request.context_labels
+        )
+    )
+    evidence = "\n\n".join(
+        f"== Authorized repair {index} ==\n{request.evidence}"
+        for index, request in enumerate(ordered, 1)
+    )
+    return RepairRequest(
+        evidence,
+        labels,
+        decomposition_helpers=helpers,
+        section_labels=section_labels or labels,
+        context_labels=context_labels or section_labels or labels,
+        frozen_sections=list(sections_by_key.values()),
+        authorizes_blueprint_repair=True,
+        required_dependencies=dependencies,
+        model_repair_labels=model_labels,
     )
 
 
@@ -2075,6 +2304,10 @@ class Ctx:
     # Entries are statement-fingerprinted so repairs invalidate only changed
     # contracts while unchanged planning work remains reusable.
     design_plan_entries: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # The non-selected full-plan candidate is retained as a bounded, zero-call
+    # fallback. A rejected selected component may try the alternate contract
+    # once before asking a model to correct the plan.
+    design_plan_alternates: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Exact per-node statement/Lean pairs already accepted by the independent
     # statement critic during this run. Phase-1 routing may regroup unchanged
     # declarations after isolating a failing sibling; those declarations must
@@ -2084,6 +2317,13 @@ class Ctx:
     # the assembled dependency layer once. While this flag is set, section
     # workers produce candidates rather than accepted/frozen contracts.
     defer_phase1_alignment: bool = False
+    # Exact deterministic rejection evidence from the most recent narrow
+    # graph edit. These diagnostics are fed into the bounded model repair
+    # instead of being reduced to a generic validation failure.
+    last_dependency_edge_rejections: dict[str, dict[str, str]] = field(
+        default_factory=dict
+    )
+    last_blueprint_repair_rejection: str = ""
 
     @property
     def blueprint_src_dir(self) -> Path:
@@ -2311,7 +2551,12 @@ def _prune_stale_generation_feedback(ctx: Ctx) -> set[str]:
 def _store_generation_feedback(
     ctx: Ctx, labels: Iterable[str], evidence: str, *, source: str
 ) -> None:
-    """Persist correction evidence for the current version of each statement."""
+    """Persist cumulative correction evidence for the current statement epoch.
+
+    A later failure must not erase the finding that motivated the candidate we
+    retained.  Keep a compact, deduplicated history so the next correction sees
+    both the best candidate and every still-relevant reason it was rejected.
+    """
     evidence = evidence.strip()[-12000:]
     if not evidence:
         return
@@ -2324,9 +2569,23 @@ def _store_generation_feedback(
         statement_fp = ctx.stmt_fps.get(label, "")
         if not statement_fp:
             continue
+        previous = feedback.get(label) or {}
+        previous_evidence = (
+            str(previous.get("evidence") or "").strip()
+            if previous.get("statement_fp") == statement_fp
+            else ""
+        )
+        if previous_evidence and evidence not in previous_evidence:
+            evidence_for_label = (
+                previous_evidence
+                + f"\n\nLater evidence ({source}):\n"
+                + evidence
+            )[-12000:]
+        else:
+            evidence_for_label = previous_evidence or evidence
         feedback[label] = {
             "statement_fp": statement_fp,
-            "evidence": evidence,
+            "evidence": evidence_for_label,
             "source": source,
         }
         stored.append(label)
@@ -2431,6 +2690,286 @@ def _candidate_is_reusable_uncompiled(entry: dict[str, Any]) -> bool:
     )
 
 
+def _candidate_hash(code: str) -> str:
+    return hashlib.sha256(code.strip().encode("utf-8")).hexdigest()
+
+
+def _finding_obligation_ids(finding: SkeletonFinding) -> set[str]:
+    """Map a human-readable deterministic finding to stable obligation IDs.
+
+    Existing deterministic audits remain the source of truth.  This adapter
+    only gives their findings stable identities so two candidate revisions can
+    be compared without relying on a paper-specific score or model judgment.
+    """
+    label = finding.label or "file"
+    message = " ".join(finding.message.split())
+    lower = message.lower()
+    symbols = re.findall(r"`([^`]+)`", message)
+    category = finding.category or ""
+
+    if finding.dependencies:
+        family = category or (
+            "outside_dependency_closure"
+            if "outside" in lower
+            else "required_dependency"
+        )
+        return {
+            f"{label}:{family}:{dependency}"
+            for dependency in finding.dependencies
+        }
+    if "missing generated declaration" in lower:
+        return {f"{label}:target_present:{finding.lean_name or label}"}
+    if "is a definition but generated" in lower or (
+        "is theorem-like but generated" in lower
+    ):
+        return {f"{label}:target_kind:{finding.lean_name or label}"}
+    if "omitted helper" in lower:
+        helper = symbols[0] if symbols else (finding.lean_name or "unknown")
+        return {f"{label}:helper_present:{helper}"}
+    if "helper" in lower and "must be a" in lower:
+        helper = symbols[0] if symbols else (finding.lean_name or "unknown")
+        return {f"{label}:helper_kind:{helper}"}
+    if "omits required member" in lower:
+        helper = symbols[0] if symbols else (finding.lean_name or "unknown")
+        members = symbols[1:] or ["unknown"]
+        return {f"{label}:helper_member:{helper}:{member}" for member in members}
+    if "does not mention required dependency" in lower:
+        return {
+            f"{label}:required_dependency:{symbol}"
+            for symbol in (symbols or ["unknown"])
+        }
+    if "cycle" in lower:
+        return {
+            f"{label}:declaration_cycle:{symbol}"
+            for symbol in (symbols or [finding.lean_name or "unknown"])
+        }
+
+    family = category or re.sub(r"[^a-z0-9]+", "_", lower).strip("_")[:120]
+    if symbols:
+        return {f"{label}:{family}:{symbol}" for symbol in symbols}
+    return {f"{label}:{family or 'deterministic_finding'}"}
+
+
+def _candidate_obligation_universe(ctx: Ctx, labels: Iterable[str]) -> set[str]:
+    """Return the provider-neutral deterministic contract surface for labels."""
+    obligations = {
+        "file:no_forbidden_placeholder",
+        "file:no_top_level_assumption",
+        "file:no_invented_blueprint_stub",
+        "file:canonical_module_structure",
+        "file:no_unplanned_declaration",
+        "file:no_declaration_cycle",
+        "file:phase1_body_policy",
+    }
+    plan_entries = getattr(ctx, "design_plan_entries", {}) or {}
+    nodes = getattr(ctx, "nodes", {}) or {}
+    for label in labels:
+        node = nodes.get(label)
+        if node is None:
+            continue
+        target = _lean_name(label)
+        obligations.update(
+            {
+                f"{label}:target_present:{target}",
+                f"{label}:target_kind:{target}",
+            }
+        )
+        for dependency in sorted(_statement_uses(node)):
+            dependency_node = nodes.get(dependency)
+            if dependency_node is not None and not dependency_node.mathlibok:
+                obligations.add(
+                    f"{label}:required_dependency:{_lean_name(dependency)}"
+                )
+        for helper in (plan_entries.get(label) or {}).get("helpers") or []:
+            helper_name = str(helper.get("name") or "").strip()
+            if not helper_name:
+                continue
+            obligations.add(f"{label}:helper_present:{helper_name}")
+            obligations.add(f"{label}:helper_kind:{helper_name}")
+            for member in helper.get("required_members") or []:
+                obligations.add(
+                    f"{label}:helper_member:{helper_name}:{str(member)}"
+                )
+            for member in helper.get("members") or []:
+                if isinstance(member, dict) and str(member.get("name") or "").strip():
+                    obligations.add(
+                        f"{label}:helper_member:{helper_name}:"
+                        f"{str(member.get('name'))}"
+                    )
+    return obligations
+
+
+def _evaluate_phase1_candidate(
+    ctx: Ctx, labels: list[str], code: str
+) -> tuple[set[str], set[str], list[SkeletonFinding]]:
+    """Run the complete existing deterministic Phase-1 gate on a candidate."""
+    target_kinds = {
+        _lean_name(label): ctx.nodes[label].kind
+        for label in labels
+        if label in ctx.nodes
+    }
+    label_by_name = {_lean_name(label): label for label in labels}
+    try:
+        findings = _skeleton_code_findings(
+            code,
+            target_kinds,
+            label_by_name,
+            _planned_helper_owner_by_name(ctx, labels),
+        )
+        findings += _skeleton_deterministic_findings(code, ctx, labels)
+    except (TypeError, ValueError) as exc:
+        findings = [
+            SkeletonFinding(
+                f"candidate could not be canonically evaluated: {exc}",
+                category="canonical_ingest",
+            )
+        ]
+    violations = {
+        obligation
+        for finding in findings
+        for obligation in _finding_obligation_ids(finding)
+    }
+    universe = _candidate_obligation_universe(ctx, labels) | violations
+    return universe, violations, findings
+
+
+def _lean_error_count(output: str) -> int:
+    count = len(re.findall(r"(?m):\d+:\d+:\s*error:", output))
+    if count:
+        return count
+    return 1 if output.strip() else 0
+
+
+def _candidate_transition_decision(
+    previous: dict[str, Any] | None,
+    proposed: dict[str, Any],
+) -> tuple[bool, str, set[str], set[str]]:
+    """Decide whether proposed code advances the same statement/plan epoch."""
+    if not previous:
+        return True, "initial_candidate", set(), set(
+            proposed.get("deterministic_violations") or []
+        )
+    old_hash = str(previous.get("candidate_hash") or _candidate_hash(str(previous.get("code") or "")))
+    new_hash = str(proposed.get("candidate_hash") or "")
+    old_violations = set(previous.get("deterministic_violations") or [])
+    new_violations = set(proposed.get("deterministic_violations") or [])
+    regressed = new_violations - old_violations
+    improved = old_violations - new_violations
+    if old_hash == new_hash:
+        return True, "same_candidate_evidence", regressed, improved
+    if regressed:
+        return False, "deterministic_regression", regressed, improved
+    if improved:
+        return True, "deterministic_progress", regressed, improved
+
+    old_lean = str(previous.get("lean_status") or "unknown")
+    new_lean = str(proposed.get("lean_status") or "unknown")
+    if new_lean == "passed" and old_lean != "passed":
+        return True, "lean_progress", regressed, improved
+    if new_lean == old_lean == "failed":
+        old_count = int(previous.get("lean_error_count") or 0)
+        new_count = int(proposed.get("lean_error_count") or 0)
+        if new_count and (not old_count or new_count < old_count):
+            return True, "lean_error_reduction", regressed, improved
+    if (
+        proposed.get("repair_stage") == "semantic_corrected"
+        and previous.get("semantic_status") == "rejected"
+    ):
+        return True, "semantic_correction_candidate", regressed, improved
+    return False, "no_measurable_progress", regressed, improved
+
+
+def _upgrade_candidate_entry(
+    ctx: Ctx, labels: list[str], entry: dict[str, Any]
+) -> dict[str, Any]:
+    """Lazily add monotonic-state fields to pre-migration candidate entries."""
+    if int(entry.get("candidate_state_version") or 0) != 1:
+        code, _ = _compose_module(
+            [str(item) for item in entry.get("imports") or []],
+            [str(item) for item in entry.get("preamble") or []],
+            [str(entry.get("code") or "")],
+        )
+        obligations, violations, findings = _evaluate_phase1_candidate(
+            ctx, labels, code
+        )
+        entry["deterministic_obligations"] = sorted(obligations)
+        entry["satisfied_obligations"] = sorted(obligations - violations)
+        entry["deterministic_violations"] = sorted(violations)
+        entry["deterministic_findings"] = [
+            finding.message[-4000:] for finding in findings
+        ]
+        entry["candidate_state_version"] = 1
+    entry.setdefault("candidate_hash", _candidate_hash(str(entry.get("code") or "")))
+    entry.setdefault("lean_status", "unknown")
+    entry.setdefault("lean_output", "")
+    entry.setdefault("lean_output_sha256", "")
+    entry.setdefault("lean_error_count", 0)
+    entry.setdefault("semantic_status", "unknown")
+    entry.setdefault("semantic_evidence", "")
+    entry.setdefault("semantic_evidence_sha256", "")
+    entry.setdefault("base_attempted", entry.get("generation_tier") == "base")
+    entry.setdefault(
+        "escalation_attempted", entry.get("generation_tier") == "escalation"
+    )
+    entry.setdefault("revision", 1)
+    entry.setdefault("rejected_transitions", [])
+    entry.setdefault("working_candidate", {})
+    return entry
+
+
+def _working_candidate_payload(proposed: dict[str, Any]) -> dict[str, Any]:
+    """Persist a deterministic-clean compiler intermediate separately.
+
+    The monotonic candidate remains the rollback point. A compiler transaction
+    may nevertheless need several valid rewrites before Lean's error count
+    decreases. Keeping that intermediate in a separate slot lets the next
+    correction continue from the latest diagnostics without pretending the
+    intermediate is already the best candidate.
+    """
+    return {
+        key: copy.deepcopy(proposed.get(key))
+        for key in (
+            "code",
+            "candidate_hash",
+            "source",
+            "generation_tier",
+            "repair_stage",
+            "imports",
+            "preamble",
+            "component_labels",
+            "required_dependencies",
+            "deterministic_obligations",
+            "satisfied_obligations",
+            "deterministic_violations",
+            "deterministic_findings",
+            "lean_status",
+            "lean_output",
+            "lean_output_sha256",
+            "lean_error_count",
+            "semantic_status",
+            "semantic_evidence",
+            "semantic_evidence_sha256",
+        )
+    }
+
+
+def _may_retain_working_candidate(
+    *,
+    source: str,
+    proposed: dict[str, Any],
+    accepted_as_best: bool,
+    regressed: set[str],
+) -> bool:
+    """Whether a non-best proposal is a usable compiler transaction step."""
+    return bool(
+        not accepted_as_best
+        and not regressed
+        and proposed.get("lean_status") == "failed"
+        and "compile" in source
+        and str(proposed.get("code") or "").strip()
+    )
+
+
 def _store_generation_candidates(
     ctx: Ctx,
     labels: Iterable[str],
@@ -2442,13 +2981,21 @@ def _store_generation_candidates(
     generation_tier: str = "base",
     repair_stage: str = "generated",
     required_dependencies: dict[str, set[str]] | None = None,
+    lean_status: str = "unknown",
+    lean_output: str = "",
+    semantic_status: str = "unknown",
+    semantic_evidence: str = "",
 ) -> list[str]:
-    """Retain rejected declarations so the next call revises, not recreates.
+    """Retain only monotonic candidate improvements for the current epoch.
 
     Local helper declarations are assigned using the same ownership rule as
     routed-section salvage: a helper belongs to the next generated target.
-    Imports and preamble are persisted as well, but direct no-model reuse is
-    enabled only when the caller marks a candidate as deterministically valid.
+    A proposed replacement is evaluated by the complete deterministic Phase-1
+    gate before it can replace the best stored candidate. Shared-helper
+    components move atomically. A deterministic regression remains evidence
+    only. A deterministic-clean compiler intermediate is retained separately
+    as the live correction transaction, while the best candidate remains the
+    rollback point until that transaction makes measurable progress.
     """
     try:
         parsed = _parse_module(code)
@@ -2474,10 +3021,6 @@ def _store_generation_candidates(
         for component in components
         for label in component
     }
-    candidates = getattr(ctx, "generation_candidates", None)
-    if candidates is None:
-        candidates = {}
-        ctx.generation_candidates = candidates
     stored: list[str] = []
     handled: set[str] = set()
     requested_set = set(requested)
@@ -2498,35 +3041,256 @@ def _store_generation_candidates(
         candidate = "\n\n".join(pieces).strip()
         if not candidate:
             continue
-        for component_label in component_labels:
-            candidates[component_label] = {
-                "statement_fp": statement_fps[component_label],
-                "plan_fp": _candidate_plan_fingerprint(ctx, component_label),
-                "code": candidate[:45000],
-                "source": source,
-                # A candidate can bypass regeneration only after the caller has
-                # completed every deterministic gate. Shared-helper components
-                # intentionally store the same complete code under each label.
-                "reusable_uncompiled": bool(reusable_uncompiled),
-                "generation_tier": (
-                    generation_tier
-                    if generation_tier in {"base", "escalation"}
-                    else "base"
-                ),
-                # This is a lifecycle state, not an informal source label.
-                # In particular, semantic rejection must resume by editing
-                # this exact candidate before cold generation is allowed.
-                "repair_stage": repair_stage,
-                "imports": list(parsed.imports),
-                "preamble": list(parsed.preamble),
-                "component_labels": list(component_labels),
-                "required_dependencies": sorted(
-                    set((required_dependencies or {}).get(component_label, set()))
-                ),
-            }
-            stored.append(component_label)
-            handled.add(component_label)
+        candidate_code, _ = _compose_module(
+            parsed.imports, parsed.preamble, pieces
+        )
+        obligations, violations, findings = _evaluate_phase1_candidate(
+            ctx, component_labels, candidate_code
+        )
+        candidate_hash = _candidate_hash(candidate)
+        proposed = {
+            "candidate_state_version": 1,
+            "statement_fp": statement_fps[component_labels[0]],
+            "plan_fp": _candidate_plan_fingerprint(ctx, component_labels[0]),
+            "code": candidate[:45000],
+            "candidate_hash": candidate_hash,
+            "source": source,
+            "reusable_uncompiled": bool(reusable_uncompiled),
+            "generation_tier": (
+                generation_tier
+                if generation_tier in {"base", "escalation"}
+                else "base"
+            ),
+            "repair_stage": repair_stage,
+            "imports": list(parsed.imports),
+            "preamble": list(parsed.preamble),
+            "component_labels": list(component_labels),
+            "required_dependencies": [],
+            "deterministic_obligations": sorted(obligations),
+            "satisfied_obligations": sorted(obligations - violations),
+            "deterministic_violations": sorted(violations),
+            "deterministic_findings": [
+                finding.message[-4000:] for finding in findings
+            ],
+            "lean_status": lean_status,
+            "lean_output": lean_output[-12000:],
+            "lean_output_sha256": (
+                hashlib.sha256(lean_output.encode("utf-8")).hexdigest()
+                if lean_output
+                else ""
+            ),
+            "lean_error_count": (
+                _lean_error_count(lean_output) if lean_status == "failed" else 0
+            ),
+            "semantic_status": semantic_status,
+            "semantic_evidence": semantic_evidence[-12000:],
+            "semantic_evidence_sha256": (
+                hashlib.sha256(semantic_evidence.encode("utf-8")).hexdigest()
+                if semantic_evidence
+                else ""
+            ),
+            "base_attempted": generation_tier == "base",
+            "escalation_attempted": generation_tier == "escalation",
+            "revision": 1,
+        }
+        with _STATE_LOCK:
+            candidates = getattr(ctx, "generation_candidates", None)
+            if candidates is None:
+                candidates = {}
+                ctx.generation_candidates = candidates
+            previous_entries = [
+                (
+                    _upgrade_candidate_entry(
+                        ctx,
+                        list(
+                            (candidates.get(component_label) or {}).get(
+                                "component_labels"
+                            )
+                            or [component_label]
+                        ),
+                        candidates[component_label],
+                    )
+                    if isinstance(candidates.get(component_label), dict)
+                    else None
+                )
+                for component_label in component_labels
+            ]
+            decisions = [
+                _candidate_transition_decision(previous, proposed)
+                for previous in previous_entries
+            ]
+            accepted = all(decision[0] for decision in decisions)
+            reasons = sorted({decision[1] for decision in decisions})
+            regressed = set().union(*(decision[2] for decision in decisions))
+            improved = set().union(*(decision[3] for decision in decisions))
+            parent_hashes = sorted(
+                {
+                    str(entry.get("candidate_hash") or _candidate_hash(str(entry.get("code") or "")))
+                    for entry in previous_entries
+                    if isinstance(entry, dict) and str(entry.get("code") or "").strip()
+                }
+            )
+            accepted_as_working = _may_retain_working_candidate(
+                source=source,
+                proposed=proposed,
+                accepted_as_best=accepted,
+                regressed=regressed,
+            )
+            if accepted:
+                revision = max(
+                    [int(entry.get("revision") or 0) for entry in previous_entries if isinstance(entry, dict)]
+                    or [0]
+                ) + (0 if reasons == ["same_candidate_evidence"] else 1)
+                for component_label in component_labels:
+                    previous = candidates.get(component_label) or {}
+                    entry = dict(proposed)
+                    entry.update(
+                        {
+                            "statement_fp": statement_fps[component_label],
+                            "plan_fp": _candidate_plan_fingerprint(
+                                ctx, component_label
+                            ),
+                            "required_dependencies": sorted(
+                                set(
+                                    (required_dependencies or {}).get(
+                                        component_label, set()
+                                    )
+                                )
+                            ),
+                            "base_attempted": bool(previous.get("base_attempted"))
+                            or generation_tier == "base",
+                            "escalation_attempted": bool(
+                                previous.get("escalation_attempted")
+                            )
+                            or generation_tier == "escalation",
+                            "revision": revision,
+                        }
+                    )
+                    if reasons == ["same_candidate_evidence"]:
+                        entry["reusable_uncompiled"] = bool(
+                            previous.get("reusable_uncompiled")
+                        ) or bool(reusable_uncompiled)
+                        entry["lean_status"] = (
+                            lean_status
+                            if lean_status != "unknown"
+                            else str(previous.get("lean_status") or "unknown")
+                        )
+                        entry["lean_output"] = (
+                            lean_output[-12000:]
+                            if lean_output
+                            else str(previous.get("lean_output") or "")
+                        )
+                        entry["lean_output_sha256"] = (
+                            proposed["lean_output_sha256"]
+                            or str(previous.get("lean_output_sha256") or "")
+                        )
+                        entry["lean_error_count"] = (
+                            proposed["lean_error_count"]
+                            or int(previous.get("lean_error_count") or 0)
+                        )
+                        entry["semantic_status"] = (
+                            semantic_status
+                            if semantic_status != "unknown"
+                            else str(previous.get("semantic_status") or "unknown")
+                        )
+                        entry["semantic_evidence"] = (
+                            semantic_evidence[-12000:]
+                            if semantic_evidence
+                            else str(previous.get("semantic_evidence") or "")
+                        )
+                        entry["semantic_evidence_sha256"] = (
+                            proposed["semantic_evidence_sha256"]
+                            or str(
+                                previous.get("semantic_evidence_sha256") or ""
+                            )
+                        )
+                    # Promotion completes the local correction transaction.
+                    # Any older intermediate must not survive beside the new
+                    # monotonic best.
+                    entry["working_candidate"] = {}
+                    candidates[component_label] = entry
+                    stored.append(component_label)
+                    handled.add(component_label)
+            else:
+                # A deterministic regression remains evidence only. A clean
+                # compiler intermediate may be the next transaction seed, but
+                # it stays separate from the monotonic best and cannot freeze.
+                for component_label in component_labels:
+                    previous = candidates.get(component_label)
+                    if not isinstance(previous, dict):
+                        continue
+                    previous["base_attempted"] = bool(previous.get("base_attempted")) or generation_tier == "base"
+                    previous["escalation_attempted"] = bool(previous.get("escalation_attempted")) or generation_tier == "escalation"
+                    history = list(previous.get("rejected_transitions") or [])
+                    history.append(
+                        {
+                            "candidate_hash": candidate_hash,
+                            "source": source,
+                            "reason": ",".join(reasons),
+                            "regressed": sorted(regressed),
+                            "improved": sorted(improved),
+                            "lean_status": lean_status,
+                            "lean_output_sha256": proposed["lean_output_sha256"],
+                            "semantic_status": semantic_status,
+                            "semantic_evidence_sha256": proposed[
+                                "semantic_evidence_sha256"
+                            ],
+                        }
+                    )
+                    previous["rejected_transitions"] = history[-12:]
+                    if accepted_as_working:
+                        previous["working_candidate"] = (
+                            _working_candidate_payload(proposed)
+                        )
+                    stored.append(component_label)
+                    handled.add(component_label)
+
+        _record(
+            ctx.telemetry,
+            "phase1_candidate_transition",
+            labels=component_labels,
+            statement_fps={
+                label: statement_fps[label] for label in component_labels
+            },
+            plan_fps={
+                label: _candidate_plan_fingerprint(ctx, label)
+                for label in component_labels
+            },
+            candidate_hash=candidate_hash,
+            parent_candidate_hashes=parent_hashes,
+            source=source,
+            generation_tier=generation_tier,
+            accepted_as_best=accepted,
+            accepted_as_working=accepted_as_working,
+            decision_reasons=reasons,
+            deterministic_obligations=sorted(obligations),
+            satisfied_obligations=sorted(obligations - violations),
+            remaining_obligations=sorted(violations),
+            newly_satisfied=sorted(improved),
+            regressed_obligations=sorted(regressed),
+            lean_status=lean_status,
+            semantic_status=semantic_status,
+        )
+        if not accepted and not accepted_as_working:
+            regression_evidence = (
+                "A proposed Phase 1 candidate was not installed because it did "
+                "not improve the retained candidate. Continue by editing the "
+                "retained candidate and preserve all of its satisfied "
+                "obligations.\n"
+                f"Decision: {', '.join(reasons)}\n"
+                "Regressed obligations: "
+                + (", ".join(sorted(regressed)) or "none")
+                + "\nRemaining proposed violations:\n"
+                + (_format_skeleton_findings(findings) or "none")
+            )
+            _store_generation_feedback(
+                ctx,
+                component_labels,
+                regression_evidence[-12000:],
+                source="candidate_regression",
+            )
     if stored:
+        candidates = getattr(ctx, "generation_candidates", {})
         _record(
             ctx.telemetry,
             "phase1_retry_candidate_saved",
@@ -2642,6 +3406,50 @@ def _reusable_uncompiled_candidate(
         generation_tier=tier,
     )
     return candidate
+
+
+def _retained_generation_candidate_code(
+    ctx: Ctx, labels: Iterable[str]
+) -> str:
+    """Compose the exact best stored candidate for the current plan epoch.
+
+    Unlike ``_reusable_uncompiled_candidate``, this also returns candidates that
+    still have deterministic or Lean failures. Correction loops need that exact
+    text so a rejected patch cannot become their next editing baseline.
+    """
+    label_list = list(labels)
+    _prune_stale_generation_candidates(ctx)
+    candidates = getattr(ctx, "generation_candidates", {})
+    entries = [candidates.get(label) for label in label_list]
+    if not entries or any(
+        not isinstance(entry, dict) or not str(entry.get("code") or "").strip()
+        for entry in entries
+    ):
+        return ""
+    imports = list(
+        dict.fromkeys(
+            str(item)
+            for entry in entries
+            for item in (entry.get("imports") or [])
+            if str(item).strip()
+        )
+    )
+    preamble = list(
+        dict.fromkeys(
+            str(item)
+            for entry in entries
+            for item in (entry.get("preamble") or [])
+            if str(item).strip()
+        )
+    )
+    blocks: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        block = str(entry.get("code") or "").strip()
+        if block and block not in seen:
+            seen.add(block)
+            blocks.append(block)
+    return _compose_module(imports, preamble, blocks)[0] if blocks else ""
 
 
 def _salvage_partial_phase1_response(
@@ -2807,6 +3615,8 @@ def _semantic_repair_candidate(
         reusable_uncompiled=True,
         generation_tier=candidate.generation_tier,
         repair_stage="semantic_corrected",
+        semantic_status="correction_pending",
+        semantic_evidence=evidence,
     )
     _record(
         ctx.telemetry,
@@ -2819,7 +3629,13 @@ def _semantic_repair_candidate(
 
 
 def _generation_candidates_for(ctx: Ctx, labels: Iterable[str]) -> str:
-    """Return current rejected declarations as one compact revision input."""
+    """Return the latest usable declarations as one compact revision input.
+
+    A deterministic-clean compiler intermediate takes precedence over the
+    monotonic best because it carries the newest exact diagnostics. The best
+    remains stored separately as the rollback point until the working code
+    actually compiles or makes measurable deterministic progress.
+    """
     _prune_stale_generation_candidates(ctx)
     candidates = getattr(ctx, "generation_candidates", {})
     blocks: list[str] = []
@@ -2827,7 +3643,14 @@ def _generation_candidates_for(ctx: Ctx, labels: Iterable[str]) -> str:
     seen: set[str] = set()
     for label in labels:
         entry = candidates.get(label)
-        code = str((entry or {}).get("code") or "").strip()
+        working = (
+            (entry or {}).get("working_candidate")
+            if isinstance((entry or {}).get("working_candidate"), dict)
+            else {}
+        )
+        code = str(
+            working.get("code") or (entry or {}).get("code") or ""
+        ).strip()
         if not code or code in seen:
             continue
         seen.add(code)
@@ -3262,6 +4085,7 @@ def _save_state(
     generation_candidates: dict[str, dict[str, Any]] | None = None,
     retry_lifecycle: dict[str, dict[str, Any]] | None = None,
     design_plan_entries: dict[str, dict[str, Any]] | None = None,
+    design_plan_alternates: dict[str, dict[str, Any]] | None = None,
     effective_section_size: int = 0,
     refinement_order: str = PHASE1_STATEMENT_ORDER,
 ) -> None:
@@ -3323,6 +4147,9 @@ def _save_state(
     }
     candidate_payload = {
         str(label): {
+            "candidate_state_version": int(
+                entry.get("candidate_state_version") or 0
+            ),
             "statement_fp": str(entry.get("statement_fp") or ""),
             "plan_fp": str(entry.get("plan_fp") or ""),
             "code": str(entry.get("code") or "")[:45000],
@@ -3338,6 +4165,68 @@ def _save_state(
             "required_dependencies": [
                 str(item) for item in entry.get("required_dependencies") or []
             ],
+            "candidate_hash": str(
+                entry.get("candidate_hash")
+                or _candidate_hash(str(entry.get("code") or ""))
+            ),
+            "deterministic_obligations": [
+                str(item) for item in entry.get("deterministic_obligations") or []
+            ],
+            "satisfied_obligations": [
+                str(item) for item in entry.get("satisfied_obligations") or []
+            ],
+            "deterministic_violations": [
+                str(item) for item in entry.get("deterministic_violations") or []
+            ],
+            "deterministic_findings": [
+                str(item)[-4000:]
+                for item in entry.get("deterministic_findings") or []
+            ],
+            "lean_status": str(entry.get("lean_status") or "unknown"),
+            "lean_output": str(entry.get("lean_output") or "")[-12000:],
+            "lean_output_sha256": str(
+                entry.get("lean_output_sha256") or ""
+            ),
+            "lean_error_count": int(entry.get("lean_error_count") or 0),
+            "semantic_status": str(
+                entry.get("semantic_status") or "unknown"
+            ),
+            "semantic_evidence": str(
+                entry.get("semantic_evidence") or ""
+            )[-12000:],
+            "semantic_evidence_sha256": str(
+                entry.get("semantic_evidence_sha256") or ""
+            ),
+            "base_attempted": bool(entry.get("base_attempted")),
+            "escalation_attempted": bool(entry.get("escalation_attempted")),
+            "revision": int(entry.get("revision") or 1),
+            "rejected_transitions": [
+                {
+                    "candidate_hash": str(item.get("candidate_hash") or ""),
+                    "source": str(item.get("source") or "unknown"),
+                    "reason": str(item.get("reason") or "unknown"),
+                    "regressed": [str(value) for value in item.get("regressed") or []],
+                    "improved": [str(value) for value in item.get("improved") or []],
+                    "lean_status": str(item.get("lean_status") or "unknown"),
+                    "lean_output_sha256": str(
+                        item.get("lean_output_sha256") or ""
+                    ),
+                    "semantic_status": str(
+                        item.get("semantic_status") or "unknown"
+                    ),
+                    "semantic_evidence_sha256": str(
+                        item.get("semantic_evidence_sha256") or ""
+                    ),
+                }
+                for item in (entry.get("rejected_transitions") or [])[-12:]
+                if isinstance(item, dict)
+            ],
+            "working_candidate": (
+                _working_candidate_payload(entry["working_candidate"])
+                if isinstance(entry.get("working_candidate"), dict)
+                and str(entry["working_candidate"].get("code") or "").strip()
+                else {}
+            ),
         }
         for label, entry in (generation_candidates or {}).items()
         if label in stmt_fps
@@ -3377,6 +4266,16 @@ def _save_state(
                 {
                     "name": str(helper.get("name") or "")[:500],
                     "kind": str(helper.get("kind") or "")[:40],
+                    "members": [
+                        {
+                            "name": str(member.get("name") or "")[:500],
+                            "type": str(member.get("type") or "")[:4000],
+                        }
+                        for member in helper.get("members") or []
+                        if isinstance(member, dict)
+                        and str(member.get("name") or "").strip()
+                        and str(member.get("type") or "").strip()
+                    ],
                     "required_members": [
                         str(item)[:500]
                         for item in helper.get("required_members") or []
@@ -3404,15 +4303,36 @@ def _save_state(
             "correction_escalation_fp": str(
                 entry.get("correction_escalation_fp") or ""
             ),
+            "semantic_revision_count": int(
+                entry.get("semantic_revision_count") or 0
+            ),
             "closure_fp": str(entry.get("closure_fp") or ""),
         }
+    alternate_plan_payload = {
+        str(label): {
+            "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+            "statement_fp": str(entry.get("statement_fp") or ""),
+            "target_signature": str(entry.get("target_signature") or "")[:12000],
+            "helpers": copy.deepcopy(entry.get("helpers") or []),
+            "decisions": [
+                str(item)[:4000]
+                for item in entry.get("decisions") or []
+                if str(item).strip()
+            ],
+        }
+        for label, entry in (design_plan_alternates or {}).items()
+        if label in stmt_fps
+        and str(entry.get("statement_fp") or "") == stmt_fps.get(label)
+        and int(entry.get("schema_version") or 0) == DESIGN_PLAN_SCHEMA_VERSION
+        and str(entry.get("target_signature") or "").strip()
+    }
 
     path = _state_path(name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
-                "version": 14,
+                "version": 16,
                 "refinement_order": refinement_order,
                 "sections": entries,
                 "scheduler": {
@@ -3437,6 +4357,10 @@ def _save_state(
                         label: plan_payload[label]
                         for label in sorted(plan_payload)
                     },
+                    "design_plan_alternates": {
+                        label: alternate_plan_payload[label]
+                        for label in sorted(alternate_plan_payload)
+                    },
                 },
             },
             indent=2,
@@ -3458,6 +4382,7 @@ def _save_ctx_state(ctx: Ctx, sections: list[Section]) -> None:
         generation_candidates=getattr(ctx, "generation_candidates", {}),
         retry_lifecycle=getattr(ctx, "retry_lifecycle", {}),
         design_plan_entries=getattr(ctx, "design_plan_entries", {}),
+        design_plan_alternates=getattr(ctx, "design_plan_alternates", {}),
         effective_section_size=ctx.effective_section_size,
         refinement_order=ctx.refinement_order,
     )
@@ -3518,6 +4443,9 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
     raw_candidates = scheduler.get("generation_candidates") or {}
     ctx.generation_candidates = {
         str(label): {
+            "candidate_state_version": int(
+                entry.get("candidate_state_version") or 0
+            ),
             "statement_fp": str(entry.get("statement_fp") or ""),
             "plan_fp": str(entry.get("plan_fp") or ""),
             "code": str(entry.get("code") or "")[:45000],
@@ -3533,6 +4461,49 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
             "required_dependencies": [
                 str(item) for item in entry.get("required_dependencies") or []
             ],
+            "candidate_hash": str(entry.get("candidate_hash") or ""),
+            "deterministic_obligations": [
+                str(item) for item in entry.get("deterministic_obligations") or []
+            ],
+            "satisfied_obligations": [
+                str(item) for item in entry.get("satisfied_obligations") or []
+            ],
+            "deterministic_violations": [
+                str(item) for item in entry.get("deterministic_violations") or []
+            ],
+            "deterministic_findings": [
+                str(item)[-4000:]
+                for item in entry.get("deterministic_findings") or []
+            ],
+            "lean_status": str(entry.get("lean_status") or "unknown"),
+            "lean_output": str(entry.get("lean_output") or "")[-12000:],
+            "lean_output_sha256": str(
+                entry.get("lean_output_sha256") or ""
+            ),
+            "lean_error_count": int(entry.get("lean_error_count") or 0),
+            "semantic_status": str(
+                entry.get("semantic_status") or "unknown"
+            ),
+            "semantic_evidence": str(
+                entry.get("semantic_evidence") or ""
+            )[-12000:],
+            "semantic_evidence_sha256": str(
+                entry.get("semantic_evidence_sha256") or ""
+            ),
+            "base_attempted": bool(entry.get("base_attempted")),
+            "escalation_attempted": bool(entry.get("escalation_attempted")),
+            "revision": int(entry.get("revision") or 1),
+            "rejected_transitions": [
+                dict(item)
+                for item in (entry.get("rejected_transitions") or [])[-12:]
+                if isinstance(item, dict)
+            ],
+            "working_candidate": (
+                _working_candidate_payload(entry["working_candidate"])
+                if isinstance(entry.get("working_candidate"), dict)
+                and str(entry["working_candidate"].get("code") or "").strip()
+                else {}
+            ),
         }
         for label, entry in raw_candidates.items()
         if isinstance(entry, dict)
@@ -3568,6 +4539,16 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
                 {
                     "name": str(helper.get("name") or "")[:500],
                     "kind": str(helper.get("kind") or "")[:40],
+                    "members": [
+                        {
+                            "name": str(member.get("name") or "")[:500],
+                            "type": str(member.get("type") or "")[:4000],
+                        }
+                        for member in helper.get("members") or []
+                        if isinstance(member, dict)
+                        and str(member.get("name") or "").strip()
+                        and str(member.get("type") or "").strip()
+                    ],
                     "required_members": [
                         str(item)[:500]
                         for item in helper.get("required_members") or []
@@ -3595,6 +4576,9 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
             "correction_escalation_fp": str(
                 entry.get("correction_escalation_fp") or ""
             ),
+            "semantic_revision_count": int(
+                entry.get("semantic_revision_count") or 0
+            ),
             "closure_fp": str(entry.get("closure_fp") or ""),
         }
         for label, entry in raw_plan.items()
@@ -3604,6 +4588,29 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
         and str(entry.get("statement_fp") or "") == ctx.stmt_fps.get(str(label))
         and str(entry.get("target_signature") or "").strip()
     }
+    raw_alternates = scheduler.get("design_plan_alternates") or {}
+    ctx.design_plan_alternates = _parse_design_plan_entries(
+        ctx,
+        raw_alternates,
+        json.dumps(
+            {
+                "contracts": [
+                    {
+                        "label": str(label),
+                        "target_signature": str(entry.get("target_signature") or ""),
+                        "helpers": entry.get("helpers") or [],
+                        "decisions": entry.get("decisions") or [],
+                    }
+                    for label, entry in raw_alternates.items()
+                    if isinstance(entry, dict)
+                    and int(entry.get("schema_version") or 0)
+                    == DESIGN_PLAN_SCHEMA_VERSION
+                    and str(entry.get("statement_fp") or "")
+                    == ctx.stmt_fps.get(str(label))
+                ]
+            }
+        ),
+    )
     _sync_design_plan(ctx)
     legacy_quarantine = {
         str(label)
@@ -3993,10 +5000,10 @@ def _phase1_repair_scope_violations(
     """Changed contracts outside a target's dependency/decomposition scope.
 
     Existing downstream consumers remain immutable during a Phase 1 repair.
-    A decomposition may, however, introduce new helper nodes whose ``uses``
-    chain reaches a rejected target. That is the natural graph direction for a
-    property lemma split out of a definition: the new lemma uses the original
-    definition, not vice versa.
+    This general scope check permits connected additions so ordinary repairs
+    can be validated transactionally. Confirmed decomposition receives the
+    stricter ``_decomposition_orientation_findings`` check as well: every new
+    helper must be an actual dependency of the rejected target.
     """
     allowed = _upstream_contract_closure(before, targets) | _upstream_contract_closure(
         after, targets
@@ -4016,6 +5023,50 @@ def _phase1_repair_scope_violations(
         connected.update(newly_connected)
         pending -= newly_connected
     return {label for label in changed if label not in allowed}
+
+
+def _decomposition_orientation_findings(
+    before: dict[str, Node],
+    after: dict[str, Node],
+    roots: Iterable[str],
+) -> list[str]:
+    """Reject new decomposition helpers placed on the consumer side.
+
+    A helper introduced to state or prove a rejected contract must be in that
+    contract's dependency closure. Otherwise the original node cannot use it;
+    adding the reverse edge later either leaves dead scaffolding or creates the
+    cycle observed in the Simplex run.
+    """
+    root_set = {label for label in roots if label in after}
+    added = set(after) - set(before)
+    if not root_set or not added:
+        return []
+    root_closures = {
+        root: _transitive_dependencies(after, root) for root in root_set
+    }
+    findings: list[str] = []
+    for helper in sorted(added):
+        owners = sorted(
+            root for root, closure in root_closures.items() if helper in closure
+        )
+        if owners:
+            continue
+        reverse = sorted(
+            root
+            for root in root_set
+            if root in _transitive_dependencies(after, helper)
+        )
+        if reverse:
+            findings.append(
+                f"new helper `{helper}` depends on repaired target(s) "
+                f"{', '.join(reverse)} instead of being their dependency"
+            )
+        else:
+            findings.append(
+                f"new helper `{helper}` is not in the dependency closure of "
+                f"any repaired target ({', '.join(sorted(root_set))})"
+            )
+    return findings
 
 
 def _invalid_mathlib_refusal_mappings(ctx: Ctx, refusal: dict) -> dict[str, str]:
@@ -4439,6 +5490,39 @@ Lean API idioms:
 {LEAN_IDIOM_CHEATSHEET}"""
 
 
+def _design_plan_rules(ctx: Ctx, labels: list[str]) -> str:
+    """Rules for JSON interface planning, without generation-only output modes."""
+    unavailable = ""
+    if ctx.unavailable_imports:
+        unavailable = (
+            "\nUnavailable imports (do not reference declarations from these):\n"
+            + "\n".join(f"- {item}" for item in sorted(ctx.unavailable_imports))
+        )
+    library_block = _library_context_for(ctx, labels)
+    return f"""Plan constraints:
+- Return JSON only and include exactly one contract for every requested label.
+- The blueprint TeX is the only mathematical source of truth. Preserve the
+  same objects, parameters, hypotheses, and claim without weakening or
+  strengthening it.
+- Use each node's required generated Lean name. Mathlib-owned dependencies use
+  their settled external declarations from the dependency table.
+- `target_signature` describes one top-level public declaration but contains
+  no body, proof, `sorry`, `axiom`, `constant`, or `opaque` declaration.
+- Helpers may only be structure, inductive, or class type interfaces owned by
+  that contract. Do not invent helper definitions or theorem declarations.
+- Do not return Lean code blocks, prose outside the JSON object, or any
+  alternate output format. Missing interface structure must be represented in
+  the contract's helper surface and decisions; later deterministic and semantic
+  gates decide whether blueprint decomposition is required.
+{unavailable}
+
+Local Lean library candidates (module paths verified by deterministic search):
+{library_block or "- none found"}
+
+Lean API idioms:
+{LEAN_IDIOM_CHEATSHEET}"""
+
+
 def _initial_declaration_prompt(
     ctx: Ctx,
     labels: list[str],
@@ -4608,7 +5692,10 @@ Generate ONE declaration per target node listed below — statements only:
 - definition-kind nodes (definition/defn/construction/notation/convention):
   emit the exact public type/interface. A `def` or `abbrev` body must end in
   `:= sorry`; Phase 2 implements it. A `structure`/`inductive` interface must
-  list its real fields/constructors and cannot use `sorry`;
+  list its real fields/constructors and cannot use `sorry`. The one narrow
+  exception is a type-valued target whose complete contract is a plan-owned
+  structure/class/inductive: emit that helper completely and make the target a
+  transparent alias such as `def target (n) : Type := OwnedInterface n`;
 - theorem-like nodes (lemma/proposition/theorem/corollary and EVERY other
   environment kind, e.g. claim/fact/remark): the exact statement as a
   `theorem` ending in `:= sorry`. Do NOT attempt proofs at this phase: a
@@ -4703,7 +5790,10 @@ def _targeted_skeleton_patch_prompt(
     provisional_rule = (
         "Repair the signature/type only. The body of a target `def`/`abbrev` "
         "and the proof of a target theorem must end in `:= sorry`; Phase 2 "
-        "implements them. Structure/inductive fields and constructors must be exact."
+        "implements them. Structure/inductive fields and constructors must be exact. "
+        "A type-valued target may instead be a transparent alias directly to its "
+        "same-node plan-owned structural interface; that alias is the public type "
+        "contract, not a Phase-2 implementation."
     )
     planned_helpers = _planned_helper_specs(ctx, patch_labels)
     helper_rule = (
@@ -4714,9 +5804,11 @@ def _targeted_skeleton_patch_prompt(
         "type interfaces; emit a complete replacement for any one named by a "
         "finding:\n"
         + "\n".join(
-            f"  - {helper.get('kind')} {helper.get('name')} with members "
-            f"{', '.join(helper.get('required_members') or []) or '(none)'} "
-            f"(owner {label})"
+            f"  - {helper.get('kind')} {helper.get('name')} (owner {label}):\n"
+            + "\n".join(
+                f"      {member.get('name')} : {member.get('type')}"
+                for member in helper.get("members") or []
+            )
             for label, helper in planned_helpers
         )
     )
@@ -4733,8 +5825,9 @@ Rules:
 - For each target blueprint node, include exactly one declaration with the
   required Lean name.
 - {provisional_rule}
-- Target theorem-like nodes and target `def`/`abbrev` bodies must end with
-  terminal `:= sorry`.
+- Target theorem-like nodes and ordinary target `def`/`abbrev` bodies must end
+  with terminal `:= sorry`; retain the transparent structural-alias exception
+  described above.
 - Use the Lean command `theorem` for theorem-like nodes; never use `corollary`.
 - If a finding concerns a partial or failing proof on a theorem-like node,
   replace that proof with terminal `:= sorry` — do not try to complete it;
@@ -5596,13 +6689,46 @@ def _model_alignment_audit(
     formatted: list[str] = []
     rejected: set[str] = set()
     required_dependencies: dict[str, set[str]] = {}
+    kinds_by_label: dict[str, str] = {}
+    helpers_by_label: dict[str, list[str]] = {}
+    reasons_by_label: dict[str, str] = {}
+    missing_info_by_label: dict[str, list[str]] = {}
+    global_classification = str(payload.get("classification") or "")
     for issue in issues if isinstance(issues, list) else []:
         if not isinstance(issue, dict):
             continue
         node = str(issue.get("node") or "(unknown)")
-        formatted.append(f"{node} [{issue.get('severity', 'reject')}]: {issue.get('reason', '')}")
+        issue_line = (
+            f"{node} [{issue.get('severity', 'reject')}]: "
+            f"{issue.get('reason', '')}"
+        )
+        formatted.append(issue_line)
         if str(issue.get("severity", "reject")).lower() == "reject" and node in nodes:
             rejected.add(node)
+            issue_classification = str(
+                issue.get("classification") or global_classification
+            )
+            if issue_classification == "needs_decomposition":
+                issue_kind = "decomposition"
+                missing_info: list[str] = []
+            else:
+                issue_kind, missing_info = _authorized_alignment_failure_kind(
+                    issue_classification, [issue_line], [issue]
+                )
+            # More specific blueprint/decomposition evidence must not be lost
+            # when a critic reports several findings for the same node.
+            priority = {"lean-generation": 0, "decomposition": 1, "blueprint": 2}
+            if priority.get(issue_kind, 0) >= priority.get(
+                kinds_by_label.get(node, "lean-generation"), 0
+            ):
+                kinds_by_label[node] = issue_kind
+            reasons_by_label.setdefault(node, issue_line)
+            missing_info_by_label.setdefault(node, []).extend(missing_info)
+            helpers_by_label.setdefault(node, []).extend(
+                str(helper).strip()
+                for helper in issue.get("missing_helpers") or []
+                if str(helper).strip()
+            )
             certified = {
                 str(dep).strip()
                 for dep in issue.get("required_dependencies") or []
@@ -5612,37 +6738,54 @@ def _model_alignment_audit(
                 required_dependencies[node] = certified
     if not rejected:
         rejected = set(audit_labels)
+        for label in rejected:
+            kinds_by_label[label] = "lean-generation"
+            reasons_by_label[label] = (
+                "The critic rejected the declaration without attributable "
+                "per-node routing evidence."
+            )
     # The critic reports issues per node. Non-rejected nodes in the same
     # response have received a positive judgment and remain reusable even if a
     # sibling is routed to correction or blueprint repair.
     cache.update(keys[label] for label in audit_labels if label not in rejected)
-    classification = str(payload.get("classification") or "")
-    missing_blueprint_information: list[str] = []
-    if classification == "needs_decomposition":
-        kind = "decomposition"
-    else:
-        kind, missing_blueprint_information = _authorized_alignment_failure_kind(
-            classification, formatted, issues
+    classification = global_classification
+    routed_kinds = set(kinds_by_label.values())
+    kind = next(iter(routed_kinds)) if len(routed_kinds) == 1 else "mixed"
+    missing_blueprint_information = list(
+        dict.fromkeys(
+            item
+            for label in sorted(rejected)
+            for item in missing_info_by_label.get(label, [])
         )
+    )
     _record(
         ctx.telemetry,
         "statement_audit_routing",
         labels=sorted(rejected),
         reported_classification=classification,
         routed_kind=kind,
-        blueprint_repair_authorized=kind == "blueprint",
+        routed_kinds={
+            label: kinds_by_label.get(label, "lean-generation")
+            for label in sorted(rejected)
+        },
+        blueprint_repair_authorized=any(
+            value in {"blueprint", "decomposition"}
+            for value in kinds_by_label.values()
+        ),
         missing_blueprint_information=missing_blueprint_information,
         required_dependencies={
             label: sorted(dependencies)
             for label, dependencies in required_dependencies.items()
         },
     )
-    decomposition_helpers = [
-        str(helper).strip()
-        for issue in issues if isinstance(issue, dict)
-        for helper in (issue.get("missing_helpers") or [])
-        if str(helper).strip()
-    ]
+    decomposition_helpers = list(
+        dict.fromkeys(
+            helper
+            for label in sorted(rejected)
+            if kinds_by_label.get(label) == "decomposition"
+            for helper in helpers_by_label.get(label, [])
+        )
+    )
     reason = "Blueprint contract audit rejected:\n- " + "\n- ".join(formatted)
     if required_dependencies:
         reason += "\nRequired existing blueprint statement dependencies:\n- " + "\n- ".join(
@@ -5654,10 +6797,14 @@ def _model_alignment_audit(
             "\nBlueprint repair was not authorized because the audit named no "
             "mathematical information absent from the blueprint."
         )
-    if kind == "decomposition":
+    decomposition_labels = {
+        label for label, routed in kinds_by_label.items()
+        if routed == "decomposition"
+    }
+    if decomposition_labels:
         if not decomposition_helpers:
             decomposition_helpers = [
-                "split each rejected node's bundled declaration-level obligations "
+                "split each decomposition-routed node's bundled declaration-level obligations "
                 "into explicit helper nodes without weakening or dropping any claim"
             ]
         reason += "\nMissing helper statements:\n- " + "\n- ".join(
@@ -5669,6 +6816,12 @@ def _model_alignment_audit(
         rejected,
         list(dict.fromkeys(decomposition_helpers)),
         required_dependencies,
+        kinds_by_label,
+        {
+            label: list(dict.fromkeys(values))
+            for label, values in helpers_by_label.items()
+        },
+        reasons_by_label,
     )
 
 
@@ -5732,6 +6885,17 @@ def _prune_stale_design_plan(ctx: Ctx) -> set[str]:
     }
     for label in stale:
         entries.pop(label, None)
+    alternates = getattr(ctx, "design_plan_alternates", {})
+    stale_alternates = {
+        label
+        for label, entry in alternates.items()
+        if label not in ctx.nodes
+        or entry.get("statement_fp") != ctx.stmt_fps.get(label)
+        or int(entry.get("schema_version") or 0) != DESIGN_PLAN_SCHEMA_VERSION
+        or not str(entry.get("target_signature") or "").strip()
+    }
+    for label in stale_alternates:
+        alternates.pop(label, None)
     _sync_design_plan(ctx)
     telemetry = getattr(ctx, "telemetry", None)
     if stale and telemetry is not None:
@@ -5741,10 +6905,10 @@ def _prune_stale_design_plan(ctx: Ctx) -> set[str]:
             labels=sorted(stale),
             reason="statement_fingerprint_changed",
         )
-    return stale
+    return stale | stale_alternates
 
 
-DESIGN_PLAN_SCHEMA_VERSION = 5
+DESIGN_PLAN_SCHEMA_VERSION = 6
 DESIGN_PLAN_CLOSURE_VERSION = 2
 
 # Phase 1 may introduce only declaration-only type interfaces. Ordinary helper
@@ -5768,13 +6932,22 @@ def _render_design_plan_entry(label: str, entry: dict[str, Any]) -> str:
             suffix = f" -- {purpose}" if purpose else ""
             kind = str(helper.get("kind") or "def").strip()
             name = str(helper.get("name") or "").strip()
-            members = ", ".join(
-                str(item).strip()
-                for item in helper.get("required_members") or []
-                if str(item).strip()
-            )
-            surface = f"; required members: {members}" if members else ""
-            lines.append(f"- {kind} {name}{surface}{suffix}")
+            lines.append(f"- {kind} {name}{suffix}")
+            typed_members = helper.get("members") or []
+            if typed_members:
+                lines.extend(
+                    f"  - {str(member.get('name') or '').strip()} : "
+                    f"{str(member.get('type') or '').strip()}"
+                    for member in typed_members
+                )
+            else:
+                # Compatibility for hand-built test contexts. Parsed and
+                # persisted schema-v6 plans always contain typed members.
+                lines.extend(
+                    f"  - {str(member).strip()} : <missing type>"
+                    for member in helper.get("required_members") or []
+                    if str(member).strip()
+                )
     decisions = [str(item).strip() for item in entry.get("decisions") or [] if str(item).strip()]
     if decisions:
         lines.append("DECISIONS:")
@@ -5798,20 +6971,32 @@ def _normalize_plan_helper(raw: Any) -> dict[str, Any] | None:
         return None
     if kind not in DESIGN_PLAN_HELPER_KINDS:
         return None
-    raw_members = raw.get("required_members") or []
-    if not isinstance(raw_members, list):
+    raw_members = raw.get("members")
+    if not isinstance(raw_members, list) or not raw_members:
         return None
-    members = [
-        str(item).strip()
-        for item in raw_members
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_'.]*", str(item).strip())
-    ]
-    if len(members) != len(raw_members) or len(members) > 32:
+    members: list[dict[str, str]] = []
+    for item in raw_members:
+        if not isinstance(item, dict):
+            return None
+        member_name = str(item.get("name") or "").strip()
+        member_type = str(item.get("type") or "").strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_'.]*", member_name):
+            return None
+        if not member_type or len(member_type) > 4000:
+            return None
+        members.append({"name": member_name, "type": member_type})
+    member_names = [member["name"] for member in members]
+    if (
+        len(members) > 32
+        or len(member_names) != len(set(member_names))
+        or sum(len(member["type"]) for member in members) > 24000
+    ):
         return None
     return {
         "name": name[:500],
         "kind": kind,
-        "required_members": list(dict.fromkeys(members)),
+        "members": members,
+        "required_members": member_names,
         "purpose": purpose[:2000],
     }
 
@@ -5846,11 +7031,16 @@ def _parse_design_plan_entries(
             signature,
         ):
             continue
+        raw_helpers = raw.get("helpers") or []
+        if not isinstance(raw_helpers, list):
+            continue
         helpers = [
             helper
-            for helper in (_normalize_plan_helper(item) for item in raw.get("helpers") or [])
+            for helper in (_normalize_plan_helper(item) for item in raw_helpers)
             if helper is not None
         ]
+        if len(helpers) != len(raw_helpers):
+            continue
         helper_names = [helper["name"] for helper in helpers]
         if len(helper_names) != len(set(helper_names)):
             continue
@@ -5968,6 +7158,43 @@ def _planned_target_members(signature: str, target_name: str) -> set[str]:
     )
 
 
+def _planned_target_result_type(signature: str, target_name: str) -> str:
+    """Return the top-level result type of a planned target declaration.
+
+    Binder annotations may contain their own colons, so this scans the parsed
+    declaration and accepts only a colon outside parentheses, brackets, and
+    braces. The result is used only to connect a target value to an interface
+    helper already owned by the same plan entry.
+    """
+    declaration = next(
+        (
+            decl.text
+            for decl in _parse_module(signature).decls
+            if decl.name == target_name
+        ),
+        "",
+    )
+    name_match = re.search(
+        rf"\b{re.escape(target_name)}(?![A-Za-z0-9_'])",
+        declaration,
+    )
+    if not name_match:
+        return ""
+
+    tail = declaration[name_match.end():]
+    depths = {"(": 0, "[": 0, "{": 0}
+    closing = {")": "(", "]": "[", "}": "{"}
+    for index, char in enumerate(tail):
+        if char in depths:
+            depths[char] += 1
+        elif char in closing:
+            opener = closing[char]
+            depths[opener] = max(0, depths[opener] - 1)
+        elif char == ":" and not any(depths.values()):
+            return tail[index + 1:].split(":=", 1)[0].strip()
+    return ""
+
+
 def _design_plan_symbol_surfaces(
     ctx: Ctx,
 ) -> tuple[dict[str, set[str]], dict[str, str]]:
@@ -5979,9 +7206,9 @@ def _design_plan_symbol_surfaces(
         if label not in ctx.nodes:
             continue
         target_name = _lean_name(label)
-        surfaces[target_name] = _planned_target_members(
-            str(entry.get("target_signature") or ""), target_name
-        )
+        signature = str(entry.get("target_signature") or "")
+        target_members = _planned_target_members(signature, target_name)
+        result_type = _planned_target_result_type(signature, target_name)
         owners[target_name] = label
         for helper in entry.get("helpers") or []:
             helper_name = str(helper.get("name") or "").strip()
@@ -5993,9 +7220,15 @@ def _design_plan_symbol_surfaces(
                 if str(member).strip()
             }
             canonical = _owned_helper_name(ctx, helper_name, [label])
+            if any(
+                _mentions_lean_symbol(result_type, spelling)
+                for spelling in (helper_name, canonical)
+            ):
+                target_members.update(members)
             for spelling in (helper_name, canonical):
                 surfaces[spelling] = set(members)
                 owners[spelling] = label
+        surfaces[target_name] = target_members
     return surfaces, owners
 
 
@@ -6295,6 +7528,88 @@ def _closure_findings_for_scope(
         for label in findings
         if label in selected_consumers
     }
+
+
+def _evaluate_design_plan_candidate(
+    ctx: Ctx,
+    ordered: list[str],
+    entries: dict[str, dict[str, Any]],
+    candidate_id: str,
+) -> DesignPlanCandidate:
+    """Score a plan with the existing closure rules without changing live state."""
+    previous_entries = getattr(ctx, "design_plan_entries", {})
+    previous_plan = getattr(ctx, "design_plan", "")
+    ctx.design_plan_entries = entries
+    try:
+        missing = [label for label in ordered if label not in entries]
+        findings = _design_plan_contract_closure_findings(ctx, ordered)
+        for item in _design_plan_unauthorized_reference_findings(ctx, ordered):
+            label = next(
+                (candidate for candidate in ordered if item.startswith(f"{candidate}:")),
+                None,
+            )
+            if label is not None:
+                findings.setdefault(label, []).append(item)
+        findings = {
+            label: list(dict.fromkeys(messages))
+            for label, messages in findings.items()
+        }
+        components = _design_plan_closure_repair_components(ctx, findings)
+        blocked = {label for component in components for label in component}
+    finally:
+        ctx.design_plan_entries = previous_entries
+        ctx.design_plan = previous_plan
+    return DesignPlanCandidate(
+        candidate_id=candidate_id,
+        entries=copy.deepcopy(entries),
+        missing=missing,
+        findings=findings,
+        blocked=blocked,
+        components=components,
+    )
+
+
+def _merge_design_plan_candidates(
+    ctx: Ctx,
+    ordered: list[str],
+    primary: DesignPlanCandidate,
+    alternate: DesignPlanCandidate,
+) -> tuple[DesignPlanCandidate, list[list[str]]]:
+    """Replace defective closure components only when the full plan improves.
+
+    Arbitrary per-node mixing is unsafe because consumers and providers share
+    helper surfaces. Components come from the same closure graph used by plan
+    repair, and every proposed replacement is rescored in the complete plan.
+    """
+    current = primary
+    accepted_components: list[list[str]] = []
+    attempted: set[tuple[str, ...]] = set()
+    while current.findings:
+        improved = False
+        for component in current.components:
+            key = tuple(sorted(component))
+            if key in attempted:
+                continue
+            attempted.add(key)
+            if any(label not in alternate.entries for label in component):
+                continue
+            trial_entries = copy.deepcopy(current.entries)
+            for label in component:
+                trial_entries[label] = copy.deepcopy(alternate.entries[label])
+            trial = _evaluate_design_plan_candidate(
+                ctx,
+                ordered,
+                trial_entries,
+                f"merge:{primary.candidate_id}+{alternate.candidate_id}",
+            )
+            if trial.score < current.score:
+                current = trial
+                accepted_components.append(list(component))
+                improved = True
+                break
+        if not improved:
+            break
+    return current, accepted_components
 
 
 def _design_plan_audit_prompt(ctx: Ctx, labels: list[str]) -> str:
@@ -6597,10 +7912,61 @@ def _audit_phase1_design_plan(
     return kind, reason, rejected, list(dict.fromkeys(helpers))
 
 
+def _try_alternate_design_plan_component(
+    ctx: Ctx, labels: list[str], evidence: str
+) -> bool:
+    """Try the retained candidate once before paying for plan correction."""
+    entries = getattr(ctx, "design_plan_entries", {})
+    alternates = getattr(ctx, "design_plan_alternates", {})
+    if not labels or any(label not in alternates for label in labels):
+        return False
+    ordered = _design_plan_order(ctx, entries)
+    current = _evaluate_design_plan_candidate(ctx, ordered, entries, "selected")
+    trial_entries = copy.deepcopy(entries)
+    changed = False
+    for label in labels:
+        replacement = copy.deepcopy(alternates[label])
+        changed = changed or replacement != trial_entries.get(label)
+        trial_entries[label] = replacement
+    for label in labels:
+        alternates.pop(label, None)
+    if not changed:
+        return False
+
+    trial = _evaluate_design_plan_candidate(ctx, ordered, trial_entries, "alternate")
+    acceptable = trial.score < current.score or (current.closed and trial.closed)
+    _record(
+        ctx.telemetry,
+        "phase1_design_plan_alternate_component",
+        labels=labels,
+        status="applied" if acceptable else "rejected",
+        previous_score=list(current.score),
+        alternate_score=list(trial.score),
+        evidence_sha256=hashlib.sha256(evidence.encode("utf-8")).hexdigest(),
+    )
+    if not acceptable:
+        return False
+    for label in labels:
+        entries[label] = trial_entries[label]
+    _sync_design_plan(ctx)
+    _log(
+        "  reused retained alternate plan component before model correction: "
+        + ", ".join(labels)
+    )
+    return True
+
+
 def _correct_phase1_design_plan(
-    ctx: Ctx, labels: list[str], evidence: str, *, escalated: bool = False
+    ctx: Ctx,
+    labels: list[str],
+    evidence: str,
+    *,
+    escalated: bool = False,
+    try_alternate: bool = True,
 ) -> bool:
     """Revise one connected set of interface contracts using exact evidence."""
+    if try_alternate and _try_alternate_design_plan_component(ctx, labels, evidence):
+        return True
     entries = getattr(ctx, "design_plan_entries", {})
     fingerprint = hashlib.sha256(
         json.dumps(
@@ -6662,7 +8028,7 @@ Return exactly one JSON object using the same lossless schema as planning:
       "label": "requested blueprint label",
       "target_signature": "complete Lean-ish target signature",
       "helpers": [
-        {{"name": "stable helper name", "kind": "structure|inductive|class", "required_members": ["stable_field_or_constructor"], "purpose": "brief type-interface role"}}
+        {{"name": "stable helper name", "kind": "structure|inductive|class", "members": [{{"name": "stable_field_or_constructor", "type": "complete Lean-ish member type"}}], "purpose": "brief type-interface role"}}
       ],
       "decisions": ["semantic/interface decision generation must preserve"]
     }}
@@ -6670,6 +8036,9 @@ Return exactly one JSON object using the same lossless schema as planning:
 }}
 Include every requested label and no others. Helpers may only be auxiliary
 `structure`, `inductive`, or `class` interfaces needed to state the target.
+Every helper member must include its complete Lean-ish type. A list of member
+names without types is invalid because statement generation must not invent the
+helper interface.
 Never introduce a helper `def`, `abbrev`, `theorem`, or `lemma`: equations and
 properties belong to the target contract/decisions and are implemented in
 Phase 2. Each `target_signature` must contain exactly one top-level declaration,
@@ -6754,10 +8123,10 @@ def _repair_phase1_design_plan_closure(
 ) -> None:
     """Repair only blocked provider-consumer components, then revalidate.
 
-    Every component gets at most one base and one escalation correction in
-    this invocation. Unrelated closed entries are never sent to the model or
-    invalidated. If both tiers fail, the whole unresolved component is removed
-    so the next bounded outer retry replans a coherent provider-consumer slice.
+    Every component first gets one zero-call alternate-candidate substitution,
+    then at most one base-model correction. Unrelated closed entries are never
+    sent to the model or invalidated. If that bounded fallback fails, the whole
+    unresolved component is removed so the next outer retry replans it.
     """
     entries = getattr(ctx, "design_plan_entries", {})
     scope = set(repair_scope or [])
@@ -6766,49 +8135,79 @@ def _repair_phase1_design_plan_closure(
         if scope
         else closure_findings
     )
-    for escalated in (False, True):
-        components = _design_plan_closure_repair_components(ctx, remaining)
-        for component in components:
+    components = _design_plan_closure_repair_components(ctx, remaining)
+    for component in components:
+        consumers = [label for label in component if label in remaining]
+        if not consumers:
+            continue
+        evidence = (
+            "Phase 1 interface-plan contract closure rejected:\n- "
+            + "\n- ".join(
+                finding
+                for label in consumers
+                for finding in remaining[label]
+            )
+        )
+        providers = [label for label in component if label not in consumers]
+        if providers:
+            evidence += (
+                "\nProvider contract(s) implicated by these findings: "
+                + ", ".join(providers)
+                + ". Correct provider and consumer surfaces together."
+            )
+
+        alternate_applied = _try_alternate_design_plan_component(
+            ctx, component, evidence
+        )
+        if alternate_applied:
+            validated = _validate_design_plan_contract_closure(ctx, ordered)
+            remaining = (
+                _closure_findings_for_scope(ctx, validated, scope)
+                if scope
+                else validated
+            )
+            if not remaining:
+                return
             consumers = [label for label in component if label in remaining]
             if not consumers:
                 continue
             evidence = (
-                "Phase 1 interface-plan contract closure rejected:\n- "
+                "Phase 1 interface-plan contract closure still rejected after "
+                "trying the retained alternate candidate:\n- "
                 + "\n- ".join(
                     finding
                     for label in consumers
                     for finding in remaining[label]
                 )
             )
-            providers = [label for label in component if label not in consumers]
-            if providers:
-                evidence += (
-                    "\nProvider contract(s) implicated by these findings: "
-                    + ", ".join(providers)
-                    + ". Correct provider and consumer surfaces together."
-                )
-            corrected = _correct_phase1_design_plan(
-                ctx, component, evidence, escalated=escalated
+
+        corrected = _correct_phase1_design_plan(
+            ctx,
+            component,
+            evidence,
+            escalated=False,
+            try_alternate=False,
+        )
+        _record(
+            ctx.telemetry,
+            "phase1_outline_plan_closure_correction",
+            labels=component,
+            rejected_labels=consumers,
+            provider_labels=providers,
+            alternate_applied=alternate_applied,
+            corrected=bool(corrected),
+            reason="deterministic_contract_closure",
+            tier="base",
+        )
+        if corrected:
+            validated = _validate_design_plan_contract_closure(ctx, ordered)
+            remaining = (
+                _closure_findings_for_scope(ctx, validated, scope)
+                if scope
+                else validated
             )
-            _record(
-                ctx.telemetry,
-                "phase1_outline_plan_closure_correction",
-                labels=component,
-                rejected_labels=consumers,
-                provider_labels=providers,
-                corrected=bool(corrected),
-                reason="deterministic_contract_closure",
-                tier="escalation" if escalated else "base",
-            )
-            if corrected:
-                validated = _validate_design_plan_contract_closure(ctx, ordered)
-                remaining = (
-                    _closure_findings_for_scope(ctx, validated, scope)
-                    if scope
-                    else validated
-                )
-            if not remaining:
-                return
+        if not remaining:
+            return
 
     if not remaining:
         return
@@ -6829,7 +8228,8 @@ def _repair_phase1_design_plan_closure(
     route = _route_lean_generation_failure(failed)
     raise RepairRequest(
         "Phase 1 cannot generate Lean from a mechanically impossible "
-        "interface plan. Base and escalation correction did not close "
+        "interface plan. The retained alternate and one bounded correction "
+        "did not close "
         "these connected provider-consumer contracts; their plan entries "
         "were discarded for fresh planning on the next bounded retry:\n- "
         + "\n- ".join(
@@ -6906,6 +8306,7 @@ def _design_plan_prompt(
     *,
     timeout_s: int,
     root_context_labels: Iterable[str] | None = None,
+    feedback: str = "",
 ) -> str:
     """Ask for the interface plan only — no bodies, no proofs.
 
@@ -6943,7 +8344,7 @@ JSON object in this schema:
       "label": "exact blueprint label",
       "target_signature": "complete Lean-ish target signature using the required Lean name",
       "helpers": [
-        {{"name": "stable helper name", "kind": "structure|inductive|class", "required_members": ["stable_field_or_constructor"], "purpose": "brief type-interface role"}}
+        {{"name": "stable helper name", "kind": "structure|inductive|class", "members": [{{"name": "stable_field_or_constructor", "type": "complete Lean-ish member type"}}], "purpose": "brief type-interface role"}}
       ],
       "decisions": ["semantic/interface decision generation must preserve"]
     }}
@@ -6964,7 +8365,9 @@ makes the root vacuous.
 Include exactly one contract for every requested node. A helper is permitted
 only when the target needs an auxiliary `structure`, `inductive`, or `class`
 type interface in order to be stated. Put that helper under its owning node and
-list its stable fields or constructors. Never create helper `def`, `abbrev`,
+give every stable field or constructor its complete Lean-ish type. A member-name
+list without types is invalid: the later statement writer must copy the planned
+interface rather than invent it. Never create helper `def`, `abbrev`,
 `theorem`, or `lemma` declarations: their bodies/proofs would be untracked by
 Phase 2. Put equations and semantic properties in the target signature when
 they are part of the statement, or in `decisions` when they govern the target's
@@ -6992,7 +8395,10 @@ Keep signatures and decisions compact. This call has a budget of about
 {timeout_s}s; it is a planning call, so do not verify every Mathlib API now —
 note the intended type and move on.
 
-{_common_rules(ctx, labels)}
+{_design_plan_rules(ctx, labels)}
+
+Correction required from a previous invalid planning response:
+{feedback[-5000:] if feedback else '- none'}
 
 Blueprint name: {ctx.name}
 
@@ -7007,6 +8413,160 @@ Root obligations — design everything below to serve these:
 Target nodes to plan ({len(labels)} node(s), root-first planning order):
 {target_text}
 """
+
+
+def _generate_design_plan_candidate(
+    ctx: Ctx,
+    ordered: list[str],
+    sections: list[Section],
+    imports: list[str],
+    root_context: list[str],
+    candidate_id: str,
+) -> DesignPlanCandidate:
+    """Generate one independent full-context plan candidate."""
+    candidate_entries: dict[str, dict[str, Any]] = {}
+    missing = list(ordered)
+    empty_response_retries = 0
+    invalid_response_feedback = ""
+    while missing:
+        plan_labels = missing[:DESIGN_PLAN_MAX_NODES]
+        result = _call_model(
+            ctx,
+            _design_plan_prompt(
+                ctx,
+                plan_labels,
+                sections,
+                imports,
+                timeout_s=ctx.base_timeout,
+                root_context_labels=root_context,
+                feedback=invalid_response_feedback,
+            ),
+            purpose=f"phase1_design_plan_candidate_{candidate_id.lower()}",
+            timeout=ctx.base_timeout,
+            effort=ctx.base_effort,
+            labels=plan_labels,
+        )
+        if result.status != "ok" or not result.text.strip():
+            _record(
+                ctx.telemetry,
+                "phase1_design_plan_candidate_result",
+                candidate_id=candidate_id,
+                labels=plan_labels,
+                status=result.status,
+                planned_count=0,
+            )
+            break
+        parsed = _parse_design_plan_entries(ctx, plan_labels, result.text)
+        candidate_entries.update(parsed)
+        missing_from_reply = sorted(set(plan_labels) - set(parsed))
+        _record(
+            ctx.telemetry,
+            "phase1_design_plan_candidate_result",
+            candidate_id=candidate_id,
+            labels=plan_labels,
+            status="ok" if parsed else "invalid_empty_contracts",
+            planned_labels=sorted(parsed),
+            planned_count=len(parsed),
+            missing_labels=missing_from_reply,
+            chars=len(result.text),
+        )
+        if not parsed:
+            if empty_response_retries < 1:
+                empty_response_retries += 1
+                invalid_response_feedback = (
+                    "The previous response contained zero usable contracts. "
+                    f"Return exactly {len(plan_labels)} contracts, one for each "
+                    "requested label, in the required JSON schema. Do not return "
+                    "an empty contracts array or any Lean code."
+                )
+                continue
+            break
+        empty_response_retries = 0
+        invalid_response_feedback = ""
+        missing = [label for label in ordered if label not in candidate_entries]
+
+    return _evaluate_design_plan_candidate(
+        ctx, ordered, candidate_entries, candidate_id
+    )
+
+
+def _initial_design_plan_tournament(
+    ctx: Ctx,
+    ordered: list[str],
+    sections: list[Section],
+    imports: list[str],
+    root_context: list[str],
+) -> tuple[DesignPlanCandidate, DesignPlanCandidate]:
+    """Generate two plans concurrently and retain the best coherent merge."""
+    _log(
+        "==> Phase 1 design plan: generating two independent full-context "
+        f"candidates concurrently ({len(ordered)} nodes)"
+    )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {
+            candidate_id: pool.submit(
+                _generate_design_plan_candidate,
+                ctx,
+                ordered,
+                sections,
+                imports,
+                root_context,
+                candidate_id,
+            )
+            for candidate_id in ("A", "B")
+        }
+        candidates = [futures[candidate_id].result() for candidate_id in ("A", "B")]
+
+    candidates.sort(key=lambda item: (item.score, item.candidate_id))
+    primary, alternate = candidates
+    selected, merged_components = _merge_design_plan_candidates(
+        ctx, ordered, primary, alternate
+    )
+    for candidate in candidates:
+        _record(
+            ctx.telemetry,
+            "phase1_design_plan_candidate_scored",
+            candidate_id=candidate.candidate_id,
+            labels=ordered,
+            score=list(candidate.score),
+            planned_count=len(candidate.entries),
+            missing_labels=candidate.missing,
+            blocked_labels=sorted(candidate.blocked),
+            component_count=len(candidate.components),
+            findings=[
+                finding
+                for label in sorted(candidate.findings)
+                for finding in candidate.findings[label]
+            ],
+            selected=candidate.candidate_id == primary.candidate_id,
+        )
+    _record(
+        ctx.telemetry,
+        "phase1_design_plan_tournament",
+        labels=ordered,
+        primary_candidate=primary.candidate_id,
+        alternate_candidate=alternate.candidate_id,
+        selected_candidate=selected.candidate_id,
+        selected_score=list(selected.score),
+        merged_components=merged_components,
+    )
+    _log(
+        "  design-plan tournament selected "
+        f"{selected.candidate_id} with score {selected.score}; "
+        f"merged {len(merged_components)} improving component(s)"
+    )
+    fallback_entries: dict[str, dict[str, Any]] = {}
+    for label in ordered:
+        selected_entry = selected.entries.get(label)
+        for candidate in candidates:
+            candidate_entry = candidate.entries.get(label)
+            if candidate_entry is not None and candidate_entry != selected_entry:
+                fallback_entries[label] = copy.deepcopy(candidate_entry)
+                break
+    fallback = _evaluate_design_plan_candidate(
+        ctx, ordered, fallback_entries, "per-node-alternate"
+    )
+    return selected, fallback
 
 
 def _ensure_phase1_design_plan(
@@ -7042,6 +8602,36 @@ def _ensure_phase1_design_plan(
     root_context = [
         label for label, node in ctx.nodes.items() if not node.mathlibok
     ]
+    if not entries and len(missing) > 1:
+        selected, alternate = _initial_design_plan_tournament(
+            ctx,
+            ordered,
+            sections,
+            imports,
+            root_context,
+        )
+        entries.update(copy.deepcopy(selected.entries))
+        ctx.design_plan_alternates = {
+            label: copy.deepcopy(entry)
+            for label, entry in alternate.entries.items()
+            if label in entries and entry != entries[label]
+        }
+        _sync_design_plan(ctx)
+        _record(
+            ctx.telemetry,
+            "phase1_design_plan_result",
+            labels=ordered,
+            status="tournament_selected",
+            planned_labels=sorted(entries),
+            planned_count=len(entries),
+            missing_labels=[label for label in ordered if label not in entries],
+            alternate_count=len(ctx.design_plan_alternates),
+            selected_score=list(selected.score),
+        )
+        missing = [label for label in ordered if label not in entries]
+
+    empty_response_retries = 0
+    invalid_response_feedback = ""
     while missing:
         # Ordinary papers fit in one call. Very large graphs are bounded here
         # so planning itself cannot become the oversized prompt Phase 1 is
@@ -7060,6 +8650,10 @@ def _ensure_phase1_design_plan(
                 imports,
                 timeout_s=ctx.base_timeout,
                 root_context_labels=root_context,
+                feedback=(
+                    invalid_response_feedback
+                    or _generation_feedback_for(ctx, plan_labels)
+                ),
             ),
             purpose="phase1_design_plan",
             timeout=ctx.base_timeout,
@@ -7084,11 +8678,12 @@ def _ensure_phase1_design_plan(
         entries.update(parsed)
         _sync_design_plan(ctx)
         missing_from_reply = sorted(set(plan_labels) - set(parsed))
+        response_status = "ok" if parsed else "invalid_empty_contracts"
         _record(
             ctx.telemetry,
             "phase1_design_plan_result",
             labels=plan_labels,
-            status="ok",
+            status=response_status,
             planned_labels=sorted(parsed),
             planned_count=len(parsed),
             missing_labels=missing_from_reply,
@@ -7098,10 +8693,23 @@ def _ensure_phase1_design_plan(
             f"  design plan stored {len(parsed)}/{len(plan_labels)} contract "
             f"decision(s); {len(entries)} reusable entry/entries total"
         )
-        # Do not spin on a malformed successful response. Unplanned nodes use
-        # the normal generation/audit path and the telemetry retains the miss.
         if not parsed:
+            if empty_response_retries < 1:
+                empty_response_retries += 1
+                invalid_response_feedback = (
+                    "The previous response contained zero usable contracts. "
+                    f"Return exactly {len(plan_labels)} contracts, one for each "
+                    "requested label, in the required JSON schema. Do not return "
+                    "an empty contracts array or any Lean code."
+                )
+                _log(
+                    "  invalid zero-contract design plan; retrying once with "
+                    "explicit completeness feedback"
+                )
+                continue
             break
+        empty_response_retries = 0
+        invalid_response_feedback = ""
         missing = [label for label in ordered if label not in entries]
 
     missing = [label for label in ordered if label not in entries]
@@ -7200,7 +8808,10 @@ Per-node rules:
 - definition-kind nodes (definition/defn/construction/notation/convention):
   emit the exact public type/interface. End a `def`/`abbrev` body in
   `:= sorry`; Phase 2 implements it. A `structure`/`inductive` must expose its
-  exact fields/constructors and cannot contain `sorry`.
+  exact fields/constructors and cannot contain `sorry`. A type-valued target
+  whose complete contract is a same-node plan-owned structure/class/inductive
+  may be a transparent alias directly to that helper; this is an interface,
+  not an implementation body.
 - theorem-like nodes (lemma/proposition/theorem/corollary and EVERY other
   environment kind, e.g. claim/fact/remark): the exact statement as a
   `theorem` ending in `:= sorry`. Do NOT attempt proofs in this pass.
@@ -7328,6 +8939,7 @@ def _freeze_section_from_code(
     initial_only: bool = False,
     generation_tier: str = "delivered",
     failure_evidence: list[str] | None = None,
+    failure_candidate_code: list[str] | None = None,
 ) -> list[Section] | None:
     """Try to freeze one section from declarations the model already delivered
     (a design-pass chunk, or the healthy remainder beside a refusal/compile
@@ -7408,6 +9020,8 @@ def _freeze_section_from_code(
                     module_code, ctx, labels
                 )
     if findings:
+        if failure_candidate_code is not None:
+            failure_candidate_code.append(module_code)
         if failure_evidence is not None:
             failure_evidence.append(
                 "Deterministic checks rejected delivered statements:\n"
@@ -7456,6 +9070,17 @@ def _freeze_section_from_code(
             output = original_output
 
     if not ok and allow_patch:
+        if not initial_only:
+            _store_generation_candidates(
+                ctx,
+                labels,
+                module_code,
+                source=f"{origin}_compile_baseline",
+                all_labels=labels,
+                generation_tier=generation_tier,
+                lean_status="failed",
+                lean_output=output,
+            )
         pending_findings: list[SkeletonFinding] = []
         for correction_round in range(1, COMPILER_CORRECTION_ROUNDS + 1):
             compile_findings = pending_findings or _lean_compile_findings(
@@ -7509,15 +9134,60 @@ def _freeze_section_from_code(
                 post += _skeleton_deterministic_findings(
                     module_code, ctx, labels
                 )
+            if not initial_only and post:
+                _store_generation_candidates(
+                    ctx,
+                    labels,
+                    module_code,
+                    source=f"{origin}_compiler_correction",
+                    all_labels=labels,
+                    generation_tier=generation_tier,
+                    lean_status="unknown",
+                )
+                retained_code = _retained_generation_candidate_code(ctx, labels)
+                if retained_code:
+                    module_code = retained_code
+                    parsed = _parse_module(module_code)
+                    module_code, _ranges = _compose_module(
+                        parsed.imports,
+                        parsed.preamble,
+                        [decl.text for decl in parsed.decls],
+                    )
+                    post = _skeleton_code_findings(
+                        module_code,
+                        target_kinds,
+                        label_by_lean_name,
+                        _planned_helper_owner_by_name(ctx, labels),
+                    )
+                    post += _skeleton_deterministic_findings(
+                        module_code, ctx, labels
+                    )
             if post:
                 pending_findings = post
                 output = _format_skeleton_findings(post)
                 continue
             path.write_text(module_code, encoding="utf-8")
             ok, output = _check_lean(path, ctx.lean_command)
+            if not initial_only:
+                _store_generation_candidates(
+                    ctx,
+                    labels,
+                    module_code,
+                    source=f"{origin}_compiler_check",
+                    all_labels=labels,
+                    generation_tier=generation_tier,
+                    lean_status="passed" if ok else "failed",
+                    lean_output=output,
+                )
+                # Keep compiling from this deterministic-clean intermediate
+                # even when it has the same number of Lean errors as the best
+                # candidate. The best remains the rollback point in persisted
+                # state; rebasing here would repeat the old error forever.
             if ok:
                 break
     if not ok:
+        if failure_candidate_code is not None:
+            failure_candidate_code.append(module_code)
         if failure_evidence is not None:
             failure_evidence.append("Lean rejected delivered statements:\n" + output[-12000:])
         _log("  delivered code failed Lean; regenerating the part")
@@ -7537,11 +9207,20 @@ def _freeze_section_from_code(
                     section_labels=labels,
                 )
             _log("  delivered code rejected by alignment audit; regenerating the part")
+            if failure_candidate_code is not None:
+                failure_candidate_code.append(module_code)
+            if failure_evidence is not None:
+                failure_evidence.append(
+                    "Statement alignment rejected delivered statements:\n"
+                    + reason[-12000:]
+                )
             _record(ctx.telemetry, "delivered_code_reuse", labels=labels, status="audit_rejected")
             _discard_section_artifacts(path)
             return None
     object_attempt = _compile_module_olean(path, ctx.lean_command)
     if not object_attempt.ok:
+        if failure_candidate_code is not None:
+            failure_candidate_code.append(module_code)
         if failure_evidence is not None:
             failure_evidence.append(
                 "Lean object compilation rejected delivered statements:\n"
@@ -8721,7 +10400,6 @@ def _freeze_section(
                 feedback = _format_skeleton_findings(findings)
                 if patch_note and patch_note != "not patchable":
                     feedback += f"\n\nTargeted declaration patch result: {patch_note}"
-                previous_code = module_code
                 deterministic_failure_labels = _isolated_deterministic_failure_labels(
                     findings, labels
                 )
@@ -8731,15 +10409,21 @@ def _freeze_section(
                     if deterministic_failure_labels
                     else None,
                 )
+                routed_labels = list(route.failed_labels)
+                _store_generation_candidates(
+                    ctx,
+                    routed_labels,
+                    module_code,
+                    source="deterministic_audit",
+                    all_labels=labels,
+                    generation_tier=(
+                        "escalation" if result_was_escalated else "base"
+                    ),
+                )
+                previous_code = (
+                    _generation_candidates_for(ctx, routed_labels) or module_code
+                )
                 if len(labels) > 1:
-                    routed_labels = list(route.failed_labels)
-                    _store_generation_candidates(
-                        ctx,
-                        routed_labels,
-                        module_code,
-                        source="deterministic_audit",
-                        all_labels=labels,
-                    )
                     _store_generation_feedback(
                         ctx,
                         routed_labels,
@@ -8793,13 +10477,6 @@ def _freeze_section(
                         "one targeted patch; regenerating once at escalated effort"
                     )
                     continue
-                _store_generation_candidates(
-                    ctx,
-                    labels,
-                    module_code,
-                    source="deterministic_audit",
-                    all_labels=labels,
-                )
                 raise RepairRequest(
                     "Targeted skeleton declaration patch made no deterministic "
                     "progress on the same audit failures, including at escalated "
@@ -8894,7 +10571,6 @@ def _freeze_section(
                         feedback = f"Lean rejected the file:\n{output[-12000:]}"
                         if patch_note != "patched":
                             feedback += f"\n\nTargeted compile patch: {patch_note}"
-                    previous_code = module_code
                     attributable_compile_labels = []
                     if not any(finding.label is None for finding in compile_findings):
                         attributable_compile_labels = [
@@ -8909,14 +10585,22 @@ def _freeze_section(
                         else None,
                     )
                     failure_labels = route.failed_labels
+                    _store_generation_candidates(
+                        ctx,
+                        failure_labels,
+                        module_code,
+                        source="lean_compile_failure",
+                        all_labels=labels,
+                        generation_tier=(
+                            "escalation" if result_was_escalated else "base"
+                        ),
+                        lean_status="failed",
+                        lean_output=output,
+                    )
+                    previous_code = (
+                        _generation_candidates_for(ctx, failure_labels) or module_code
+                    )
                     if len(labels) > 1:
-                        _store_generation_candidates(
-                            ctx,
-                            failure_labels,
-                            module_code,
-                            source="lean_compile_failure",
-                            all_labels=labels,
-                        )
                         if route.action == "isolate":
                             _quarantine_labels(
                                 ctx, failure_labels, "lean_compile_failure"
@@ -8982,13 +10666,6 @@ def _freeze_section(
                             "patch; starting one fresh escalated attempt"
                         )
                         continue
-                    _store_generation_candidates(
-                        ctx,
-                        failure_labels,
-                        module_code,
-                        source="lean_compile_failure",
-                        all_labels=labels,
-                    )
                     raise RepairRequest(
                         "A statement still does not compile after one base "
                         "generation/patch and one fresh escalated generation/patch. "
@@ -9016,6 +10693,19 @@ def _freeze_section(
                         section_labels=labels,
                     )
                 route = _route_lean_generation_failure(labels, rejected)
+                _store_generation_candidates(
+                    ctx,
+                    route.failed_labels,
+                    module_code,
+                    source="statement_alignment",
+                    all_labels=labels,
+                    generation_tier=(
+                        "escalation" if result_was_escalated else "base"
+                    ),
+                    lean_status="passed",
+                    semantic_status="rejected",
+                    semantic_evidence=reason,
+                )
                 _record(
                     ctx.telemetry,
                     "lean_generation_failure_routed",
@@ -9027,13 +10717,6 @@ def _freeze_section(
                     part_sizes=[len(part) for part in route.parts],
                 )
                 if len(labels) > 1:
-                    _store_generation_candidates(
-                        ctx,
-                        route.failed_labels,
-                        module_code,
-                        source="statement_alignment",
-                        all_labels=labels,
-                    )
                     _store_generation_feedback(
                         ctx,
                         route.failed_labels,
@@ -9143,6 +10826,18 @@ def _freeze_section(
                             + post_patch_output[-10000:]
                         )
                     else:
+                        _store_generation_candidates(
+                            ctx,
+                            rejected,
+                            module_code,
+                            source="statement_alignment_correction",
+                            all_labels=labels,
+                            generation_tier="escalation",
+                            repair_stage="semantic_corrected",
+                            lean_status="passed",
+                            semantic_status="correction_pending",
+                            semantic_evidence=reason,
+                        )
                         _record(
                             ctx.telemetry,
                             "skeleton_audit_patch",
@@ -9168,6 +10863,18 @@ def _freeze_section(
                                     ),
                                     section_labels=labels,
                                 )
+                            _store_generation_candidates(
+                                ctx,
+                                rejected2,
+                                module_code,
+                                source="statement_alignment_reaudit",
+                                all_labels=labels,
+                                generation_tier="escalation",
+                                repair_stage="semantic_corrected",
+                                lean_status="passed",
+                                semantic_status="rejected",
+                                semantic_evidence=reason2,
+                            )
                             raise RepairRequest(
                                 "Blueprint contract audit rejected the section again "
                                 "after one escalated targeted correction; the blueprint "
@@ -9177,7 +10884,34 @@ def _freeze_section(
                             )
                 if not corrected:
                     feedback = reason + f"\n\nTargeted audit correction failed: {patch_note}"
-                    previous_code = module_code
+                    _store_generation_candidates(
+                        ctx,
+                        rejected,
+                        module_code,
+                        source="statement_alignment_correction_failed",
+                        all_labels=labels,
+                        generation_tier="escalation",
+                        repair_stage="semantic_corrected",
+                        lean_status=(
+                            "passed"
+                            if patched is not None
+                            and not post_patch_findings
+                            and post_patch_ok
+                            else "failed"
+                            if patched is not None and not post_patch_findings
+                            else "unknown"
+                        ),
+                        lean_output=(
+                            post_patch_output
+                            if patched is not None and not post_patch_findings
+                            else ""
+                        ),
+                        semantic_status="correction_pending",
+                        semantic_evidence=feedback,
+                    )
+                    previous_code = (
+                        _generation_candidates_for(ctx, rejected) or module_code
+                    )
                     if attempt < attempt_limit:
                         _log(
                             "  alignment audit correction failed; regenerating once "
@@ -9190,6 +10924,9 @@ def _freeze_section(
                         module_code,
                         source="statement_alignment",
                         all_labels=labels,
+                        lean_status="passed",
+                        semantic_status="rejected",
+                        semantic_evidence=reason,
                     )
                     raise RepairRequest(
                         "Blueprint contract audit kept rejecting regenerated "
@@ -9490,7 +11227,7 @@ def _generate_phase1_statement_group(
                 import_modules,
                 timeout_s=timeout,
             )
-            if not feedback
+            if not feedback and not previous_code
             else _skeleton_prompt(
                 ctx,
                 labels,
@@ -9946,6 +11683,9 @@ def _revise_semantic_candidates(
         )
         if deterministic:
             evidence = _format_skeleton_findings(deterministic)
+            plan_revision_required = _findings_require_plan_revision(
+                deterministic
+            )
             confirmed_dependencies: dict[str, set[str]] = {}
             for finding in deterministic:
                 if not finding.label or not finding.dependencies:
@@ -9987,6 +11727,7 @@ def _revise_semantic_candidates(
                 section_labels=subset.labels,
                 authorizes_blueprint_repair=False,
                 failure_route=_route_lean_generation_failure(subset.labels),
+                plan_revision_required=plan_revision_required,
             )
         revisions.append(subset)
         _record(
@@ -10016,12 +11757,13 @@ def _compile_semantic_phase1_candidates(
         f"validated-contract candidate group(s) with {worker_count} worker(s)"
     )
     results: list[list[Section] | None] = [None] * len(candidates)
-    failures: list[tuple[int, Phase1LayerCandidate, str]] = []
+    failures: list[tuple[int, Phase1LayerCandidate, str, str]] = []
     old_defer = getattr(ctx, "defer_phase1_alignment", False)
     ctx.defer_phase1_alignment = True
     try:
         def compile_one(index: int, candidate: Phase1LayerCandidate) -> None:
             evidence: list[str] = []
+            failed_code: list[str] = []
             result = _freeze_section_from_code(
                 ctx,
                 candidate.labels,
@@ -10034,11 +11776,19 @@ def _compile_semantic_phase1_candidates(
                 allow_patch=True,
                 generation_tier=candidate.generation_tier,
                 failure_evidence=evidence,
+                failure_candidate_code=failed_code,
             )
             results[index] = result
             if result is None:
                 failures.append(
-                    (index, candidate, "\n\n".join(evidence) or "candidate did not compile")
+                    (
+                        index,
+                        candidate,
+                        "\n\n".join(evidence) or "candidate did not compile",
+                        failed_code[-1]
+                        if failed_code
+                        else _phase1_layer_candidate_code(candidate),
+                    )
                 )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
@@ -10055,13 +11805,15 @@ def _compile_semantic_phase1_candidates(
     if failures:
         failures.sort(key=lambda item: item[0])
         requests: list[RepairRequest] = []
-        for _index, failed, evidence in failures:
+        for _index, failed, evidence, failed_code in failures:
             _store_generation_candidates(
                 ctx,
                 failed.labels,
-                _phase1_layer_candidate_code(failed),
+                failed_code,
                 source="validated_contract_compile",
                 all_labels=failed.labels,
+                lean_status="failed",
+                lean_output=evidence,
             )
             _store_generation_feedback(
                 ctx,
@@ -10715,7 +12467,20 @@ def _audit_phase1_layer_candidates(
         )
         return candidates
 
+    audit = _coerce_alignment_audit_result(audit)
     kind, reason, rejected, helpers = audit
+    lean_rejected = audit.labels_for("lean-generation")
+    decomposition_rejected = audit.labels_for("decomposition")
+    blueprint_rejected = audit.labels_for("blueprint")
+    plan_revised = _revise_decomposition_plans_once(
+        ctx,
+        decomposition_rejected,
+        audit.reason_for(sorted(decomposition_rejected)),
+        layer_no=layer_no,
+        source="integrated_alignment",
+    )
+    decomposition_rejected.difference_update(plan_revised)
+    repair_rejected = decomposition_rejected | blueprint_rejected
     audit_required_dependencies = getattr(
         audit, "required_dependencies", {}
     )
@@ -10733,9 +12498,9 @@ def _audit_phase1_layer_candidates(
         rejected = expanded_rejected
     request_labels = set(rejected)
     failure_route: FailureScopeDecision | None = None
-    if kind == "lean-generation":
+    if lean_rejected:
         for section in candidates:
-            section_rejected = rejected & set(section.labels)
+            section_rejected = lean_rejected & set(section.labels)
             if section_rejected:
                 _store_generation_candidates(
                     ctx,
@@ -10745,6 +12510,9 @@ def _audit_phase1_layer_candidates(
                     all_labels=section.labels,
                     repair_stage="semantic_rejected",
                     required_dependencies=audit_required_dependencies,
+                    lean_status="passed",
+                    semantic_status="rejected",
+                    semantic_evidence=reason,
                 )
         tier_by_label = {
             label: (
@@ -10754,13 +12522,13 @@ def _audit_phase1_layer_candidates(
             )
             for section in candidates
             for label in section.labels
-            if label in rejected
+            if label in lean_rejected
         }
         exhausted: set[str] = set()
         for tier in ("base", "escalation"):
             tier_labels = [
                 label for label in labels
-                if label in rejected and tier_by_label.get(label, "base") == tier
+                if label in lean_rejected and tier_by_label.get(label, "base") == tier
             ]
             if tier_labels:
                 exhausted.update(
@@ -10774,11 +12542,22 @@ def _audit_phase1_layer_candidates(
                     )
                 )
         _store_generation_feedback(
-            ctx, rejected, reason, source="statement_alignment"
+            ctx, lean_rejected, reason, source="statement_alignment"
         )
-        _quarantine_labels(ctx, rejected, "statement_alignment")
+        _quarantine_labels(ctx, lean_rejected, "statement_alignment")
         if exhausted:
-            revised = _revise_exhausted_phase1_contracts(ctx, exhausted, reason)
+            decomposition_after_revision, revised, unresolved = (
+                _route_exhausted_phase1_semantics(
+                    ctx,
+                    exhausted,
+                    reason,
+                    layer_no=layer_no,
+                    source="integrated_alignment",
+                )
+            )
+            if decomposition_after_revision:
+                decomposition_rejected.update(decomposition_after_revision)
+                repair_rejected.update(decomposition_after_revision)
             if revised:
                 kind = "plan-revised"
                 request_labels = revised
@@ -10788,32 +12567,26 @@ def _audit_phase1_layer_candidates(
                     failed_labels=tuple(sorted(revised)),
                     accepted_labels=(),
                 )
-            else:
-                # The exact statement version has now failed both configured
-                # model tiers and its plan could not be improved. Preserve that
-                # evidence without treating it as proof that the blueprint is
-                # mathematically wrong.
+            if unresolved:
                 kind = "generation-exhausted"
-                request_labels = set(exhausted)
+                request_labels = set(unresolved) | set(revised)
                 failure_route = None
                 _log(
                     f"  Phase 1 layer {layer_no}: retry lifecycle exhausted for "
-                    + ", ".join(sorted(exhausted))
+                    + ", ".join(sorted(unresolved))
                     + "; consuming bounded generation retry budget without editing "
                     "the blueprint"
                 )
         else:
-            ordered_rejected = tuple(label for label in labels if label in rejected)
+            ordered_rejected = tuple(label for label in labels if label in lean_rejected)
             failure_route = FailureScopeDecision(
                 action="independent",
                 parts=tuple((label,) for label in ordered_rejected),
                 failed_labels=ordered_rejected,
-                accepted_labels=tuple(
-                    label for label in labels if label not in rejected
-                ),
+                accepted_labels=tuple(label for label in labels if label not in rejected),
             )
             _log(
-                f"  Phase 1 layer {layer_no}: preserving {len(rejected)} "
+                f"  Phase 1 layer {layer_no}: preserving {len(lean_rejected)} "
                 "independent retry lifecycle(s); next attempts start at "
                 "the escalation tier"
             )
@@ -10823,16 +12596,61 @@ def _audit_phase1_layer_candidates(
             stage="phase1_alignment",
             action=(failure_route.action if failure_route else "exhausted"),
             labels=labels,
-            failing_labels=sorted(rejected),
+            failing_labels=sorted(lean_rejected),
             accepted_labels=[label for label in labels if label not in rejected],
             part_sizes=(
                 [len(part) for part in failure_route.parts]
                 if failure_route
-                else [1 for _label in rejected]
+                else [1 for _label in lean_rejected]
             ),
             layer=layer_no,
             candidate_tiers=tier_by_label,
         )
+
+    # A single audit may contain unrelated Lean-translation failures and
+    # missing blueprint interfaces. Preserve the former's candidates and retry
+    # state above, but immediately route only the independently authorized
+    # blueprint/decomposition subset to the transactional blueprint repair.
+    if repair_rejected:
+        request_labels = set(repair_rejected)
+        kind = "decomposition" if decomposition_rejected else "blueprint"
+        reason = audit.reason_for(sorted(repair_rejected))
+        helpers = audit.helpers_for(sorted(decomposition_rejected))
+        if decomposition_rejected and not helpers:
+            helpers = [
+                "introduce explicit blueprint definitions or lemmas for the "
+                "mathematical interfaces named by the repeated contract rejection"
+            ]
+        failure_route = None
+        _record(
+            ctx.telemetry,
+            "phase1_mixed_alignment_routed",
+            layer=layer_no,
+            repair_labels=sorted(repair_rejected),
+            decomposition_labels=sorted(decomposition_rejected),
+            blueprint_labels=sorted(blueprint_rejected),
+            deferred_lean_labels=sorted(lean_rejected),
+        )
+    elif lean_rejected:
+        kind = "lean-generation" if kind == "mixed" else kind
+        request_labels = set(request_labels) & set(lean_rejected)
+
+    if plan_revised and not repair_rejected:
+        revision_route = FailureScopeDecision(
+            action="independent",
+            parts=tuple((label,) for label in sorted(plan_revised)),
+            failed_labels=tuple(sorted(plan_revised)),
+            accepted_labels=(),
+        )
+        failure_route = (
+            _combine_failure_routes([failure_route, revision_route])
+            if failure_route is not None
+            else revision_route
+        )
+        request_labels.update(plan_revised)
+        if not lean_rejected:
+            kind = "plan-revised"
+            reason = audit.reason_for(sorted(plan_revised))
 
     accepted: list[Section] = []
     discarded_labels: set[str] = set()
@@ -10922,8 +12740,20 @@ def _audit_phase1_layer_candidates(
             "blueprint",
             "decomposition",
         },
-        failure_route=failure_route if kind == "lean-generation" else None,
-        required_dependencies=audit_required_dependencies,
+        failure_route=(
+            failure_route
+            if kind in {"lean-generation", "plan-revised"}
+            else None
+        ),
+        required_dependencies={
+            label: dependencies
+            for label, dependencies in audit_required_dependencies.items()
+            if label not in plan_revised
+        },
+        model_repair_labels=sorted(
+            decomposition_rejected
+            | (blueprint_rejected - set(audit_required_dependencies))
+        ),
     )
 
 
@@ -10935,24 +12765,37 @@ def _semantic_first_failure_request(
     frozen: list[Section],
 ) -> RepairRequest:
     """Route a semantic-first rejection while retaining independently accepted work."""
+    audit = _coerce_alignment_audit_result(audit)
     kind, reason, rejected, helpers = audit
+    lean_rejected = audit.labels_for("lean-generation")
+    decomposition_rejected = audit.labels_for("decomposition")
+    blueprint_rejected = audit.labels_for("blueprint")
+    plan_revised = _revise_decomposition_plans_once(
+        ctx,
+        decomposition_rejected,
+        audit.reason_for(sorted(decomposition_rejected)),
+        layer_no=layer_no,
+        source="semantic_first_alignment",
+    )
+    decomposition_rejected.difference_update(plan_revised)
+    repair_rejected = decomposition_rejected | blueprint_rejected
     audit_required_dependencies = getattr(
         audit, "required_dependencies", {}
     )
     request_labels = set(rejected)
     failure_route: FailureScopeDecision | None = None
-    if kind == "lean-generation":
+    if lean_rejected:
         tier_by_label = {
             label: candidate.generation_tier
             for candidate in candidates
             for label in candidate.labels
-            if label in rejected
+            if label in lean_rejected
         }
         exhausted: set[str] = set()
         for tier in ("base", "escalation"):
             tier_labels = [
                 label
-                for label in sorted(rejected)
+                for label in sorted(lean_rejected)
                 if tier_by_label.get(label, "base") == tier
             ]
             if tier_labels:
@@ -10967,7 +12810,7 @@ def _semantic_first_failure_request(
                     )
                 )
         for candidate in candidates:
-            local = rejected & set(candidate.labels)
+            local = lean_rejected & set(candidate.labels)
             if local:
                 _store_generation_candidates(
                     ctx,
@@ -10977,13 +12820,26 @@ def _semantic_first_failure_request(
                     all_labels=candidate.labels,
                     repair_stage="semantic_rejected",
                     required_dependencies=audit_required_dependencies,
+                    semantic_status="rejected",
+                    semantic_evidence=reason,
                 )
         _store_generation_feedback(
-            ctx, rejected, reason, source="semantic_first_statement_alignment"
+            ctx, lean_rejected, reason, source="semantic_first_statement_alignment"
         )
-        _quarantine_labels(ctx, rejected, "statement_alignment")
+        _quarantine_labels(ctx, lean_rejected, "statement_alignment")
         if exhausted:
-            revised = _revise_exhausted_phase1_contracts(ctx, exhausted, reason)
+            decomposition_after_revision, revised, unresolved = (
+                _route_exhausted_phase1_semantics(
+                    ctx,
+                    exhausted,
+                    reason,
+                    layer_no=layer_no,
+                    source="semantic_first_alignment",
+                )
+            )
+            if decomposition_after_revision:
+                decomposition_rejected.update(decomposition_after_revision)
+                repair_rejected.update(decomposition_after_revision)
             if revised:
                 kind = "plan-revised"
                 request_labels = revised
@@ -10993,15 +12849,22 @@ def _semantic_first_failure_request(
                     failed_labels=tuple(sorted(revised)),
                     accepted_labels=(),
                 )
-            else:
+            if unresolved:
                 kind = "generation-exhausted"
-                request_labels = exhausted
+                request_labels = set(unresolved) | set(revised)
+                failure_route = None
+                _log(
+                    f"  Phase 1 layer {layer_no}: retry lifecycle exhausted for "
+                    + ", ".join(sorted(unresolved))
+                    + "; consuming bounded generation retry budget without editing "
+                    "the blueprint"
+                )
         else:
             ordered = tuple(
                 label
                 for candidate in candidates
                 for label in candidate.labels
-                if label in rejected
+                if label in lean_rejected
             )
             failure_route = FailureScopeDecision(
                 action="independent",
@@ -11009,6 +12872,46 @@ def _semantic_first_failure_request(
                 failed_labels=ordered,
                 accepted_labels=(),
             )
+    if repair_rejected:
+        request_labels = set(repair_rejected)
+        kind = "decomposition" if decomposition_rejected else "blueprint"
+        reason = audit.reason_for(sorted(repair_rejected))
+        helpers = audit.helpers_for(sorted(decomposition_rejected))
+        if decomposition_rejected and not helpers:
+            helpers = [
+                "introduce explicit blueprint definitions or lemmas for the "
+                "mathematical interfaces named by the repeated contract rejection"
+            ]
+        failure_route = None
+        _record(
+            ctx.telemetry,
+            "phase1_mixed_alignment_routed",
+            layer=layer_no,
+            repair_labels=sorted(repair_rejected),
+            decomposition_labels=sorted(decomposition_rejected),
+            blueprint_labels=sorted(blueprint_rejected),
+            deferred_lean_labels=sorted(lean_rejected),
+            source="semantic_first_alignment",
+        )
+    elif lean_rejected:
+        kind = "lean-generation" if kind == "mixed" else kind
+        request_labels = set(request_labels) & set(lean_rejected)
+    if plan_revised and not repair_rejected:
+        revision_route = FailureScopeDecision(
+            action="independent",
+            parts=tuple((label,) for label in sorted(plan_revised)),
+            failed_labels=tuple(sorted(plan_revised)),
+            accepted_labels=(),
+        )
+        failure_route = (
+            _combine_failure_routes([failure_route, revision_route])
+            if failure_route is not None
+            else revision_route
+        )
+        request_labels.update(plan_revised)
+        if not lean_rejected:
+            kind = "plan-revised"
+            reason = audit.reason_for(sorted(plan_revised))
     _record(
         ctx.telemetry,
         "phase1_semantic_first_rejected",
@@ -11029,8 +12932,20 @@ def _semantic_first_failure_request(
             "blueprint",
             "decomposition",
         },
-        failure_route=failure_route if kind == "lean-generation" else None,
-        required_dependencies=audit_required_dependencies,
+        failure_route=(
+            failure_route
+            if kind in {"lean-generation", "plan-revised"}
+            else None
+        ),
+        required_dependencies={
+            label: dependencies
+            for label, dependencies in audit_required_dependencies.items()
+            if label not in plan_revised
+        },
+        model_repair_labels=sorted(
+            decomposition_rejected
+            | (blueprint_rejected - set(audit_required_dependencies))
+        ),
     )
 
 
@@ -11057,23 +12972,83 @@ def _revise_exhausted_phase1_contracts(
     )
     if not eligible:
         return set()
+    previous_revision_counts = {
+        label: int((entries.get(label) or {}).get("semantic_revision_count") or 0)
+        for label in eligible
+    }
     if not _correct_phase1_design_plan(
         ctx, eligible, evidence, escalated=True
     ):
         return set()
 
+    for label in eligible:
+        entries[label]["semantic_revision_count"] = (
+            previous_revision_counts[label] + 1
+        )
+
     _clear_retry_lifecycle(ctx, eligible, stage="phase1_statement")
     candidates = getattr(ctx, "generation_candidates", {})
-    retained: list[str] = []
+    retained_seeds: list[tuple[list[str], str, str, dict[str, set[str]]]] = []
+    seen_seed_hashes: set[str] = set()
+    reset_candidate_labels: set[str] = set(eligible)
     for label in eligible:
         candidate = candidates.get(label)
         if not isinstance(candidate, dict):
             continue
-        candidate["plan_fp"] = _candidate_plan_fingerprint(ctx, label)
-        candidate["repair_stage"] = "semantic_rejected"
-        candidate["reusable_uncompiled"] = False
-        candidate["source"] = "interface_plan_revised"
-        retained.append(label)
+        component = [
+            item
+            for item in candidate.get("component_labels") or [label]
+            if item in ctx.nodes
+        ]
+        code = str(candidate.get("code") or "").strip()
+        seed_hash = _candidate_hash(code)
+        if not code or seed_hash in seen_seed_hashes:
+            continue
+        seen_seed_hashes.add(seed_hash)
+        reset_candidate_labels.update(component)
+        seed_code, _ = _compose_module(
+            [str(item) for item in candidate.get("imports") or []],
+            [str(item) for item in candidate.get("preamble") or []],
+            [code],
+        )
+        retained_seeds.append(
+            (
+                component,
+                seed_code,
+                str(candidate.get("generation_tier") or "base"),
+                {
+                    item: {
+                        str(dep)
+                        for dep in (candidates.get(item) or {}).get(
+                            "required_dependencies"
+                        )
+                        or []
+                    }
+                    for item in component
+                },
+            )
+        )
+    _clear_retry_lifecycle(
+        ctx, reset_candidate_labels, stage="phase1_statement"
+    )
+    for label in reset_candidate_labels:
+        candidates.pop(label, None)
+    retained: list[str] = []
+    for component, code, tier, required in retained_seeds:
+        retained.extend(
+            _store_generation_candidates(
+                ctx,
+                component,
+                code,
+                source="interface_plan_revised",
+                all_labels=component,
+                generation_tier=tier,
+                repair_stage="semantic_rejected",
+                required_dependencies=required,
+                semantic_status="rejected",
+                semantic_evidence=evidence,
+            )
+        )
     _release_quarantine(ctx, eligible, reason="interface_plan_revised")
     _record(
         ctx.telemetry,
@@ -11089,6 +13064,120 @@ def _revise_exhausted_phase1_contracts(
         + "; retrying only those nodes under the new contract"
     )
     return set(eligible)
+
+
+def _revise_decomposition_plans_once(
+    ctx: Ctx,
+    labels: Iterable[str],
+    evidence: str,
+    *,
+    layer_no: int,
+    source: str,
+) -> set[str]:
+    """Correct an untried interface plan before editing the blueprint.
+
+    A semantic critic can correctly observe that a generated declaration lacks
+    a mathematical interface while incorrectly concluding that the blueprint
+    itself must be decomposed. When the shared plan has not yet consumed its
+    one evidence-driven revision, repair that cheaper untrusted artifact first.
+    A second decomposition verdict under the revised plan follows the existing
+    transactional blueprint-decomposition path.
+    """
+    entries = getattr(ctx, "design_plan_entries", {}) or {}
+    eligible = {
+        label
+        for label in labels
+        if label in entries
+        and int((entries.get(label) or {}).get("schema_version") or 0)
+        == DESIGN_PLAN_SCHEMA_VERSION
+        and int((entries.get(label) or {}).get("semantic_revision_count") or 0)
+        < 1
+    }
+    if not eligible:
+        return set()
+    revised = _revise_exhausted_phase1_contracts(ctx, eligible, evidence)
+    if revised:
+        _record(
+            ctx.telemetry,
+            "phase1_decomposition_deferred_for_plan_revision",
+            layer=layer_no,
+            source=source,
+            labels=sorted(revised),
+            evidence=evidence[-4000:],
+        )
+        _log(
+            "  decomposition verdict first corrected the untried interface "
+            "plan for: " + ", ".join(sorted(revised))
+        )
+    return revised
+
+
+def _semantic_exhaustion_decomposition_labels(
+    ctx: Ctx, labels: Iterable[str]
+) -> set[str]:
+    """Stop translating an unchanged contract after one failed plan revision.
+
+    A base candidate, an escalation candidate, and one evidence-driven plan
+    revision have already tested both ordinary Lean encodings and the planner's
+    interface vocabulary. A second exhaustion for the same blueprint statement
+    is therefore routed to the existing blueprint-decomposition transaction,
+    where missing mathematical interfaces can become explicit nodes. The
+    statement fingerprint owns this counter, so any real blueprint edit resets
+    the decision automatically.
+    """
+    entries = getattr(ctx, "design_plan_entries", {}) or {}
+    return {
+        label
+        for label in labels
+        if int((entries.get(label) or {}).get("semantic_revision_count") or 0) >= 1
+    }
+
+
+def _route_exhausted_phase1_semantics(
+    ctx: Ctx,
+    labels: Iterable[str],
+    evidence: str,
+    *,
+    layer_no: int,
+    source: str,
+) -> tuple[set[str], set[str], set[str]]:
+    """Route semantic exhaustion identically in every Phase-1 transaction.
+
+    The first exhausted lifecycle revises the node's saved interface plan from
+    the exact critic evidence. If the same blueprint statement exhausts both
+    model tiers again under that revised plan, more Lean translation attempts
+    are no longer useful evidence: route that node to the existing blueprint
+    decomposition transaction. Nodes without a valid plan revision remain on
+    the bounded generation-retry path; exhaustion alone never authorizes an
+    arbitrary blueprint rewrite.
+
+    Returns ``(decomposition, revised, unresolved)`` label sets.
+    """
+    exhausted = set(labels)
+    decomposition = _semantic_exhaustion_decomposition_labels(ctx, exhausted)
+    if decomposition:
+        exhausted.difference_update(decomposition)
+        _log(
+            "  repeated semantic rejection survived both model tiers and one "
+            "interface-plan revision; routing to blueprint decomposition: "
+            + ", ".join(sorted(decomposition))
+        )
+        _record(
+            ctx.telemetry,
+            "phase1_semantic_exhaustion_decomposition",
+            layer=layer_no,
+            source=source,
+            labels=sorted(decomposition),
+            statement_fps={
+                label: ctx.stmt_fps.get(label, "")
+                for label in sorted(decomposition)
+            },
+            evidence=evidence[-4000:],
+        )
+
+    revised = _revise_exhausted_phase1_contracts(ctx, exhausted, evidence)
+    unresolved = exhausted - revised
+    return decomposition, revised, unresolved
 
 
 def _run_validated_contract_phase1_layer(
@@ -11195,13 +13284,26 @@ def _run_validated_contract_phase1_layer(
         requests = [request for _index, request in failures]
         if downstream_request is not None:
             requests.append(downstream_request)
-        authorized = next(
-            (request for request in requests if request.authorizes_blueprint_repair),
-            None,
-        )
-        if authorized is not None:
-            selected = authorized
-            selected.frozen_sections = accepted + selected.frozen_sections
+        authorized = [
+            request for request in requests if request.authorizes_blueprint_repair
+        ]
+        if authorized:
+            selected = _aggregate_authorized_repair_requests(
+                authorized,
+                frozen_sections=accepted,
+            )
+            _record(
+                ctx.telemetry,
+                "phase1_authorized_repairs_aggregated",
+                layer=layer_no,
+                request_count=len(authorized),
+                labels=selected.labels,
+                model_repair_labels=selected.model_repair_labels,
+                required_dependencies={
+                    label: sorted(dependencies)
+                    for label, dependencies in selected.required_dependencies.items()
+                },
+            )
         else:
             selected = _aggregate_retry_requests(
                 requests, frozen_sections=accepted
@@ -12793,6 +14895,52 @@ def _insert_statement_dependencies(
     return text[:marker_end] + insertion + text[marker_end:], requested
 
 
+def _dependency_path(
+    nodes: dict[str, Node], start: str, target: str
+) -> list[str] | None:
+    """Return one existing dependency path from ``start`` to ``target``."""
+    if start == target:
+        return [start]
+    queue: list[tuple[str, list[str]]] = [(start, [start])]
+    seen = {start}
+    index = 0
+    while index < len(queue):
+        current, path = queue[index]
+        index += 1
+        node = nodes.get(current)
+        if node is None:
+            continue
+        for dependency in sorted(node.uses):
+            if dependency == target:
+                return [*path, dependency]
+            if dependency in nodes and dependency not in seen:
+                seen.add(dependency)
+                queue.append((dependency, [*path, dependency]))
+    return None
+
+
+def _cyclic_dependency_repair_findings(
+    nodes: dict[str, Node], required_dependencies: dict[str, set[str]]
+) -> dict[str, dict[str, str]]:
+    """Describe proposed edges that would close a dependency cycle."""
+    findings: dict[str, dict[str, str]] = {}
+    for label, dependencies in required_dependencies.items():
+        if label not in nodes:
+            continue
+        for dependency in dependencies:
+            if dependency not in nodes:
+                continue
+            path = _dependency_path(nodes, dependency, label)
+            if path is None:
+                continue
+            findings.setdefault(label, {})[dependency] = (
+                f"reject `{label} -> {dependency}`: existing dependency path "
+                + " -> ".join(path)
+                + f" would close the cycle back to {dependency}"
+            )
+    return findings
+
+
 def _apply_required_dependency_edges(
     ctx: Ctx, required_dependencies: dict[str, set[str]]
 ) -> set[str]:
@@ -12801,11 +14949,36 @@ def _apply_required_dependency_edges(
         label: {
             dep
             for dep in dependencies
-            if label in ctx.nodes and dep in ctx.nodes and dep != label
+            if label in ctx.nodes and dep in ctx.nodes
         }
         for label, dependencies in required_dependencies.items()
     }
     normalized = {label: deps for label, deps in normalized.items() if deps}
+    cycle_findings = _cyclic_dependency_repair_findings(ctx.nodes, normalized)
+    ctx.last_dependency_edge_rejections = cycle_findings
+    if cycle_findings:
+        for label, rejected in cycle_findings.items():
+            normalized[label].difference_update(rejected)
+        normalized = {label: deps for label, deps in normalized.items() if deps}
+        messages = [
+            message
+            for rejected in cycle_findings.values()
+            for message in rejected.values()
+        ]
+        _log(
+            "==> Rejected cyclic blueprint dependency repair(s):\n  - "
+            + "\n  - ".join(messages)
+        )
+        _record(
+            ctx.telemetry,
+            "blueprint_dependency_edge_repair",
+            labels=sorted(cycle_findings),
+            status="cycle_rejected",
+            rejected_dependencies={
+                label: dict(rejected)
+                for label, rejected in cycle_findings.items()
+            },
+        )
     if not normalized:
         return set()
 
@@ -12882,6 +15055,7 @@ def _repair_blueprint(
     max_trials: int,
     escalation_note: str,
     repair_runner_agent: bool,
+    decomposition_roots: Iterable[str] = (),
 ) -> set[str]:
     """Run one transactional blueprint-repair attempt.
 
@@ -12892,8 +15066,10 @@ def _repair_blueprint(
     """
     content_path = ctx.content_path
     before_content = content_path.read_text(encoding="utf-8")
+    before_nodes = dict(ctx.nodes)
     blueprint_source = _read_draft_blueprint_source(ctx)
     before_fps = dict(ctx.contract_fps)
+    ctx.last_blueprint_repair_rejection = ""
     _log(f"==> Blueprint repair {trial}/{max_trials} for: " + ", ".join(labels[:8]))
     if repair_runner_agent:
         prompt = _fast_agent_repair_prompt(
@@ -12992,6 +15168,7 @@ def _repair_blueprint(
                 max_trials=max_trials,
                 escalation_note=escalation_note,
                 repair_runner_agent=repair_runner_agent,
+                decomposition_roots=decomposition_roots,
             )
             right = _repair_blueprint(
                 ctx,
@@ -13001,6 +15178,7 @@ def _repair_blueprint(
                 max_trials=max_trials,
                 escalation_note=escalation_note,
                 repair_runner_agent=repair_runner_agent,
+                decomposition_roots=decomposition_roots,
             )
             return left | right
         _record(
@@ -13033,7 +15211,16 @@ def _repair_blueprint(
         if not validation.ok:
             print_result(validation)
             raise ValueError("blueprint repair produced an invalid blueprint")
+        orientation_findings = _decomposition_orientation_findings(
+            before_nodes, validation.nodes, decomposition_roots
+        )
+        if orientation_findings:
+            raise ValueError(
+                "blueprint decomposition put helper nodes in the wrong graph "
+                "direction:\n- " + "\n- ".join(orientation_findings)
+            )
     except (OSError, ValueError) as exc:
+        ctx.last_blueprint_repair_rejection = str(exc)
         content_path.write_text(before_content, encoding="utf-8")
         restored = _validate_draft(ctx)
         if restored.ok:
@@ -13742,6 +15929,7 @@ def main(argv: list[str] | None = None) -> int:
             repair_section_labels: list[str] = []
             repair_context_labels: list[str] = []
             repair_required_dependencies: dict[str, set[str]] = {}
+            repair_model_labels: list[str] = []
             phase1_repair = False
             repair_authorized = True
 
@@ -13773,6 +15961,7 @@ def main(argv: list[str] | None = None) -> int:
                         repair_labels = request.labels
                         repair_authorized = request.authorizes_blueprint_repair
                         repair_required_dependencies = request.required_dependencies
+                        repair_model_labels = request.model_repair_labels
                         if repair_authorized:
                             _quarantine_labels(
                                 ctx, request.labels, "blueprint_repair_request"
@@ -14095,40 +16284,83 @@ def main(argv: list[str] | None = None) -> int:
             content_before_repair = content_path.read_text(encoding="utf-8")
             note = escalation_note
             if repair_helpers:
-                note = _decomposition_note(repair_labels, repair_helpers)
+                note = _decomposition_note(
+                    repair_model_labels or repair_labels, repair_helpers
+                )
             action = (
-                "dependency-edge-repair"
+                "compound-repair"
+                if repair_required_dependencies and repair_model_labels
+                else "dependency-edge-repair"
                 if repair_required_dependencies
                 else ("normalization" if use_section_normalization else "repair")
             )
             if repair_required_dependencies:
-                changed = _apply_required_dependency_edges(
+                dependency_changed = _apply_required_dependency_edges(
                     ctx, repair_required_dependencies
                 )
-                if not changed:
+                changed = set(dependency_changed)
+                cycle_rejections = getattr(
+                    ctx, "last_dependency_edge_rejections", {}
+                )
+                cycle_labels = list(cycle_rejections)
+                cycle_evidence = "\n".join(
+                    message
+                    for rejected in cycle_rejections.values()
+                    for message in rejected.values()
+                )
+                model_labels = list(
+                    dict.fromkeys([*repair_model_labels, *cycle_labels])
+                )
+                if not dependency_changed and not cycle_rejections:
                     # A direct edge can be invalid, most notably when it would
-                    # create a cycle. Fall back to the existing bounded repair
-                    # transaction with the same evidence instead of stopping.
+                    # create a cycle. Include those labels in the model repair
+                    # rather than replacing any concurrently requested
+                    # decomposition/blueprint repair.
                     action = "repair"
-                    changed = _repair_blueprint(
+                    model_labels = list(
+                        dict.fromkeys([*model_labels, *repair_required_dependencies])
+                    )
+                if model_labels:
+                    model_changed = _repair_blueprint(
                         ctx,
                         evidence_for_repair,
-                        repair_labels,
+                        model_labels,
                         trial=repair_trials,
                         max_trials=args.max_trials,
                         escalation_note=(
-                            "The semantic critic and corrected Lean agree that "
-                            "the listed statement dependencies are required, "
-                            "but adding the direct edge failed blueprint validation. "
-                            "Repair the dependency structure without weakening claims."
+                            (
+                                "The proposed direct dependency edge was rejected "
+                                "because it would create a cycle. Repair the "
+                                "provider/helper direction without weakening any "
+                                "claim. Do not request the rejected edge again.\n\n"
+                                + cycle_evidence
+                                + "\n\n"
+                                + note
+                            )
+                            if cycle_rejections
+                            else note
+                            if dependency_changed
+                            else (
+                                "The semantic critic and corrected Lean agree that "
+                                "the listed statement dependencies are required, "
+                                "but adding the direct edge failed blueprint validation. "
+                                "Repair the dependency structure without weakening claims.\n\n"
+                                + note
+                            )
                         ),
                         repair_runner_agent=(
                             escalation_runner.partition(":")[0]
                             in {"codex", "claude-code"}
                         ),
+                        decomposition_roots=(
+                            repair_model_labels or repair_labels
+                            if repair_helpers
+                            else ()
+                        ),
                     )
+                    changed.update(model_changed)
                 report_lines.append(
-                    f"- dependency repair {repair_trials}: {len(changed)} node "
+                    f"- {action.replace('-', ' ')} {repair_trials}: {len(changed)} node "
                     f"contract(s) changed for `{', '.join(repair_labels[:8])}`"
                 )
             elif use_section_normalization and stuck_state is not None:
@@ -14168,6 +16400,7 @@ def main(argv: list[str] | None = None) -> int:
                         max_trials=args.max_trials,
                         escalation_note=fallback_note,
                         repair_runner_agent=escalation_runner.partition(":")[0] in {"codex", "claude-code"},
+                        decomposition_roots=(repair_labels if repair_helpers else ()),
                     )
                     report_lines.append(
                         f"- fallback repair {repair_trials}: {len(changed)} node statement(s) changed "
@@ -14184,6 +16417,7 @@ def main(argv: list[str] | None = None) -> int:
                     max_trials=args.max_trials,
                     escalation_note=note,
                     repair_runner_agent=escalation_runner.partition(":")[0] in {"codex", "claude-code"},
+                    decomposition_roots=(repair_labels if repair_helpers else ()),
                 )
                 report_lines.append(
                     f"- repair {repair_trials}: {len(changed)} node statement(s) changed "
@@ -14340,10 +16574,24 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 noop_repairs += 1
+                repair_rejection = str(
+                    getattr(ctx, "last_blueprint_repair_rejection", "") or ""
+                )
                 if disconnected_rollback:
                     print(
                         "  out-of-scope repair changes rolled back; "
                         "retrying with narrower scope",
+                        flush=True,
+                    )
+                elif repair_rejection:
+                    escalation_note = (
+                        "The previous repair was rolled back by a deterministic "
+                        "transaction guard. Correct this exact graph error without "
+                        "weakening claims:\n\n" + repair_rejection
+                    )
+                    print(
+                        "  invalid repair rolled back; exact graph evidence will "
+                        "be supplied to the next attempt",
                         flush=True,
                     )
                 elif noop_repairs == 1:

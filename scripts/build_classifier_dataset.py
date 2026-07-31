@@ -73,6 +73,7 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
     pipeline_progress_events: list[dict[str, Any]] = []
     adaptive_section_events: list[dict[str, Any]] = []
     skeleton_routing_events: list[dict[str, Any]] = []
+    phase1_candidate_transition_events: list[dict[str, Any]] = []
     repair_scope_events: list[dict[str, Any]] = []
     deferred_recheck_events: list[dict[str, Any]] = []
     final_check_results: list[dict[str, Any]] = []
@@ -132,11 +133,17 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
         }:
             phase1_layer_events.append(event)
         elif etype in {
+            "phase1_design_plan_candidate_result",
+            "phase1_design_plan_candidate_scored",
+            "phase1_design_plan_tournament",
+            "phase1_design_plan_alternate_component",
             "phase1_design_plan_result",
             "phase1_design_plan_reused",
             "phase1_design_plan_invalidated",
             "phase1_design_plan_audit",
             "phase1_design_plan_correction",
+            "phase1_design_plan_closure",
+            "phase1_design_plan_closure_deferred",
             "phase1_outline_plan_closure_correction",
         }:
             phase1_design_plan_events.append(event)
@@ -168,6 +175,8 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
             pipeline_progress_events.append(event)
         elif etype == "adaptive_section_size":
             adaptive_section_events.append(event)
+        elif etype == "phase1_candidate_transition":
+            phase1_candidate_transition_events.append(event)
         elif etype in {
             "skeleton_refusal_isolated",
             "skeleton_refusal_rejected",
@@ -465,6 +474,22 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
             "accepted": row.get("accepted"),
             "classification": row.get("classification"),
             "corrected": row.get("corrected"),
+            "candidate_id": row.get("candidate_id"),
+            "score": row.get("score"),
+            "selected": row.get("selected"),
+            "selected_score": row.get("selected_score"),
+            "primary_candidate": row.get("primary_candidate"),
+            "alternate_candidate": row.get("alternate_candidate"),
+            "selected_candidate": row.get("selected_candidate"),
+            "blocked_labels": row.get("blocked_labels"),
+            "component_count": row.get("component_count"),
+            "findings": row.get("findings"),
+            "merged_components": row.get("merged_components"),
+            "alternate_count": row.get("alternate_count"),
+            "previous_score": row.get("previous_score"),
+            "alternate_score": row.get("alternate_score"),
+            "alternate_applied": row.get("alternate_applied"),
+            "evidence_sha256": row.get("evidence_sha256"),
         }
         for row in phase1_design_plan_events
         if is_fast_run(row)
@@ -790,6 +815,34 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
         if is_fast_run(row)
     ]
 
+    phase1_candidate_transition_rows = [
+        {
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "labels": row.get("labels"),
+            "statement_fps": row.get("statement_fps"),
+            "plan_fps": row.get("plan_fps"),
+            "candidate_hash": row.get("candidate_hash"),
+            "parent_candidate_hashes": row.get("parent_candidate_hashes"),
+            "source": row.get("source"),
+            "generation_tier": row.get("generation_tier"),
+            "accepted_as_best": row.get("accepted_as_best"),
+            "accepted_as_working": row.get("accepted_as_working"),
+            "decision_reasons": row.get("decision_reasons"),
+            "deterministic_obligations": row.get(
+                "deterministic_obligations"
+            ),
+            "satisfied_obligations": row.get("satisfied_obligations"),
+            "remaining_obligations": row.get("remaining_obligations"),
+            "newly_satisfied": row.get("newly_satisfied"),
+            "regressed_obligations": row.get("regressed_obligations"),
+            "lean_status": row.get("lean_status"),
+            "semantic_status": row.get("semantic_status"),
+        }
+        for row in phase1_candidate_transition_events
+        if is_fast_run(row)
+    ]
+
     repair_scope_rows = [
         {
             "run_id": row.get("run_id"),
@@ -849,6 +902,9 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
         "fast_pipeline_progress_examples": progress_rows,
         "fast_adaptive_section_examples": adaptive_section_rows,
         "fast_skeleton_routing_examples": skeleton_routing_rows,
+        "fast_phase1_candidate_transition_examples": (
+            phase1_candidate_transition_rows
+        ),
         "fast_repair_scope_examples": repair_scope_rows,
         "fast_deferred_recheck_examples": deferred_recheck_rows,
         "fast_final_check_examples": final_rows,
