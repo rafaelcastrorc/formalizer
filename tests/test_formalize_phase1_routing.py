@@ -19,6 +19,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 from formalize_blueprint import (  # noqa: E402
     AlignmentAuditResult,
     DESIGN_PLAN_SCHEMA_VERSION,
+    SEMANTIC_PLAN_SCHEMA_VERSION,
     DesignPlanCandidate,
     PHASE1_STATEMENT_ORDER,
     PHASE2_PROOF_ORDER,
@@ -67,6 +68,7 @@ from formalize_blueprint import (  # noqa: E402
     _mark_repair_boundary_pending,
     _pending_repair_boundary_request,
     _minimal_dependency_interface,
+    _partition_phase1_groups_by_dependency_context,
     _note_frozen_section,
     _next_phase1_group,
     _next_implementation_frontier,
@@ -939,6 +941,151 @@ theorem lem_c : Nat = Nat := by sorry
         )
         with self.assertRaisesRegex(ValueError, "missing def:dependency"):
             _minimal_dependency_interface(ctx, ["lem:target"], [], [])
+
+    def test_minimal_dependency_interface_soft_budget_never_drops_required_context(self) -> None:
+        ctx = SimpleNamespace(
+            nodes={
+                "def:dependency": node("def:dependency"),
+                "lem:target": node("lem:target", uses={"def:dependency"}),
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Skeleton01.lean"
+            fields = "\n".join(f"  field_{index} : Nat" for index in range(80))
+            path.write_text(
+                "structure def_dependency where\n" + fields + "\n",
+                encoding="utf-8",
+            )
+            section = Section(
+                number=1,
+                labels=["def:dependency"],
+                path=path,
+                module="AutoBlueprint.Generated.Paper.Skeleton01",
+                import_modules=[],
+            )
+            interface = _minimal_dependency_interface(
+                ctx,
+                ["lem:target"],
+                [section],
+                [section.module],
+                budget=100,
+            )
+
+        self.assertGreater(len(interface), 100)
+        self.assertIn("field_79", interface)
+
+    def test_historical_uue_context_overflow_partitions_without_failing(self) -> None:
+        fixture_path = (
+            REPO_ROOT
+            / "tests"
+            / "fixtures"
+            / "phase1_context_budget_replay"
+            / "uue_20260802.json"
+        )
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        labels = fixture["labels"]
+        measured = {
+            tuple(key.split("|")): value
+            for key, value in fixture["contiguous_interface_chars"].items()
+        }
+        ctx = SimpleNamespace(
+            nodes={label: node(label) for label in labels},
+            stmt_fps={label: f"fp:{label}" for label in labels},
+            generation_candidates={},
+            telemetry=FakeTelemetry(),
+        )
+
+        def measured_chars(_ctx, part, _sections):
+            return measured[tuple(part)]
+
+        with patch(
+            "formalize_blueprint._phase1_dependency_interface_chars",
+            side_effect=measured_chars,
+        ):
+            parts = _partition_phase1_groups_by_dependency_context(
+                ctx,
+                [labels],
+                [],
+                budget=fixture["soft_budget"],
+            )
+
+        self.assertEqual(parts, fixture["expected_groups"])
+        self.assertEqual(
+            [
+                fields
+                for event, fields in ctx.telemetry.events
+                if event == "phase1_dependency_context_partitioned"
+            ][0]["interface_chars"],
+            fixture["expected_group_interface_chars"],
+        )
+
+    def test_dependency_context_keeps_oversized_candidate_component_atomic(self) -> None:
+        labels = ["def:provider", "lem:consumer"]
+        shared_code = (
+            "structure SharedSurface where\n  value : Nat\n\n"
+            "def def_provider : SharedSurface := sorry\n\n"
+            "theorem lem_consumer : True := by sorry\n"
+        )
+        candidates = {
+            label: {
+                "statement_fp": f"fp:{label}",
+                "component_labels": labels,
+                "code": shared_code,
+            }
+            for label in labels
+        }
+        ctx = SimpleNamespace(
+            nodes={label: node(label) for label in labels},
+            stmt_fps={label: f"fp:{label}" for label in labels},
+            generation_candidates=candidates,
+            telemetry=FakeTelemetry(),
+        )
+
+        with patch(
+            "formalize_blueprint._phase1_dependency_interface_chars",
+            return_value=12000,
+        ):
+            parts = _partition_phase1_groups_by_dependency_context(
+                ctx,
+                [labels],
+                [],
+                budget=10000,
+            )
+
+        self.assertEqual(parts, [labels])
+        overflows = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_dependency_context_soft_overflow"
+        ]
+        self.assertEqual(len(overflows), 1)
+        self.assertEqual(overflows[0]["labels"], labels)
+        self.assertEqual(overflows[0]["interface_chars"], 12000)
+
+    def test_dependency_context_partition_defers_when_measurement_is_unavailable(self) -> None:
+        labels = ["def:provider", "lem:consumer"]
+        ctx = SimpleNamespace(
+            nodes={label: node(label) for label in labels},
+            stmt_fps={label: f"fp:{label}" for label in labels},
+            generation_candidates={},
+            telemetry=FakeTelemetry(),
+        )
+        with patch(
+            "formalize_blueprint._phase1_dependency_interface_chars",
+            side_effect=ValueError("missing frozen provider"),
+        ):
+            parts = _partition_phase1_groups_by_dependency_context(
+                ctx, [labels], []
+            )
+
+        self.assertEqual(parts, [labels])
+        deferred = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_dependency_context_partition_deferred"
+        ]
+        self.assertEqual(len(deferred), 1)
+        self.assertIn("missing frozen provider", deferred[0]["reason"])
 
     def test_alignment_audit_routes_explicit_decomposition(self) -> None:
         ctx = SimpleNamespace(
@@ -4449,10 +4596,35 @@ end ModelOutput
                             "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
                             "statement_fp": "hard-v1",
                             "target_signature": "hard : True",
-                            "helpers": [],
+                            "helpers": [
+                                {
+                                    "name": "HardSurface",
+                                    "kind": "structure",
+                                    "declaration": (
+                                        "structure HardSurface where\n  value : Nat"
+                                    ),
+                                    "members": [],
+                                    "required_members": ["value"],
+                                    "purpose": "exact candidate-owned helper",
+                                }
+                            ],
                             "decisions": ["exact contract"],
                             "semantic_revision_count": 1,
                             "closure_fp": "closed-plan-v1",
+                            "origin": "phase1_candidate",
+                        }
+                    },
+                    semantic_plan_entries={
+                        "hard": {
+                            "schema_version": SEMANTIC_PLAN_SCHEMA_VERSION,
+                            "statement_fp": "hard-v1",
+                            "representation": "A compact semantic choice.",
+                            "vocabulary": [
+                                {"name": "HardSurface", "purpose": "public data"}
+                            ],
+                            "obligations": ["preserve the hard claim"],
+                            "provider_requirements": [],
+                            "fallback": False,
                         }
                     },
                     design_plan_alternates={
@@ -4485,7 +4657,7 @@ end ModelOutput
                     refinement_order="top-down",
                 )
             payload = json.loads(state.read_text(encoding="utf-8"))
-            self.assertEqual(payload["version"], 19)
+            self.assertEqual(payload["version"], 20)
             self.assertEqual(payload["refinement_order"], "top-down")
             self.assertEqual(
                 payload["scheduler"]["quarantine"],
@@ -4539,6 +4711,20 @@ end ModelOutput
                 "closed-plan-v1",
             )
             self.assertEqual(
+                payload["scheduler"]["design_plan_entries"]["hard"]["helpers"][0]
+                ["declaration"],
+                "structure HardSurface where\n  value : Nat",
+            )
+            self.assertEqual(
+                payload["scheduler"]["design_plan_entries"]["hard"]["origin"],
+                "phase1_candidate",
+            )
+            self.assertEqual(
+                payload["scheduler"]["semantic_plan_entries"]["hard"]
+                ["representation"],
+                "A compact semantic choice.",
+            )
+            self.assertEqual(
                 payload["scheduler"]["design_plan_entries"]["hard"]
                 ["semantic_revision_count"],
                 1,
@@ -4577,6 +4763,7 @@ end ModelOutput
                 retry_lifecycle={},
                 design_plan="",
                 design_plan_entries={},
+                semantic_plan_entries={},
                 design_plan_alternates={},
                 blueprint_direct_generation={},
                 effective_section_size=0,
@@ -4629,6 +4816,17 @@ end ModelOutput
             self.assertEqual(
                 ctx.design_plan_entries["hard"]["semantic_revision_count"],
                 1,
+            )
+            self.assertEqual(
+                ctx.design_plan_entries["hard"]["helpers"][0]["declaration"],
+                "structure HardSurface where\n  value : Nat",
+            )
+            self.assertEqual(
+                ctx.design_plan_entries["hard"]["origin"], "phase1_candidate"
+            )
+            self.assertEqual(
+                ctx.semantic_plan_entries["hard"]["representation"],
+                "A compact semantic choice.",
             )
             self.assertEqual(
                 ctx.design_plan_alternates["hard"]["target_signature"],
@@ -7430,7 +7628,7 @@ def def_network : NetworkData := sorry
                 )
             ]
 
-        with patch("formalize_blueprint._ensure_phase1_design_plan") as plan, patch(
+        with patch("formalize_blueprint._ensure_phase1_semantic_plan") as plan, patch(
             "formalize_blueprint._run_validated_contract_phase1_layer",
             side_effect=transact,
         ), patch("formalize_blueprint._save_ctx_state"):

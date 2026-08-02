@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "uue_unauthorized_provider_edge",
+      "kind": "semantic_sanitization",
+      "nodes": {
+        "def:finite-register-operators": {"statement_uses": []},
+        "def:channel-povm": {"statement_uses": []}
+      },
+      "requested": ["def:finite-register-operators"],
+      "response": {
+        "contracts": [
+          {
+            "label": "def:finite-register-operators",
+            "representation": "Finite register operators with their own public data.",
+            "vocabulary": [
+              {"name": "FiniteRegisterOperators", "purpose": "stable public vocabulary"}
+            ],
+            "obligations": ["preserve every operation stated by the blueprint"],
+            "provider_requirements": [
+              {"provider": "def:channel-povm", "capabilities": ["invented cross-node capability"]}
+            ]
+          }
+        ]
+      },
+      "expected_provider_requirements": [],
+      "expected_finding": "unauthorized provider"
+    },
+    {
+      "name": "simplex_atomic_structural_contract",
+      "kind": "atomic_typed_contract",
+      "nodes": {
+        "def:Pk": {"statement_uses": []}
+      },
+      "requested": ["def:Pk"],
+      "semantic_entry": {
+        "representation": "A type exposing membership in Pk.",
+        "vocabulary": [
+          {"name": "PkInterface", "purpose": "typed structural surface"}
+        ],
+        "obligations": ["expose the membership predicate"],
+        "provider_requirements": []
+      },
+      "lean_response": "```lean\nstructure PkInterface where\n  inPk : Nat -> Prop\n\ndef def_Pk : Type := PkInterface\n```",
+      "expected_target_fragment": "def def_Pk",
+      "expected_helper_fragment": "inPk : Nat -> Prop"
+    }
+  ]
+}

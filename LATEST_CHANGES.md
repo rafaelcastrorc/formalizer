@@ -1,5 +1,118 @@
 # Latest Changes
 
+## 2026-08-02: Make Phase 1 Dependency Context Limits Non-Fatal
+
+### Confirmed failure
+
+In `unconditional-unclonable-encryption/run-20260802-033800`, Phase 1 had frozen
+15 of 52 contracts when a five-node retry required 12,349 characters of exact
+generated dependency interfaces. The prompt builder treated its 10,000-character
+batching target as a hard correctness limit and stopped the autonomous run at
+`+1898s`, even though every required declaration existed.
+
+### Implemented correction
+
+- The 10,000-character value is now a soft grouping target. It cannot remove a
+  required declaration or terminate refinement.
+- Before model dispatch, the scheduler measures the exact transitive generated
+  interface and greedily partitions ordinary groups into maximal fitting
+  prefixes. The recorded UUE retry deterministically becomes `2 + 1 + 2`, with
+  measured interfaces of 8,812, 9,809, and 7,247 characters.
+- Persisted candidates that share structural helper code remain atomic. If an
+  atomic component or singleton itself exceeds the target, it receives the
+  complete context and telemetry records the soft overflow.
+- The same partitioner is used by bottom-up and top-down Phase 1 dispatch. It is
+  model- and provider-independent and adds no model call.
+- A committed historical fixture records the exact UUE labels and measured
+  interface sizes. Focused tests cover lossless oversized context, historical
+  partitioning, and oversized atomic components.
+- Complete verification passed: 278 repository tests, Python compilation,
+  `git diff --check`, and the standalone committed Simplex historical-plan
+  replay with `--require-progress`.
+
+## 2026-08-02: Derive Typed Contracts Atomically from Phase 1 Candidates
+
+### Confirmed problem
+
+The original shared plan was introduced to keep independently generated
+frontiers consistent, but it accumulated exact Lean signatures, helper kinds,
+member types, constructors, semantic decisions, and provider requirements. In
+`unconditional-unclonable-encryption/run-20260731-095949`, its prompt was about
+63,000 characters and its two responses were about 58,000 and 67,000
+characters. Those calls took roughly 309 and 350 seconds before Phase 1 had
+generated any Lean. Defective typed entries then entered separate plan-repair
+calls, making the planning aid an expensive pre-Phase-1 formalization stage.
+
+Historical runs also showed that a globally perfect typed plan was unnecessary:
+Phase 1 could advance quickly from a near-good plan because the generated Lean,
+compiler, deterministic gates, and statement-alignment audit were already the
+authoritative checks. The latency came from asking one model response to predict
+every exact Lean interface and then forcing later generation to obey that
+independently generated prediction.
+
+### Implemented architecture
+
+- The global planner now returns only compact semantic coordination: a
+  representation choice, stable vocabulary, mathematical obligations, and
+  direct-provider capabilities. It cannot return Lean signatures, binder
+  types, helper member types, constructors, imports, bodies, or proofs.
+- The semantic prompt includes the authoritative deterministic dependency table.
+  Statement dependencies may shape public interfaces; proof-only dependencies
+  are reserved for Phase 2; root context cannot invent graph edges.
+- Planning is one advisory call with no planner-repair loop. Missing, malformed,
+  duplicate, or unauthorized entries are sanitized or replaced by a
+  deterministic blueprint-only fallback. A bad advisory response therefore
+  cannot block Phase 1 or consume repeated planning calls.
+- Each Phase 1 generation response now emits the canonical target and any owned
+  structural interface together. Canonical ingestion extracts their exact Lean
+  headers and persists that same candidate as its typed contract. No separate
+  typed-contract model call exists.
+- Compiler, deterministic, and statement-audit corrections refresh the typed
+  contract from the same replacement candidate. Generated code can no longer be
+  trapped under a stale independently produced typed plan.
+- Candidate-owned typed contracts do not enter the former independent
+  plan-correction route. Legacy `--continue` state from the typed planner remains
+  readable and retains its historical validation behavior.
+
+### Preserved safeguards
+
+This is a boundary change, not a weakening of Phase 1. Before a statement can
+freeze, the existing canonical and deterministic checks still enforce:
+
+- one canonical target per blueprint node and complete target coverage;
+- authorized statement dependencies and separate proof-only dependencies;
+- exact structural helper ownership, declarations, members, and member types;
+- target/helper and dependency-cycle rejection;
+- Mathlib-owned alias normalization and rejection of unresolved aliases;
+- rejection of executable helper definitions or theorems not represented by
+  blueprint nodes;
+- Lean compilation/integration and the independent statement-alignment audit
+  against the blueprint.
+
+Blueprint repair remains evidence-only and transactional. Accepted siblings and
+unrelated branches remain reusable. Phase 1 remains bottom-up, Phase 2 remains
+top-down, and publication still requires the complete final Lean and correctness
+audits.
+
+### State, telemetry, and regression coverage
+
+- Refinement state version 20 stores compact semantic entries separately from
+  exact candidate-derived typed contracts. Statement fingerprints invalidate
+  either representation when its blueprint node changes.
+- Telemetry records semantic-plan coverage/fallback/sanitization and exact
+  candidate contract realization with `typed_contract_model_calls=0`.
+- Added focused regressions for dependency sanitization, semantic-prompt scope,
+  atomic target/helper realization, and routing candidate-owned closure failures
+  back to candidate correction rather than independent plan repair.
+- Added committed historical-shape fixtures for the UUE unauthorized-provider
+  regression and the Simplex atomic structural-helper contract. They require no
+  model, network, telemetry service, or local run artifacts.
+- Existing committed historical Phase 1 trajectory fixtures still exercise the
+  legacy typed-plan compatibility path and preserve their recorded routing.
+- Complete repository verification: 272 tests passed; the standalone committed
+  Simplex historical-plan replay passed with `--require-progress`; Python
+  compilation and `git diff --check` passed.
+
 ## 2026-08-01: Balance Initial Plan Repair Against Full Replanning
 
 ### Confirmed regression

@@ -1620,6 +1620,9 @@ function stageFromLine(line){
   if ((m = line.match(/==> Phase 1 design plan: generating two independent full-context candidates concurrently \((\d+) nodes\)/))) {
     return `Phase 1 · compare two contract plans (${m[1]} nodes)`;
   }
+  if ((m = line.match(/==> Phase 1 semantic plan: coordinating (\d+) node\(s\) in one compact full-context call/))) {
+    return `Phase 1 · compact semantic plan (${m[1]} nodes)`;
+  }
   if ((m = line.match(/==> Model call: ([a-z_]+) \((\d+) node\(s\), timeout (\d+)s/))) {
     const purpose = {
       initial_declaration_generation: 'initial declaration generation',
@@ -1630,6 +1633,7 @@ function stageFromLine(line){
       phase1_design_plan_candidate_b: 'Phase 1 contract-plan candidate B',
       phase1_design_plan_audit: 'Phase 1 contract-plan audit',
       phase1_design_plan_correction: 'Phase 1 contract-plan correction',
+      phase1_semantic_plan: 'Phase 1 compact semantic plan',
       phase1_statement_generation: 'Phase 1 statement generation',
       skeleton_declaration_patch: 'skeleton patch',
       statement_audit: 'statement audit',

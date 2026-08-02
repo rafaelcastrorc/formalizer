@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "source_log": ".auto-blueprint/formalization/unconditional-unclonable-encryption/run-20260802-033800.log",
+  "failure_elapsed_seconds": 1898,
+  "soft_budget": 10000,
+  "labels": [
+    "lem:positive-part-trace-bound",
+    "lem:binary-povm-observable",
+    "thm:normalized-choi",
+    "lem:pauli-measurement-eigenstate",
+    "def:one-time-private-key-ue"
+  ],
+  "contiguous_interface_chars": {
+    "lem:positive-part-trace-bound": 6327,
+    "lem:positive-part-trace-bound|lem:binary-povm-observable": 8812,
+    "lem:positive-part-trace-bound|lem:binary-povm-observable|thm:normalized-choi": 10967,
+    "thm:normalized-choi": 9809,
+    "thm:normalized-choi|lem:pauli-measurement-eigenstate": 10571,
+    "lem:pauli-measurement-eigenstate": 6627,
+    "lem:pauli-measurement-eigenstate|def:one-time-private-key-ue": 7247
+  },
+  "expected_groups": [
+    [
+      "lem:positive-part-trace-bound",
+      "lem:binary-povm-observable"
+    ],
+    [
+      "thm:normalized-choi"
+    ],
+    [
+      "lem:pauli-measurement-eigenstate",
+      "def:one-time-private-key-ue"
+    ]
+  ],
+  "expected_group_interface_chars": [8812, 9809, 7247]
+}

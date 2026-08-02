@@ -317,27 +317,22 @@ declaration names, and builds a declaration-reference graph for local helpers.
 After a correction is merged, the reconstructed module's complete import list
 is checked again; unavailable or obsolete local-library module names are
 removed and recorded before the skeleton can be compiled or persisted.
-A helper required by the accepted interface plan is deterministically matched
-to that plan entry by its contract name, or by a unique kind/member surface,
-and receives the plan's canonical owner and name. This remains authoritative
-while target bodies are `sorry`, when references cannot reveal ownership.
-Downstream batches may use the plan's shorter model-facing helper name; canonical
-ingestion rewrites it to the persisted global name when that spelling has
-exactly one owner in the complete plan. Ambiguous bare helper names are never
-guessed and remain subject to deterministic rejection. Inside a planned
-`structure` or `class`, its own member names shadow equally named global helper
-aliases throughout the declaration body, including later dependent member
-types.
-Phase 1 accepts only blueprint targets and the exact plan-owned
+A structural helper emitted with a Phase 1 candidate is deterministically
+matched to that candidate's blueprint owner by its semantic vocabulary name or
+by its unique kind/member surface. Canonical ingestion assigns the persisted
+global name. Ambiguous bare helper names are never guessed and remain subject
+to deterministic rejection. Inside a generated `structure` or `class`, its own
+member names shadow equally named global helper aliases throughout the
+declaration body, including later dependent member types.
+Phase 1 accepts only blueprint targets and their candidate-owned
 `structure`/`inductive`/`class` interfaces. An extra helper
 `def`, theorem, lemma, abbreviation, or instance is rejected before Lean is
-run. If the accepted plan requested an invalid declaration surface, the plan
-is corrected; if statement generation invented the helper despite a closed
-plan, the generated declaration is corrected without paying for another plan
-call. Phase 1 must never spend time implementing a body that belongs to Phase
+run. An invalid declaration surface is corrected as one candidate transaction;
+there is no separate typed-plan correction call. Phase 1 must never spend time
+implementing a body that belongs to Phase
 2. A definition-like target normally keeps a terminal `:= sorry`, but a target
 whose entire contract is a type may be a transparent alias to its own
-plan-owned `structure`, `inductive`, or `class`. This narrow alias contains no
+candidate-owned `structure`, `inductive`, or `class`. This narrow alias contains no
 Phase 2 implementation work; it only exposes the structural interface through
 the canonical blueprint declaration. Every other completed `def` body remains
 invalid in Phase 1. Only the reconstructed canonical
@@ -356,158 +351,68 @@ correction of independent groups on a dynamically recomputed dependency-ready
 frontier. A failing contract blocks only its actual descendants, never an
 unrelated branch that happened to share its original topological depth.
 
-Before Phase 1 starts, one shared root-first planning stage fixes the intended
-Lean contract vocabulary across the pending graph. This is not a traversal and
-does not generate declarations or proofs; Phase 1 still compiles dependency
-contracts first. On a fresh multi-node plan, the base runner generates two
-independent full-context candidates concurrently. Both use the same compact
-JSON schema and prompt; planning is not made more elaborate. Deterministic
-coverage and contract-closure checks score each result as soon as it finishes.
-A candidate that covers every pending node and leaves the entire initial
-dependency-ready frontier mechanically closed starts Phase 1 immediately,
-without waiting for a redundant sibling. If neither lane is immediately clean,
-the pipeline waits for both, tries safe provider-consumer component
-substitution, and compares the selected complete plan's bounded closure-repair
-work with another two-lane full tournament. Repair work is measured in
-provider-neutral contract units: two possible correction tiers per blocked
-contract, plus deterministic findings and disconnected repair components. The
-plan is retained only when that work is strictly cheaper than replanning every
-contract in two lanes; its blocked frontier then passes through the existing
-scoped closure gateway before statement generation. Otherwise no plan is
-persisted and the bounded loop restarts the complete tournament. This preserves
-near-good plans without allowing a catastrophic plan to become a serial repair
-cascade.
-The non-selected contract for each node is retained as a one-use fallback.
-Selective replanning after a blueprint change remains a single call; the
-two-candidate tournament is not repeated for every later repair. Graphs above
-120 pending nodes still use a small number of bounded calls per candidate
-rather than one oversized prompt.
-The planner has a JSON-only output contract separate from Lean generation. A
-successful-status response with zero usable contracts is rejected. The two
-initial lanes use the configured hard timeout rather than the shorter base-call
-timeout because they return the complete full-context plan. A timeout or empty
-lane never authorizes a lower-quality plan; when no sibling qualifies, the
-whole tournament restarts with exact deterministic feedback and consumes one
-existing repair trial.
-The plan prevents each local generation batch from independently redesigning
-the same interfaces, but the plan itself is only untrusted generation guidance.
-The complete plan does not receive a heavyweight semantic audit up front:
-measurements showed that globally auditing and serially correcting every
-proposal before Lean existed duplicated later work and added several minutes.
-Instead, immediately before each dependency-ready frontier reaches statement
-generation, a scoped semantic gateway audits only that frontier's proposed
-contracts. Direct providers and consumers are supplied as read-only context.
-An accepted contract stores its audit fingerprint and is not charged again
-unless its plan or blueprint statement changes. A rejection corrects only the
-rejected contracts, reruns deterministic closure for the affected component,
-and re-audits only that corrected slice. Unrelated plan entries and ready graph
-branches are untouched. Transport failure supplies no semantic evidence and
-therefore cannot trigger an arbitrary plan rewrite. This makes a bad initial
-plan pay correction cost just in time, while a healthy frontier pays one
-bounded audit and proceeds. Plan entries are stored per blueprint node as
-structured contracts containing the target signature,
-declaration-only auxiliary type interfaces, and semantic/interface decisions,
-all tied to that node's statement fingerprint. Plan-owned helpers are limited
-to `structure`, `inductive`, and `class` interfaces whose fields or
-constructors include complete Lean-ish types. A list containing only member
-names is rejected before generation, so the statement writer never has to
-invent a helper's interface. The plan cannot create helper definitions or
-theorems: Phase 2 implements blueprint targets, so such helpers would otherwise
-force proof work into Phase 1 or leave an untracked placeholder. Equations and
-properties stay on the target contract and its Phase-2 decisions. Statement-level
-`\uses` and proof-level `\uses` remain separate: only the former constrain the
-Phase 1 public signature, while their union still drives traversal and Phase 2.
-The initial planner receives the same deterministic dependency-contract table
-as statement generation. That table is its sole authority for generated
-dependency names: statement-interface entries may occur in a public signature,
-whereas proof-only entries are reserved for the later Phase-2 body. Root
-obligations may determine what an interface must express, but cannot create an
-edge that is absent from the blueprint dependency graph.
-Dependency authorization is therefore deterministic rather than a critic-model
-judgment. Before generation, a deterministic contract-closure gate builds the
-complete planned symbol/member table. It rejects a generated dotted reference
-such as `A.member` when an authorized planned declaration `A` exposes no
-`member`, use of a helper whose owning node is outside the consumer's statement
-dependency closure, generated target dependencies outside that same closure,
-an unresolved generated alias for a `\mathlibok` node instead of that node's
-settled `\lean{...}` name, target/helper declaration cycles, and a target
-signature that declares anything other than the node's single canonical public
-Lean target. Exact generated aliases of `\mathlibok` declarations are first
-normalized deterministically during plan ingestion, including aliases inside
-typed helper members, so they never require a model correction.
+Before Phase 1 starts, one compact root-aware semantic-planning call coordinates
+representation choices and vocabulary across the pending graph. It is advisory:
+it contains no Lean signatures, binder types, helper fields, constructors,
+imports, bodies, or proofs, and it is never repaired in a separate model loop.
+Malformed or missing entries fall back deterministically to blueprint-only
+guidance, so planning cannot block Phase 1. The prompt includes the authoritative
+dependency-contract table. Only statement dependencies may shape public
+interfaces; proof-only dependencies are reserved for Phase 2, and root context
+cannot invent graph edges absent from the blueprint.
 
-The gate also records which direct `\uses` dependencies are represented or
-absent, but absence alone is not a blocking mechanical defect. A theorem used
-to prove a corollary normally must not occur in the corollary's public Lean
-proposition, while a definition used by a defining equation may need to occur
-there. The dependency graph cannot decide that semantic distinction by name
-presence. Exact blueprint preservation is instead enforced by the mandatory
-statement-alignment audit after Lean generation. This keeps dependency data for
-telemetry without converting proof edges into false public-signature repairs.
-When one blueprint node defines several related operations, its
-plan must expose them through one plan-owned type interface returned by that
-canonical target; it cannot create additional public targets that Phase 2 does
-not own. Valid closure results are cached by plan fingerprint and add no model
-call. Closure is not a global generation barrier. Global findings are retained
-for scheduling and telemetry, but only findings owned by the current
-dependency-ready frontier can block that frontier. In particular, a future
-consumer that invents `A.member` cannot block or rewrite the ready provider
-`A`; the provider is audited against its own blueprint contract and may freeze.
-When that consumer later becomes ready, its closure finding is corrected with
-the already-frozen provider supplied as read-only context. The retained
-alternate contract remains the zero-call first choice, followed by a bounded
-scoped correction if needed. The corrected consumer is rescored against the
-complete plan before its semantic frontier audit. This preserves bottom-up
-interface stability while preventing one defective high-level consumer plan
-from connecting and stalling an otherwise healthy dependency subtree.
+The exact typed contract is created at the Phase 1 generation boundary instead
+of being predicted by that global planner. In one response, the statement model
+must emit each canonical blueprint target and any structural `structure`,
+`inductive`, or `class` interface owned by that target. Canonical ingestion
+extracts those exact declaration headers and stores them as the candidate's
+typed contract. The candidate and contract therefore share one fingerprint and
+one correction lifecycle: a compiler or statement-audit patch that changes the
+declaration refreshes the contract from the same replacement candidate. There
+is no second typed-planning call and no independently generated contract that
+can keep a valid correction trapped under stale guidance.
 
-If the consumer's blueprint truly requires a provider capability absent from
-the frozen provider's blueprint statement, the scoped semantic and final
-statement audits route that concrete evidence through the existing blueprint
-repair and invalidation rules. Plan closure alone is not allowed to speculate
-that a future consumer is correct and redesign an accepted provider. Unrelated
-contracts and accepted work remain intact, and an unchanged correction-cache
-hit cannot consume the retry budget in a no-work loop. A mechanically closed
-frontier adds no correction call.
-Because a plan-shape rejection contains no evidence about model-call capacity,
-it never shrinks the statement section size or quarantines the affected node;
-only an actual generation timeout or failure may train that scheduler.
-The same lossless object is then persisted and passed to generation. Before
-compilation, the deterministic handoff gate rejects any candidate that omits a
-target/helper promised by its contract or materializes a cycle between a
-target and its plan-owned type helper. Such cycles also return to targeted plan
-correction rather than compiler patching. Correctness is decided only on the
-generated Lean: it must compile and the independent statement critic must
-accept the actual declaration together with its consumed helpers. A
-model that emits `target.Helper` for a planned `Helper` does not trigger a
-repair call merely because of that spelling: canonical ingestion maps it to
-the exact plan-owned helper, and all later slicing, diagnostics, and audits use
-the same ownership map. A blueprint repair therefore replans only changed
-entries, while unchanged entries survive later waves and `--continue`.
-Generation prompts receive only the contracts for their targets, direct
-dependencies, and direct consumers rather than the full graph-wide plan.
+The candidate then crosses the existing deterministic contract gate. It must
+cover exactly one canonical target per blueprint node, use only authorized
+statement dependencies, expose every referenced structural member, contain no
+target/helper or dependency cycle, normalize settled Mathlib aliases, and avoid
+untracked executable helper declarations. The gate records dependency coverage,
+but does not require proof-only dependencies to appear in public statements.
+Lean compilation and the independent statement-alignment critic remain the
+acceptance authority: they compare the actual generated target plus consumed
+helpers with the blueprint. A correction can update generated Lean and its
+derived typed contract together, but only blueprint evidence may authorize a
+blueprint repair. Accepted sibling contracts and unrelated graph branches are
+preserved.
+
+Legacy `--continue` state containing contracts from the former typed planner is
+still readable and follows its historical validation path. Fresh runs use the
+compact semantic plan plus candidate-derived typed contracts described above.
 
 1. **Phase 1 — statements and interfaces bottom-up.** Phase 1 starts at
    dependency leaves and creates exact audited sections directly, climbing
    toward consumers without provisional whole-graph declarations. Every
-   dependency-ready frontier first passes the scoped contract-plan gateway
-   described above; statement generation cannot start for a semantically
-   rejected frontier. An accepted frontier then begins a statement-generation
-   transaction. Statement-generation
-   and correction prompts contain
-   only the exact generated interfaces required by their direct dependencies,
-   plus the generated names referenced by those interfaces. A deterministic
-   name-set check prevents dispatch if that compact context is incomplete;
-   unrelated frozen modules are not copied into the prompt.
+   dependency-ready frontier begins a statement-generation transaction using
+   the compact semantic guidance, the authoritative blueprint nodes, and only
+   the exact frozen interfaces required from direct dependencies. A
+   deterministic name-set check prevents dispatch if that compact dependency
+   context is incomplete; unrelated frozen modules are not copied into the
+   prompt. The dependency-context character budget is a soft batching target,
+   not a correctness limit. Before dispatch, ordinary multi-node groups are
+   split into the largest deterministic subgroups whose complete interfaces fit
+   that target. A singleton or shared-helper component that remains larger is
+   sent with its complete required interface; required declarations are never
+   omitted and context size alone never aborts refinement.
 
    Bottom-up Phase 1 uses a validated-contract transaction over a dynamic ready
    frontier. After every accepted transaction, readiness is recomputed from the
    actual frozen contracts. The scheduler never requires an entire static graph
    layer to finish: unresolved nodes remain queued and block only consumers in
    their own dependency closure. Candidate groups
-   are generated concurrently from the shared untrusted interface plan
-   and pass canonical ingestion plus deterministic coverage and dependency
-   checks in memory. If one concurrent group fails those checks, every sibling
+   are generated concurrently. Each response supplies both the Lean declaration
+   and its exact typed interface contract, then passes canonical ingestion plus
+   deterministic coverage, helper-surface, cycle, and dependency checks in
+   memory. If one concurrent group fails those checks, every sibling
    that passed continues immediately through compilation, integration, and the
    statement audit; accepted siblings freeze in the same attempt and are also
    persisted for crash safety. Only failed or subsequently rejected groups remain
@@ -537,13 +442,14 @@ dependencies, and direct consumers rather than the full graph-wide plan.
    Mathlib environment; a
    candidate that passes is retained unchanged with that environment. Before
    compilation, a closure gate rejects executable local helpers not represented
-   by blueprint nodes; only exact plan-owned type interfaces may accompany a
+   by blueprint nodes; only exact candidate-owned type interfaces may accompany a
    target. This prevents outline generation from turning into untracked proof
    or implementation work. Real
    declaration errors receive up to three
    bounded compiler-feedback corrections inside the same candidate transaction,
-   so they do not restart generation or repeat an already completed contract-plan
-   audit. The compiled candidates are imported together, then one independent
+   so they do not restart generation. Every accepted correction refreshes its
+   derived typed contract before the deterministic gates run again. The compiled
+   candidates are imported together, then one independent
    final statement audit compares the actual compiling declarations with the
    blueprint. Its cache key includes every target and every transitively consumed
    local helper. No candidate counts as frozen until compilation, integration,
@@ -562,64 +468,31 @@ dependencies, and direct consumers rather than the full graph-wide plan.
    required for publication; it adds no classifier/model call. A rejected
    base-tier statement is isolated and its next attempt
    starts at the escalation tier even when several independent candidates were
-   audited together. After a compiling candidate is rejected, Phase 1 compares
-   its complete public interface with the accepted plan. If the target header
-   and every plan-owned helper kind, member set, and member type match exactly,
-   regeneration under that unchanged plan cannot restore blueprint content
-   absent from the plan. The existing evidence-driven plan correction therefore
-   runs immediately; this replaces the ordinary escalation retry rather than
-   adding a model call. Any interface mismatch or ambiguity keeps the ordinary
-   generation-retry route.
+   audited together. After a compiling candidate is rejected, the exact
+   blueprint/audit evidence is attached to the saved candidate. Its next
+   correction returns a replacement Lean declaration, and the replacement's
+   typed contract is derived from that same response. This is one correction
+   lifecycle rather than a plan-repair call followed by a separate generation
+   call.
 
-   The mandatory statement audit also receives the current design-plan entry,
-   not just the blueprint and compiling Lean. For every rejected Phase 1 target,
-   it classifies the defect's origin as Lean, the plan, or both and must list the
-   exact blueprint requirements missing from the plan before a plan-owned route
-   is accepted. The blueprint remains authoritative and the plan remains an
-   untrusted generation aid. Evidence-backed plan or combined defects enter the
-   same scoped plan-revision transaction immediately; unsupported origin claims
-   fall back to the normal Lean-generation lifecycle. This reuses the existing
-   audit call, so it does not add another model call. Its cache key includes the
-   plan entry so a plan revision always receives a fresh audit.
+   The mandatory statement audit receives the compact semantic guidance, the
+   exact candidate-derived typed contract, the blueprint, and the compiling
+   Lean. For every rejected target it must identify the concrete blueprint
+   requirement that is mistranslated or missing. A batch-level classification
+   never authorizes blueprint mutation for every rejected contract: each issue
+   independently supplies the evidence required for blueprint repair or
+   decomposition, while ordinary translation defects stay in the candidate
+   correction lifecycle. This reuses the publication audit and adds no separate
+   critic call.
 
-   The pre-generation contract-plan audit follows the same per-node rule. A
-   batch-level classification never authorizes blueprint mutation for every
-   rejected contract. Each issue must independently provide the evidence needed
-   for blueprint repair or decomposition. In a mixed result, only those labels
-   enter the transactional blueprint repair; other rejected labels retain their
-   plan/Lean correction route and are reconsidered after that transaction.
-
-   The same source-of-failure rule applies before semantic auditing when Lean
-   rejects a planned interface. If an emitted target header exactly copies an
-   accepted target signature containing a compiler-unknown Lean name, the plan
-   is corrected immediately; regenerating the statement while retaining that
-   name cannot compile. Unknown names that occur only in helper types require
-   an exact match of the complete plan-owned helper interface. Other compiler
-   failures receive the normal correction path first and route to plan
-   correction only when the same normalized error recurs under the same plan
-   fingerprint while the complete interface still exactly realizes that plan.
-   This is deterministic and adds no classifier call. Generated-only errors,
-   such as an import namespace invented by statement generation, remain Lean
-   translation failures. Mixed parallel waves revise only proven plan defects
-   and preserve ordinary retry routing for every unrelated label.
-
-   If both model tiers reject a contract that did not
-   meet that exact-plan condition, the evidence still revises only that node's
-   untrusted interface plan; the compiling candidate is retained as the
-   revision seed and rebound to the corrected plan rather than deleted. If the
-   same statement then exhausts both model tiers again under that
-   evidence-revised plan, Phase 1 disables the rejected plan for that statement
-   fingerprint and performs one ordinary generation lifecycle directly from
-   the blueprint, frozen dependency interfaces, and accumulated rejection
-   evidence. Only if that blueprint-direct lifecycle also exhausts does Phase 1
-   route the node to the existing decomposition transaction. This prevents a
-   bad planning response from repeatedly controlling statement generation while
-   preserving every deterministic, Lean-compilation, and semantic acceptance
-   gate. It does not permit weakening the claim. If no valid plan revision or
-   decomposition evidence exists, the failure consumes the bounded
-   generation-retry budget without editing the blueprint. Translation
-   exhaustion by itself is never mathematical evidence. Acceptance or a
-   blueprint statement change clears the lifecycle. Evidence that
+   The same source-of-failure rule applies when Lean rejects a candidate-derived
+   interface. Compiler-unknown names, malformed helper types, generated-only
+   imports, and similar defects remain Lean translation failures and revise that
+   candidate atomically. Repeated translation failure is not mathematical
+   evidence and cannot edit the blueprint. Only an independent audit that names
+   missing or inconsistent blueprint mathematics may enter blueprint repair or
+   decomposition. Acceptance or a blueprint statement change clears the
+   lifecycle. Evidence that
    a layer is only partially rejected does not discard its accepted siblings:
    before compilation they remain in-memory candidates; after compiler-driven
    changes, accepted declarations are extracted into a smaller module and pass
@@ -653,9 +526,8 @@ dependencies, and direct consumers rather than the full graph-wide plan.
    compiler correction edits that exact intermediate instead of restarting
    from the old error. It is not accepted or frozen, and it replaces the best
    candidate only after measurable progress or successful compilation. If a
-   semantic correction conflicts with a plan-owned interface, the exact
-   finding revises that plan entry rather than repeatedly regenerating Lean
-   under the unchanged contract.
+   semantic correction changes a public interface, the exact typed contract is
+   refreshed from that correction before the candidate is reconsidered.
 
    The retained state includes the exact deterministic obligation set, Lean
    output, semantic rejection, model-tier provenance, and attempted retry
@@ -699,7 +571,7 @@ dependencies, and direct consumers rather than the full graph-wide plan.
    using Lean's `theorem` command and keeps a terminal `:= sorry` until Phase 2.
    Definition-like nodes freeze an exact typed `def`/`abbrev` header with a
    deferred terminal body; structural type contracts may instead freeze as a
-   transparent canonical alias to their exact plan-owned structure, inductive,
+   transparent canonical alias to their exact candidate-owned structure, inductive,
    or class interface. Those interfaces freeze their fields or constructors
    immediately.
    Model output that spells a declaration as `corollary` is normalized to
@@ -804,7 +676,7 @@ dependencies, and direct consumers rather than the full graph-wide plan.
    higher effort. A base-model skeleton `NEEDS-DECOMPOSITION` response is
    treated as a generator claim, not immediate repair evidence: Phase 1 first
    retries the same section through the escalation runner using the existing
-   targets and plan-owned type interfaces (and any declarations delivered
+   targets and candidate-owned type interfaces (and any declarations delivered
    alongside the refusal are reused for the other nodes). It cannot invent
    executable top-level helpers; a genuinely missing mathematical helper must
    become a blueprint node through decomposition. Blueprint repair
@@ -969,56 +841,30 @@ Fast pipeline diagram:
 flowchart TD
     A["Published blueprint"] --> AD["Create or resume unpublished blueprint draft"]
     AD --> B["Validate draft blueprint structure"]
-    B --> BP0["Fresh Phase 1 planning tournament"]
-    BP0 --> BPA["Full-context base candidate A"]
-    BP0 --> BPB["Full-context base candidate B in parallel"]
-    BPA --> BPSEL["Deterministically score coverage and contract closure"]
-    BPB --> BPSEL
-    BPSEL --> BPQ{"Complete coverage and entire initial frontier mechanically closed?"}
-    BPQ -->|First qualifying candidate| BPM["Admit candidate without waiting for redundant sibling"]
-    BPQ -->|Neither qualifies| BPMERGE["Try only a component-safe improving merge"]
-    BPMERGE -->|Initial frontier closes| BPM
-    BPMERGE -->|Still blocked| BPCOST{"Is bounded scoped repair cheaper than another two-lane tournament?"}
-    BPCOST -->|Yes| BPMR["Retain complete plan; require scoped closure repair before statement generation"]
-    BPMR --> BPC
-    BPCOST -->|No| BPRESTART["Discard plans; consume one repair trial; restart full tournament"]
-    BPRESTART --> BP0
-    BPM --> BPC["Compute global mechanical closure findings for scheduling and telemetry"]
-    BPC --> BPG["Persist selected plan plus one-use alternate contracts as untrusted guidance"]
-    BPG --> BU["Phase 1: recompute all pending nodes whose own generated dependencies are frozen"]
-    BU --> FC["Check only mechanical defects owned by the dependency-ready frontier"]
-    FC -->|Defect belongs only to a future consumer| FPG["Scoped semantic plan gateway for the dependency-ready frontier"]
-    FC -->|Current frontier defect| BPAF["Try retained alternate contract without a model call"]
-    BPAF -->|Still blocked| BPR["Correct only current frontier contracts; providers and future consumers are read-only context"]
-    BPAF -->|Closed| FPG
-    BPR --> BPRES["Recompute global closure and require the current frontier to close"]
-    BPRES -->|Closed| FPG
-    BPRES -->|Attempts exhausted| GB
-    FPG -->|Accepted or corrected and re-audited| C1["Canonical ingestion and closure gate: targets plus exact plan-owned type interfaces only"]
-    FPG -->|Blueprint defect or decomposition required| R
-    FPG -->|Audit transport failure| GB
-    C1 -->|Owner/helper cycle required by accepted plan| BPR
-    C1 -->|Model-invented executable helper| GRC["Correct the generated declaration under the unchanged closed plan"]
-    GRC --> C1
-    C1 --> PA["Compile validated-contract groups in parallel"]
+    B --> SP["One compact semantic-planning call"]
+    SP -->|Valid entries| SG["Store advisory representation, vocabulary, and obligations"]
+    SP -->|Missing, malformed, or failed| SF["Use deterministic blueprint-only fallback"]
+    SG --> BU["Phase 1: choose the bottom-up dependency-ready frontier"]
+    SF --> BU
+    BU --> GEN["Generate canonical target plus owned structural interfaces in one response"]
+    GEN --> C1["Derive the exact typed contract from that same candidate"]
+    C1 --> DG["Canonical ingestion and deterministic gates: coverage, dependencies, members, aliases, cycles"]
+    DG -->|Candidate defect| SC["Patch the saved candidate with exact evidence"]
+    SC --> C1
+    DG -->|Passes| PA["Compile candidate groups in parallel"]
     PA -->|Failed| EF{"Same declarations compile under complete project environment?"}
     EF -->|Yes| IG["Keep declarations unchanged with resolved environment"]
     EF -->|No| CP["Bounded compiler-feedback corrections inside same component transaction"]
-    CP --> PA
+    CP --> C1
     PA -->|Compiled| IG["Import compiled candidates together in one deterministic layer gate"]
     IG --> CH["Independent final audit compares compiling statements and consumed helpers with blueprint"]
     CH -->|Accepted| I["Freeze integrated statements"]
-    CH -->|Per-node Lean translation issue| RT
-    RT{"Per-node producing tier"} -->|Retry available| SC["Patch the exact saved compiling candidate with the critic evidence"]
-    SC --> C1
-    C1 -->|Corrected Lean and critic agree on a missing existing dependency| DER["Add the direct uses edge transactionally"]
+    CH -->|Per-node Lean translation issue| SC
+    DG -->|Corrected Lean and critic agree on a missing existing dependency| DER["Add the direct uses edge transactionally"]
     DER --> RV
-    RT -->|Exhausted under original plan| PCR["Revise rejected untrusted plan contract from exact final-audit evidence"]
-    PCR -->|Plan changed| SC
-    PCR -->|No valid change| GB["Consume bounded generation retry budget; blueprint remains unchanged"]
+    SC -->|Retry lifecycle exhausted without blueprint evidence| GB["Consume bounded generation retry budget; blueprint remains unchanged"]
     GB --> BU
-    RT -->|Exhausted again under revised plan| ND["Existing NEEDS-DECOMPOSITION route"]
-    CH -->|Node lacks a named mathematical interface| ND
+    CH -->|Node lacks a named mathematical interface| ND["Existing NEEDS-DECOMPOSITION route"]
     CH -->|Blueprint contract itself is incomplete| R["Author model repairs unpublished blueprint draft"]
     ND --> R
     R --> RV["Revalidate repaired blueprint structure and repair scope"]
@@ -1450,14 +1296,14 @@ The telemetry is raw observation data, not guessed labels. It stores:
   backend, duration, status, and error if it failed;
 - Lean attempt source, Lean output, compile status, imports, and duration;
 - statement-audit outcomes, rejected labels, and routing classification;
-- proposed interface-plan entries and the final outcomes of declarations
-  generated from those proposals, including post-audit plan revisions and
-  candidate invalidation when an unchanged plan cannot produce an acceptable
-  statement;
-- deterministic mechanical plan-closure evaluations plus observational
-  required/represented/missing dependency data; provider-consumer repair
-  components; alternate use; concurrent correction-wave timing and merge
-  outcomes; and whether corrected contracts later froze successfully;
+- compact semantic-plan outputs, deterministic fallback use, sanitized
+  unauthorized provider requests, response size, and the outcomes of
+  declarations generated with that guidance;
+- candidate-derived typed-contract events, including their target/helper
+  surfaces and the fact that no separate typed-contract model call was used;
+- deterministic mechanical contract evaluations plus observational
+  required/represented/missing dependency data, provider-consumer components,
+  correction timing, and whether corrected contracts later froze successfully;
 - layer-level validated-contract transaction order, uncompiled candidate
   generation, fingerprint-safe candidate reuse, environment-fallback outcomes,
   bounded in-transaction compiler corrections, compilation/freeze events,

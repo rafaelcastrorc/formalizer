@@ -1240,6 +1240,28 @@ def _planned_helper_owner_by_name(
     }
 
 
+def _semantic_helper_owner_by_name(
+    ctx: Ctx, labels: Iterable[str]
+) -> dict[str, str]:
+    """Unambiguous advisory vocabulary ownership for first-pass ingestion."""
+    owners: dict[str, set[str]] = {}
+    requested = set(labels)
+    for label, entry in getattr(ctx, "semantic_plan_entries", {}).items():
+        if label not in requested:
+            continue
+        for item in entry.get("vocabulary") or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if name:
+                owners.setdefault(name, set()).add(label)
+    return {
+        name: next(iter(labels_for_name))
+        for name, labels_for_name in owners.items()
+        if len(labels_for_name) == 1
+    }
+
+
 def _planned_helper_aliases(ctx: Ctx) -> dict[str, str]:
     """Map model-facing plan spellings to canonical helper declarations.
 
@@ -1400,6 +1422,9 @@ def _namespace_owned_helpers(
         parsed.decls[index].name or "": label
         for index, (label, _helper_name) in planned.items()
     }
+    for name, label in _semantic_helper_owner_by_name(ctx, label_list).items():
+        if any(decl.name == name for decl in parsed.decls):
+            explicit_raw_owners.setdefault(name, label)
     consumers = _declaration_target_consumers(
         parsed, label_by_name, explicit_raw_owners
     )
@@ -1579,20 +1604,117 @@ def _canonicalize_model_lean(
     )
 
 
+def _realize_typed_contracts_from_candidate(
+    ctx: Ctx,
+    labels: Iterable[str],
+    canonical: CanonicalModelModule,
+) -> set[str]:
+    """Make the checked Lean candidate its own authoritative typed contract.
+
+    Fresh runs no longer ask the global planner to predict Lean signatures.
+    The first Phase-1 response supplies the target and structural-helper
+    declarations atomically. Any later compiler/audit patch refreshes the same
+    entries from the replacement candidate, so code cannot be forced to obey a
+    stale independently generated plan.
+    """
+    requested = [label for label in labels if label in ctx.nodes]
+    if not requested or not getattr(ctx, "semantic_plan_entries", {}):
+        return set()
+    entries = getattr(ctx, "design_plan_entries", {})
+    ctx.design_plan_entries = entries
+    target_by_name = {_lean_name(label): label for label in requested}
+    owner_by_index = dict(canonical.owner_by_index)
+    realized: set[str] = set()
+    for label in requested:
+        previous = entries.get(label) or {}
+        # Preserve a resumed legacy contract. Only contracts created at this
+        # atomic boundary follow subsequent candidate revisions.
+        if previous and previous.get("origin") != "phase1_candidate":
+            continue
+        target_name = _lean_name(label)
+        target = next(
+            (decl for decl in canonical.parsed.decls if decl.name == target_name),
+            None,
+        )
+        if target is None:
+            continue
+        helpers: list[dict[str, Any]] = []
+        for index, decl in enumerate(canonical.parsed.decls):
+            if (
+                not decl.name
+                or decl.name in target_by_name
+                or owner_by_index.get(index) != label
+                or decl.kind not in DESIGN_PLAN_HELPER_KINDS
+            ):
+                continue
+            declaration = _decl_interface_text(decl)
+            members = sorted(_planned_target_members(declaration, decl.name))
+            helpers.append(
+                {
+                    "name": decl.name,
+                    "kind": decl.kind,
+                    "declaration": declaration,
+                    "members": [],
+                    "required_members": members,
+                    "purpose": "Typed structural interface realized with the Phase-1 candidate.",
+                }
+            )
+        semantic = getattr(ctx, "semantic_plan_entries", {}).get(label) or {}
+        decisions = []
+        representation = str(semantic.get("representation") or "").strip()
+        if representation:
+            decisions.append("Representation: " + representation)
+        decisions.extend(
+            "Preserve: " + str(item).strip()
+            for item in semantic.get("obligations") or []
+            if str(item).strip()
+        )
+        progress = {
+            key: previous.get(key)
+            for key in _PLAN_ENTRY_PROGRESS_KEYS
+            if key in previous
+        }
+        entries[label] = {
+            "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+            "statement_fp": ctx.stmt_fps[label],
+            "target_signature": _decl_interface_text(target),
+            "helpers": helpers,
+            "decisions": decisions,
+            "origin": "phase1_candidate",
+            **progress,
+        }
+        realized.add(label)
+    if realized:
+        _sync_design_plan(ctx)
+        _record(
+            ctx.telemetry,
+            "phase1_typed_contract_realized",
+            labels=sorted(realized),
+            source="same_model_response_as_lean_candidate",
+            typed_contract_model_calls=0,
+            semantic_plan_authoritative=False,
+        )
+    return realized
+
+
 def _ingest_model_lean(
     ctx: Ctx,
     labels: Iterable[str],
     response: str,
     *,
     strict_duplicates: bool = True,
+    realize_contracts: bool = False,
 ) -> CanonicalModelModule:
     """Extract and canonicalize a Lean code block returned by a model."""
-    return _canonicalize_model_lean(
+    canonical = _canonicalize_model_lean(
         ctx,
         labels,
         _extract_lean_code(response),
         strict_duplicates=strict_duplicates,
     )
+    if realize_contracts:
+        _realize_typed_contracts_from_candidate(ctx, labels, canonical)
+    return canonical
 
 
 def _compose_module(
@@ -2478,6 +2600,13 @@ class Ctx:
     # Entries are statement-fingerprinted so repairs invalidate only changed
     # contracts while unchanged planning work remains reusable.
     design_plan_entries: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Lightweight, graph-wide semantic guidance produced before Phase 1. This
+    # deliberately contains no Lean signatures or typed helper declarations:
+    # the exact typed contract is realized atomically from the Phase-1 Lean
+    # candidate and stored in ``design_plan_entries``. Keeping the two stores
+    # separate prevents an advisory model plan from becoming mathematical
+    # authority or forcing Phase 1 to translate the same interface twice.
+    semantic_plan_entries: dict[str, dict[str, Any]] = field(default_factory=dict)
     # The non-selected full-plan candidate is retained as a bounded, zero-call
     # fallback. A rejected selected component may try the alternate contract
     # once before asking a model to correct the plan.
@@ -4446,6 +4575,7 @@ def _save_state(
     generation_candidates: dict[str, dict[str, Any]] | None = None,
     retry_lifecycle: dict[str, dict[str, Any]] | None = None,
     design_plan_entries: dict[str, dict[str, Any]] | None = None,
+    semantic_plan_entries: dict[str, dict[str, Any]] | None = None,
     design_plan_alternates: dict[str, dict[str, Any]] | None = None,
     blueprint_direct_generation: dict[str, dict[str, Any]] | None = None,
     repair_boundary_pending: dict[str, Any] | None = None,
@@ -4651,6 +4781,7 @@ def _save_state(
                 {
                     "name": str(helper.get("name") or "")[:500],
                     "kind": str(helper.get("kind") or "")[:40],
+                    "declaration": str(helper.get("declaration") or "")[:12000],
                     "members": [
                         {
                             "name": str(member.get("name") or "")[:500],
@@ -4693,7 +4824,28 @@ def _save_state(
             ),
             "closure_fp": str(entry.get("closure_fp") or ""),
             "closure_wave_id": str(entry.get("closure_wave_id") or ""),
+            "origin": str(entry.get("origin") or ""),
         }
+    semantic_plan_payload = {
+        str(label): {
+            "schema_version": SEMANTIC_PLAN_SCHEMA_VERSION,
+            "statement_fp": str(entry.get("statement_fp") or ""),
+            "representation": str(entry.get("representation") or "")[:600],
+            "vocabulary": copy.deepcopy(entry.get("vocabulary") or [])[:8],
+            "obligations": [
+                str(item)[:320] for item in entry.get("obligations") or []
+            ][:6],
+            "provider_requirements": copy.deepcopy(
+                entry.get("provider_requirements") or []
+            ),
+            "fallback": bool(entry.get("fallback")),
+        }
+        for label, entry in (semantic_plan_entries or {}).items()
+        if label in stmt_fps
+        and str(entry.get("statement_fp") or "") == stmt_fps.get(label)
+        and int(entry.get("schema_version") or 0)
+        == SEMANTIC_PLAN_SCHEMA_VERSION
+    }
     alternate_plan_payload = {
         str(label): {
             "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
@@ -4774,7 +4926,7 @@ def _save_state(
     path.write_text(
         json.dumps(
             {
-                "version": 19,
+                "version": 20,
                 "refinement_order": refinement_order,
                 "sections": entries,
                 "scheduler": {
@@ -4802,6 +4954,10 @@ def _save_state(
                     "design_plan_entries": {
                         label: plan_payload[label]
                         for label in sorted(plan_payload)
+                    },
+                    "semantic_plan_entries": {
+                        label: semantic_plan_payload[label]
+                        for label in sorted(semantic_plan_payload)
                     },
                     "design_plan_alternates": {
                         label: alternate_plan_payload[label]
@@ -4844,6 +5000,7 @@ def _save_ctx_state(ctx: Ctx, sections: list[Section]) -> None:
         generation_candidates=generation_candidates,
         retry_lifecycle=getattr(ctx, "retry_lifecycle", {}),
         design_plan_entries=getattr(ctx, "design_plan_entries", {}),
+        semantic_plan_entries=getattr(ctx, "semantic_plan_entries", {}),
         design_plan_alternates=getattr(ctx, "design_plan_alternates", {}),
         blueprint_direct_generation=getattr(
             ctx, "blueprint_direct_generation", {}
@@ -5070,6 +5227,7 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
                 {
                     "name": str(helper.get("name") or "")[:500],
                     "kind": str(helper.get("kind") or "")[:40],
+                    "declaration": str(helper.get("declaration") or "")[:12000],
                     "members": [
                         {
                             "name": str(member.get("name") or "")[:500],
@@ -5112,6 +5270,7 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
             ),
             "closure_fp": str(entry.get("closure_fp") or ""),
             "closure_wave_id": str(entry.get("closure_wave_id") or ""),
+            "origin": str(entry.get("origin") or ""),
         }
         for label, entry in raw_plan.items()
         if isinstance(entry, dict)
@@ -5119,6 +5278,50 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
         and str(label) in ctx.nodes
         and str(entry.get("statement_fp") or "") == ctx.stmt_fps.get(str(label))
         and str(entry.get("target_signature") or "").strip()
+    }
+    raw_semantic_plan = scheduler.get("semantic_plan_entries") or {}
+    ctx.semantic_plan_entries = {
+        str(label): {
+            "schema_version": SEMANTIC_PLAN_SCHEMA_VERSION,
+            "statement_fp": str(entry.get("statement_fp") or ""),
+            "representation": str(entry.get("representation") or "")[:600],
+            "vocabulary": [
+                {
+                    "name": str(item.get("name") or "")[:500],
+                    "purpose": str(item.get("purpose") or "")[:240],
+                }
+                for item in entry.get("vocabulary") or []
+                if isinstance(item, dict)
+                and str(item.get("name") or "").strip()
+            ][:8],
+            "obligations": [
+                str(item)[:320]
+                for item in entry.get("obligations") or []
+                if str(item).strip()
+            ][:6],
+            "provider_requirements": [
+                {
+                    "provider": str(item.get("provider") or ""),
+                    "capabilities": [
+                        str(value)[:240]
+                        for value in item.get("capabilities") or []
+                        if str(value).strip()
+                    ][:8],
+                }
+                for item in entry.get("provider_requirements") or []
+                if isinstance(item, dict)
+                and str(item.get("provider") or "")
+                in _statement_uses(ctx.nodes[str(label)])
+            ],
+            "fallback": bool(entry.get("fallback")),
+        }
+        for label, entry in raw_semantic_plan.items()
+        if isinstance(entry, dict)
+        and str(label) in ctx.nodes
+        and int(entry.get("schema_version") or 0)
+        == SEMANTIC_PLAN_SCHEMA_VERSION
+        and str(entry.get("statement_fp") or "")
+        == ctx.stmt_fps.get(str(label))
     }
     raw_alternates = scheduler.get("design_plan_alternates") or {}
     ctx.design_plan_alternates = _parse_design_plan_entries(
@@ -5771,6 +5974,9 @@ def _frozen_interface_digest(
     return digest
 
 
+PHASE1_DEPENDENCY_CONTEXT_BUDGET = 10000
+
+
 def _minimal_dependency_interface(
     ctx: Ctx,
     labels: list[str],
@@ -5778,7 +5984,7 @@ def _minimal_dependency_interface(
     modules: list[str],
     *,
     local_code: str = "",
-    budget: int = 10000,
+    budget: int | None = PHASE1_DEPENDENCY_CONTEXT_BUDGET,
 ) -> str:
     """Return the smallest complete generated interface needed by ``labels``.
 
@@ -5787,6 +5993,12 @@ def _minimal_dependency_interface(
     declarations referenced by those interfaces. The final name-set comparison
     is the deterministic completeness gate: a model call is never launched
     with an advertised generated dependency silently absent from its context.
+
+    ``budget`` is a soft batching target, not a correctness limit. The Phase-1
+    scheduler partitions ordinary multi-node groups before prompt construction.
+    An atomic component or singleton whose genuinely minimal interface is still
+    larger must receive that complete interface; omitting it or terminating the
+    autonomous run would both be incorrect.
     """
     target_set = set(labels)
     required = {
@@ -5860,17 +6072,126 @@ def _minimal_dependency_interface(
         )
 
     blocks: list[str] = []
-    used = 0
     for label in sorted(included):
         block = f"-- {label}\n{included[label]}"
-        if used + len(block) > budget:
-            raise ValueError(
-                "minimal generated dependency interface exceeds its bounded context budget "
-                f"({budget} characters) for " + ", ".join(labels)
-            )
         blocks.append(block)
-        used += len(block) + 2
     return "\n\n".join(blocks)
+
+
+def _phase1_dependency_interface_chars(
+    ctx: Ctx, labels: list[str], sections: list[Section]
+) -> int:
+    """Measure the complete frozen dependency interface for one candidate group."""
+    modules = _sections_for_deps(ctx, labels, sections)
+    return len(
+        _minimal_dependency_interface(
+            ctx,
+            labels,
+            sections,
+            modules,
+            budget=None,
+        )
+    )
+
+
+def _phase1_context_atomic_units(ctx: Ctx, group: list[str]) -> list[list[str]]:
+    """Keep persisted shared-helper candidate components indivisible."""
+    available = set(group)
+    emitted: set[str] = set()
+    units: list[list[str]] = []
+    for label in group:
+        if label in emitted:
+            continue
+        component = set(_candidate_component_labels(ctx, label, available))
+        unit = [item for item in group if item in component and item not in emitted]
+        if not unit:
+            unit = [label]
+        units.append(unit)
+        emitted.update(unit)
+    return units
+
+
+def _partition_phase1_groups_by_dependency_context(
+    ctx: Ctx,
+    groups: list[list[str]],
+    sections: list[Section],
+    *,
+    budget: int = PHASE1_DEPENDENCY_CONTEXT_BUDGET,
+) -> list[list[str]]:
+    """Split candidate groups at the complete dependency-context boundary.
+
+    The operation is deterministic and model-free. It greedily preserves the
+    largest prefix whose exact generated dependency interface fits the soft
+    budget. Persisted shared-helper components remain atomic; if such a unit or
+    a singleton exceeds the budget, prompt construction receives its complete
+    interface and telemetry records the unavoidable overage.
+    """
+    partitioned: list[list[str]] = []
+    for original in groups:
+        if not original:
+            continue
+        try:
+            parts: list[list[str]] = []
+            current: list[str] = []
+            for unit in _phase1_context_atomic_units(ctx, original):
+                trial = current + unit
+                trial_chars = _phase1_dependency_interface_chars(
+                    ctx, trial, sections
+                )
+                if current and trial_chars > budget:
+                    parts.append(current)
+                    current = list(unit)
+                else:
+                    current = trial
+            if current:
+                parts.append(current)
+
+            sizes = [
+                _phase1_dependency_interface_chars(ctx, part, sections)
+                for part in parts
+            ]
+        except ValueError as exc:
+            # This pre-dispatch pass is only a batching optimization. Synthetic
+            # replay states and a temporarily deferred section may not expose a
+            # readable interface yet. Preserve the original group and let the
+            # existing prompt-construction completeness gate make the
+            # authoritative decision when generation actually starts.
+            _record(
+                ctx.telemetry,
+                "phase1_dependency_context_partition_deferred",
+                labels=original,
+                soft_budget=budget,
+                reason=str(exc),
+            )
+            partitioned.append(original)
+            continue
+        if len(parts) > 1:
+            _log(
+                "  dependency context partitioned "
+                f"{len(original)} node(s) into "
+                + " + ".join(str(len(part)) for part in parts)
+                + f" (soft limit {budget} chars)"
+            )
+            _record(
+                ctx.telemetry,
+                "phase1_dependency_context_partitioned",
+                labels=original,
+                groups=parts,
+                interface_chars=sizes,
+                soft_budget=budget,
+            )
+        for part, size in zip(parts, sizes):
+            if size > budget:
+                _record(
+                    ctx.telemetry,
+                    "phase1_dependency_context_soft_overflow",
+                    labels=part,
+                    interface_chars=size,
+                    soft_budget=budget,
+                    reason="atomic_component_or_singleton",
+                )
+        partitioned.extend(parts)
+    return partitioned
 
 
 def _frozen_decl_for_label(sections: list[Section], label: str) -> str:
@@ -6252,8 +6573,10 @@ Generate ONE declaration per target node listed below — statements only:
   `:= sorry` before replying. Never encode a theorem-like node as a bare
   `def : Prop`.
 - Emit no auxiliary `def`, `abbrev`, theorem, lemma, or instance declarations.
-  The accepted plan already lists every permitted auxiliary type interface.
-  A genuinely separate mathematical obligation requires `NEEDS-DECOMPOSITION`.
+  A structural helper may be emitted only when needed to state a requested
+  target. Return its complete typed declaration together with that target;
+  this same Lean response becomes the persisted typed contract. A genuinely
+  separate mathematical obligation requires `NEEDS-DECOMPOSITION`.
 - Order declarations so nothing is used before it is declared.
 - A statement should visibly use the generated Lean declarations of the
   definition nodes it `uses`; imports of earlier skeleton modules make them
@@ -6965,6 +7288,24 @@ def _skeleton_deterministic_findings(code: str, ctx: Ctx, labels: list[str]) -> 
     """Coverage/kind checks for a section. Dependency-mention checks are only
     applied to declarations whose bodies are already complete; deferred theorem
     proofs and def/abbrev bodies get theirs during Phase 2."""
+    # The complete merged candidate, not a partial patch response, owns the
+    # exact typed contract on fresh runs. Refreshing here keeps compiler and
+    # semantic repairs atomic with the code they changed.
+    if getattr(ctx, "semantic_plan_entries", {}):
+        parsed_for_contract = _parse_module(code)
+        label_by_name_for_contract = {
+            _lean_name(label): label for label in labels
+        }
+        owner_by_index = _declaration_owner_map(
+            parsed_for_contract,
+            label_by_name_for_contract,
+            _planned_helper_owner_by_name(ctx, labels),
+        )
+        _realize_typed_contracts_from_candidate(
+            ctx,
+            labels,
+            CanonicalModelModule(parsed_for_contract, owner_by_index),
+        )
     findings: list[SkeletonFinding] = []
     decls = _lean_declarations(code)
     generated_by_name = {
@@ -7638,6 +7979,17 @@ def _prune_stale_design_plan(ctx: Ctx) -> set[str]:
     }
     for label in stale_alternates:
         alternates.pop(label, None)
+    semantic_entries = getattr(ctx, "semantic_plan_entries", {})
+    stale_semantic = {
+        label
+        for label, entry in semantic_entries.items()
+        if label not in ctx.nodes
+        or entry.get("statement_fp") != ctx.stmt_fps.get(label)
+        or int(entry.get("schema_version") or 0)
+        != SEMANTIC_PLAN_SCHEMA_VERSION
+    }
+    for label in stale_semantic:
+        semantic_entries.pop(label, None)
     _sync_design_plan(ctx)
     telemetry = getattr(ctx, "telemetry", None)
     if stale and telemetry is not None:
@@ -7647,17 +7999,195 @@ def _prune_stale_design_plan(ctx: Ctx) -> set[str]:
             labels=sorted(stale),
             reason="statement_fingerprint_changed",
         )
-    return stale | stale_alternates | stale_direct
+    return stale | stale_alternates | stale_semantic | stale_direct
 
 
 DESIGN_PLAN_SCHEMA_VERSION = 6
 DESIGN_PLAN_CLOSURE_VERSION = 4
+SEMANTIC_PLAN_SCHEMA_VERSION = 1
 
 # Phase 1 may introduce only declaration-only type interfaces. Ordinary helper
 # definitions and theorems would need bodies/proofs, but Phase 2 implements only
 # blueprint targets; accepting them here either forces proof work into Phase 1
 # or leaves an untracked ``sorry`` in the final module.
 DESIGN_PLAN_HELPER_KINDS = {"structure", "inductive", "class"}
+
+
+def _render_semantic_plan_entry(label: str, entry: dict[str, Any]) -> str:
+    """Compact advisory guidance for one Phase-1 declaration.
+
+    Unlike ``_render_design_plan_entry``, this is intentionally not Lean. The
+    blueprint and deterministic dependency graph remain authoritative; these
+    notes only keep independently generated frontiers semantically coherent.
+    """
+    lines = [
+        f"NODE {label}",
+        f"REPRESENTATION: {str(entry.get('representation') or '').strip()}",
+    ]
+    vocabulary = entry.get("vocabulary") or []
+    if vocabulary:
+        lines.append("STABLE VOCABULARY:")
+        lines.extend(
+            f"- {str(item.get('name') or '').strip()}: "
+            f"{str(item.get('purpose') or '').strip()}"
+            for item in vocabulary
+            if isinstance(item, dict)
+        )
+    obligations = [
+        str(item).strip()
+        for item in entry.get("obligations") or []
+        if str(item).strip()
+    ]
+    if obligations:
+        lines.append("MUST PRESERVE:")
+        lines.extend(f"- {item}" for item in obligations)
+    requirements = entry.get("provider_requirements") or []
+    if requirements:
+        lines.append("PROVIDER CAPABILITIES:")
+        for requirement in requirements:
+            if not isinstance(requirement, dict):
+                continue
+            capabilities = ", ".join(
+                str(item).strip()
+                for item in requirement.get("capabilities") or []
+                if str(item).strip()
+            )
+            lines.append(
+                f"- {str(requirement.get('provider') or '').strip()}: "
+                f"{capabilities or '(none specified)'}"
+            )
+    return "\n".join(lines)
+
+
+def _parse_semantic_plan_entries(
+    ctx: Ctx, labels: Iterable[str], text: str
+) -> tuple[dict[str, dict[str, Any]], dict[str, list[str]]]:
+    """Parse and mechanically sanitize the compact global semantic plan.
+
+    Invalid graph edges are removed and reported rather than repaired by a
+    model. The plan is advisory, so a malformed entry can never block Phase 1;
+    callers fill missing entries with deterministic blueprint-only guidance.
+    """
+    requested = {
+        label
+        for label in labels
+        if label in ctx.nodes and ctx.stmt_fps.get(label)
+    }
+    try:
+        payload = _extract_json(text)
+    except ValueError:
+        return {}, {"<response>": ["response was not valid JSON"]}
+    contracts = payload.get("contracts") if isinstance(payload, dict) else None
+    if not isinstance(contracts, list):
+        return {}, {"<response>": ["JSON object omitted contracts array"]}
+
+    parsed: dict[str, dict[str, Any]] = {}
+    findings: dict[str, list[str]] = {}
+    vocabulary_owners: dict[str, set[str]] = {}
+    for raw in contracts:
+        if not isinstance(raw, dict):
+            continue
+        label = str(raw.get("label") or "").strip()
+        if label not in requested or label in parsed:
+            continue
+        representation = str(raw.get("representation") or "").strip()[:600]
+        vocabulary: list[dict[str, str]] = []
+        seen_names: set[str] = set()
+        for item in raw.get("vocabulary") or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            purpose = str(item.get("purpose") or "").strip()[:240]
+            if (
+                not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_'.]*", name)
+                or name in seen_names
+            ):
+                findings.setdefault(label, []).append(
+                    f"discarded invalid or duplicate vocabulary name {name!r}"
+                )
+                continue
+            seen_names.add(name)
+            vocabulary.append({"name": name, "purpose": purpose})
+            vocabulary_owners.setdefault(name, set()).add(label)
+            if len(vocabulary) >= 8:
+                break
+
+        obligations = [
+            str(item).strip()[:320]
+            for item in raw.get("obligations") or []
+            if str(item).strip()
+        ][:6]
+        allowed_providers = _statement_uses(ctx.nodes[label])
+        provider_requirements: list[dict[str, Any]] = []
+        seen_providers: set[str] = set()
+        for item in raw.get("provider_requirements") or []:
+            if not isinstance(item, dict):
+                continue
+            provider = str(item.get("provider") or "").strip()
+            if provider not in allowed_providers:
+                findings.setdefault(label, []).append(
+                    f"discarded unauthorized provider {provider!r}"
+                )
+                continue
+            if provider in seen_providers:
+                continue
+            seen_providers.add(provider)
+            capabilities = [
+                str(value).strip()[:240]
+                for value in item.get("capabilities") or []
+                if str(value).strip()
+            ][:8]
+            provider_requirements.append(
+                {"provider": provider, "capabilities": capabilities}
+            )
+        parsed[label] = {
+            "schema_version": SEMANTIC_PLAN_SCHEMA_VERSION,
+            "statement_fp": ctx.stmt_fps[label],
+            "representation": representation,
+            "vocabulary": vocabulary,
+            "obligations": obligations,
+            "provider_requirements": provider_requirements,
+        }
+
+    # A stable helper spelling cannot be owned by two unrelated nodes. Drop
+    # only the ambiguous hint; the actual Lean candidate remains free to use a
+    # pipeline-namespaced helper and still goes through every normal gate.
+    ambiguous = {
+        name for name, owners in vocabulary_owners.items() if len(owners) > 1
+    }
+    if ambiguous:
+        for label, entry in parsed.items():
+            before = entry["vocabulary"]
+            entry["vocabulary"] = [
+                item for item in before if item["name"] not in ambiguous
+            ]
+            removed = sorted(
+                item["name"] for item in before if item["name"] in ambiguous
+            )
+            if removed:
+                findings.setdefault(label, []).append(
+                    "discarded vocabulary name(s) with multiple owners: "
+                    + ", ".join(removed)
+                )
+    return parsed, findings
+
+
+def _semantic_plan_fallback_entry(ctx: Ctx, label: str) -> dict[str, Any]:
+    """Deterministic advisory entry used when planning output is incomplete."""
+    return {
+        "schema_version": SEMANTIC_PLAN_SCHEMA_VERSION,
+        "statement_fp": getattr(ctx, "stmt_fps", {}).get(label, ""),
+        "representation": (
+            "Use the exact mathematical objects and claim in this blueprint node."
+        ),
+        "vocabulary": [],
+        "obligations": [],
+        "provider_requirements": [
+            {"provider": dep, "capabilities": []}
+            for dep in sorted(_statement_uses(ctx.nodes[label]))
+        ],
+        "fallback": True,
+    }
 
 
 def _render_design_plan_entry(label: str, entry: dict[str, Any]) -> str:
@@ -7675,6 +8205,11 @@ def _render_design_plan_entry(label: str, entry: dict[str, Any]) -> str:
             kind = str(helper.get("kind") or "def").strip()
             name = str(helper.get("name") or "").strip()
             lines.append(f"- {kind} {name}{suffix}")
+            declaration = str(helper.get("declaration") or "").strip()
+            if declaration:
+                lines.append("  EXACT DECLARATION:")
+                lines.extend(f"    {line}" for line in declaration.splitlines())
+                continue
             typed_members = helper.get("members") or []
             if typed_members:
                 lines.extend(
@@ -7876,7 +8411,10 @@ _PLAN_REVISION_FINDING_CATEGORIES = {
 }
 
 
-def _findings_require_plan_revision(findings: Iterable[SkeletonFinding]) -> bool:
+def _findings_require_plan_revision(
+    ctx: Ctx | Iterable[SkeletonFinding],
+    findings: Iterable[SkeletonFinding] | None = None,
+) -> bool:
     """Return whether candidate errors originate in the interface plan.
 
     Only mechanically invalid accepted contracts belong here. An unplanned
@@ -7886,8 +8424,18 @@ def _findings_require_plan_revision(findings: Iterable[SkeletonFinding]) -> bool
     the bad output. Every Phase-1 path uses this predicate so actual contract
     closure failures do not fall through to compiler patching.
     """
+    if findings is None:
+        findings = ctx  # compatibility for direct predicate callers
+        entries: dict[str, dict[str, Any]] = {}
+    else:
+        entries = getattr(ctx, "design_plan_entries", {}) or {}
     return any(
         finding.category in _PLAN_REVISION_FINDING_CATEGORIES
+        and (
+            finding.label is None
+            or (entries.get(finding.label) or {}).get("origin")
+            != "phase1_candidate"
+        )
         for finding in findings
     )
 
@@ -7919,6 +8467,11 @@ def _design_plan_public_interface_fragments(entry: dict[str, Any]) -> list[str]:
         # Preserve useful closure evidence for a malformed declaration; the
         # canonical-target check reports the syntax defect separately.
         fragments.append(signature)
+    fragments.extend(
+        str(helper.get("declaration") or "")
+        for helper in entry.get("helpers") or []
+        if str(helper.get("declaration") or "").strip()
+    )
     fragments.extend(
         str(member.get("type") or "")
         for helper in entry.get("helpers") or []
@@ -8195,12 +8748,23 @@ def _candidate_exactly_realizes_plan(
         expected_kind = str(helper.get("kind") or "").strip()
         if actual_helper.kind != expected_kind:
             return False
+        exact_declaration = str(helper.get("declaration") or "").strip()
+        if exact_declaration and _lean_surface_tokens(
+            exact_declaration
+        ) != _lean_surface_tokens(_decl_interface_text(actual_helper)):
+            return False
         expected_members = {
             str(member.get("name") or "").strip()
             for member in helper.get("members") or []
             if isinstance(member, dict)
             and str(member.get("name") or "").strip()
         }
+        if exact_declaration and not expected_members:
+            expected_members = {
+                str(member).strip()
+                for member in helper.get("required_members") or []
+                if str(member).strip()
+            }
         if _planned_target_members(
             actual_helper.text, actual_helper.name or canonical_name
         ) != expected_members:
@@ -8325,6 +8889,16 @@ def _phase1_compile_plan_defects(
     for label in labels:
         if label not in getattr(ctx, "nodes", {}):
             continue
+        if (
+            (getattr(ctx, "design_plan_entries", {}).get(label) or {}).get(
+                "origin"
+            )
+            == "phase1_candidate"
+        ):
+            # The typed contract came from this same candidate. Compiler
+            # feedback must revise the candidate and contract together, not
+            # invoke the legacy independent plan-correction path.
+            continue
         target_unknown, plan_unknown = _plan_owned_unknown_lean_names(
             ctx, label, output
         )
@@ -8369,6 +8943,12 @@ def _plan_realized_semantic_rejections(
         label
         for label in labels
         if label in getattr(ctx, "nodes", {})
+        and (
+            (getattr(ctx, "design_plan_entries", {}).get(label) or {}).get(
+                "origin"
+            )
+            != "phase1_candidate"
+        )
         and _candidate_exactly_realizes_plan(ctx, label, code)
     }
 
@@ -8393,6 +8973,16 @@ def _revise_audit_reported_plan_defects(
         audit.labels_for("lean-generation")
         & audit.labels_for_origin("plan", "both")
     )
+    eligible = {
+        label
+        for label in eligible
+        if (
+            (getattr(ctx, "design_plan_entries", {}).get(label) or {}).get(
+                "origin"
+            )
+            != "phase1_candidate"
+        )
+    }
     if not eligible:
         return set()
     requirements = audit.plan_requirements_for(sorted(eligible))
@@ -9681,6 +10271,12 @@ def _phase1_frontier_plan_gateway(
         label
         for label in _design_plan_order(ctx, labels)
         if label in getattr(ctx, "design_plan_entries", {})
+        and (
+            (getattr(ctx, "design_plan_entries", {}).get(label) or {}).get(
+                "origin"
+            )
+            != "phase1_candidate"
+        )
         and not _uses_blueprint_direct_generation(ctx, label)
         and int(
             (getattr(ctx, "design_plan_entries", {}).get(label) or {}).get(
@@ -10430,7 +11026,7 @@ def _design_plan_context_labels(ctx: Ctx, labels: Iterable[str]) -> set[str]:
 def _design_plan_block(
     ctx: Ctx, labels: Iterable[str] | None = None, *, budget: int = 9000
 ) -> str:
-    """Render the relevant slice of the agreed interface plan for a prompt."""
+    """Render the relevant typed contract or compact semantic guidance."""
     entries = getattr(ctx, "design_plan_entries", {})
     if entries:
         selected = (
@@ -10445,7 +11041,18 @@ def _design_plan_block(
             if str(entries[label].get("target_signature") or "").strip()
         )
     else:
-        plan = getattr(ctx, "design_plan", "")
+        semantic_entries = getattr(ctx, "semantic_plan_entries", {})
+        selected = (
+            set(semantic_entries)
+            if labels is None
+            else _design_plan_context_labels(ctx, labels) & set(semantic_entries)
+        )
+        plan = "\n".join(
+            _render_semantic_plan_entry(label, semantic_entries[label])
+            for label in _design_plan_order(ctx, selected)
+        )
+        if not plan:
+            plan = getattr(ctx, "design_plan", "")
     target_labels = set(labels or [])
     direct_labels = sorted(
         label
@@ -10454,9 +11061,14 @@ def _design_plan_block(
     )
     blocks: list[str] = []
     if plan:
+        plan_kind = (
+            "Exact typed contracts already realized by Phase-1 candidates"
+            if entries
+            else "Compact semantic guidance (advisory; blueprint is authoritative)"
+        )
         blocks.append(
-            "Interface-plan hints for this wave (use only when consistent with "
-            "the blueprint and frozen Lean):\n```text\n"
+            plan_kind
+            + " (use only when consistent with the blueprint and frozen Lean):\n```text\n"
             + plan[:budget]
             + "\n```\n"
         )
@@ -10478,6 +11090,194 @@ def _design_plan_block(
             + "\n```\n"
         )
     return "\n".join(blocks)
+
+
+def _compact_dependency_contract_table(ctx: Ctx, labels: Iterable[str]) -> str:
+    """Lossless graph authority for planning without per-edge prose.
+
+    The verbose compiler-facing table repeats ownership explanations for every
+    edge. The semantic planner needs the same information, but only as stable
+    names and two adjacency lists.
+    """
+    rows: list[str] = []
+    for label in _design_plan_order(ctx, labels):
+        node = ctx.nodes[label]
+        statement = sorted(_statement_uses(node))
+        proof_only = sorted(_proof_uses(node) - set(statement))
+        rows.append(
+            json.dumps(
+                {
+                    "label": label,
+                    "lean": (
+                        str(node.lean_decl or "").strip()
+                        if node.mathlibok
+                        else _lean_name(label)
+                    ),
+                    "statement": statement,
+                    "proof_only": proof_only,
+                },
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+        )
+    return "\n".join(rows)
+
+
+def _semantic_plan_prompt(
+    ctx: Ctx,
+    labels: list[str],
+    *,
+    timeout_s: int,
+) -> str:
+    """Request compact root-aware guidance, never a Lean interface plan."""
+    roots = _blueprint_roots(ctx.nodes, labels)
+    root_text = "\n\n".join(
+        f"### {label}\n{ctx.stmt_blocks.get(label, '')[:1800]}"
+        for label in roots[:16]
+    )
+    target_text = "\n\n".join(
+        f"## {label} ({ctx.nodes[label].kind}; `{_lean_name(label)}`)\n"
+        f"{ctx.stmt_blocks.get(label, '')[:1400]}"
+        for label in labels
+    )
+    return f"""TASK: COMPACT-BLUEPRINT-SEMANTIC-PLAN
+
+Return JSON only:
+{{
+  "contracts": [
+    {{
+      "label": "exact blueprint label",
+      "representation": "brief mathematical representation choice",
+      "vocabulary": [{{"name": "stable Lean-style name", "purpose": "brief role"}}],
+      "obligations": ["mathematical content the later statement must preserve"],
+      "provider_requirements": [{{"provider": "direct statement dependency label", "capabilities": ["surface needed from that provider"]}}]
+    }}
+  ]
+}}
+
+This is a lightweight advisory plan for Phase 1, not a Lean declaration pass.
+Do NOT write Lean signatures, binder types, structure fields, constructors,
+proofs, imports, or definition bodies. The Phase-1 statement generator will
+create the exact typed contract together with the actual Lean declaration, and
+the compiler plus independent audit will judge that declaration directly.
+
+Include exactly one compact entry for every requested label. Keep each
+representation under 300 characters, at most 8 vocabulary names, at most 6
+obligations, and at most 8 capabilities per provider. Root obligations may
+shape representation choices and required semantics, but cannot add graph
+edges. The graph table is authoritative:
+- only `statement` providers may appear in `provider_requirements` or a public
+  Phase-1 signature;
+- `proof_only` providers are reserved for Phase 2 and must not shape a public
+  signature merely because a proof will use them;
+- Mathlib-owned names are already settled under the listed `lean` spelling.
+
+The blueprint remains the sole mathematical source of truth. This plan may
+coordinate vocabulary, but it may not weaken, strengthen, replace, or bundle
+away any blueprint claim. If uncertain, preserve the obligation in plain
+mathematical language and leave exact Lean typing to Phase 1.
+
+This call has a wall-clock budget of about {timeout_s}s. Do not inspect files,
+run Lean, or search libraries.
+
+Blueprint: {ctx.name}
+
+Authoritative dependency graph (JSON Lines):
+```jsonl
+{_compact_dependency_contract_table(ctx, labels)}
+```
+
+Root obligations:
+{root_text or '- none'}
+
+Nodes to coordinate ({len(labels)}):
+{target_text}
+"""
+
+
+def _ensure_phase1_semantic_plan(
+    ctx: Ctx, pending: set[str]
+) -> None:
+    """Create one bounded advisory plan without any pre-Phase-1 repair loop."""
+    ordered = _design_plan_order(ctx, pending)
+    entries = getattr(ctx, "semantic_plan_entries", {})
+    ctx.semantic_plan_entries = entries
+    stale = {
+        label
+        for label, entry in entries.items()
+        if label not in ctx.nodes
+        or entry.get("statement_fp") != ctx.stmt_fps.get(label)
+        or int(entry.get("schema_version") or 0) != SEMANTIC_PLAN_SCHEMA_VERSION
+    }
+    for label in stale:
+        entries.pop(label, None)
+    missing = [label for label in ordered if label not in entries]
+    if not missing:
+        _record(
+            ctx.telemetry,
+            "phase1_semantic_plan_reused",
+            labels=ordered,
+            entry_count=len(ordered),
+        )
+        return
+
+    # Unit-level scheduler callers intentionally use a lightweight context
+    # with no runner configuration. They exercise traversal, not planning.
+    # Populate the same deterministic fallback a failed advisory call would
+    # produce, without requiring every test double to emulate a model runner.
+    if not hasattr(ctx, "hard_timeout"):
+        for label in missing:
+            entries[label] = _semantic_plan_fallback_entry(ctx, label)
+        return
+
+    _log(
+        "==> Phase 1 semantic plan: coordinating "
+        f"{len(missing)} node(s) in one compact full-context call"
+    )
+    try:
+        result = _call_model(
+            ctx,
+            _semantic_plan_prompt(ctx, missing, timeout_s=ctx.hard_timeout),
+            purpose="phase1_semantic_plan",
+            timeout=ctx.hard_timeout,
+            effort=ctx.base_effort,
+            labels=missing,
+        )
+    except RunnerError as exc:
+        if not is_transient_error(exc) or is_environment_error(exc):
+            raise
+        # This plan is advisory: a provider/network outage must not prevent the
+        # authoritative blueprint from proceeding to Phase 1 generation. The
+        # mandatory generation call still uses the shared strict failure policy.
+        result = CallResult(status="transport_exhausted", error=str(exc))
+        _log(
+            "  compact semantic planner unavailable after transport retries; "
+            "using blueprint-only fallback guidance"
+        )
+    parsed: dict[str, dict[str, Any]] = {}
+    findings: dict[str, list[str]] = {}
+    if result.status == "ok" and result.text.strip():
+        parsed, findings = _parse_semantic_plan_entries(ctx, missing, result.text)
+    entries.update(parsed)
+    fallback_labels = [label for label in missing if label not in parsed]
+    for label in fallback_labels:
+        entries[label] = _semantic_plan_fallback_entry(ctx, label)
+    _record(
+        ctx.telemetry,
+        "phase1_semantic_plan_result",
+        labels=missing,
+        status=result.status,
+        planned_count=len(parsed),
+        fallback_count=len(fallback_labels),
+        response_chars=len(result.text or ""),
+        sanitized_findings=findings,
+        schema_version=SEMANTIC_PLAN_SCHEMA_VERSION,
+        authoritative=False,
+    )
+    _log(
+        f"  semantic plan stored {len(parsed)}/{len(missing)} model entry/entries; "
+        f"{len(fallback_labels)} blueprint-only fallback(s); no planning repair calls"
+    )
 
 
 def _blueprint_roots(nodes: dict[str, Node], labels: Iterable[str]) -> list[str]:
@@ -11236,25 +12036,26 @@ def _bulk_skeleton_prompt(
 Return exactly one Lean 4 file (one code block). No commentary.
 
 Emit the statement of EVERY target node below — statements only, no proofs.
-The interface plan above proposes shared design decisions: follow it, and
-emit declarations in dependency order so nothing is referenced before it is
-declared. The generated declarations, not the proposal, are audited for
-correctness. Deviate from the plan only where it is impossible to compile, and
-keep the deviation minimal.
+The compact guidance above coordinates semantic choices and vocabulary, but
+is not a typed Lean contract. Emit declarations in dependency order. The exact
+typed target/helper surfaces in this response are persisted together as the
+candidate contract and then checked deterministically, compiled, and audited
+against the blueprint.
 
 Per-node rules:
 - definition-kind nodes (definition/defn/construction/notation/convention):
   emit the exact public type/interface. End a `def`/`abbrev` body in
   `:= sorry`; Phase 2 implements it. A `structure`/`inductive` must expose its
   exact fields/constructors and cannot contain `sorry`. A type-valued target
-  whose complete contract is a same-node plan-owned structure/class/inductive
+  whose complete contract is a same-node structure/class/inductive returned
+  in this response
   may be a transparent alias directly to that helper; this is an interface,
   not an implementation body.
 - theorem-like nodes (lemma/proposition/theorem/corollary and EVERY other
   environment kind, e.g. claim/fact/remark): the exact statement as a
   `theorem` ending in `:= sorry`. Do NOT attempt proofs in this pass.
 - Give each blueprint node exactly the Lean name listed for it.
-- Besides plan-owned `structure`/`inductive`/`class` interfaces, emit no
+- Besides same-node `structure`/`inductive`/`class` interfaces, emit no
   auxiliary declarations. Executable helpers are not Phase-1 outline work; a
   separate mathematical obligation requires `NEEDS-DECOMPOSITION`.
 - Emit a declaration for EVERY target node listed. Coverage is checked
@@ -11340,7 +12141,11 @@ def _delivered_decl_texts(
 
 
 def _salvage_timeout_declarations(
-    ctx: Ctx, labels: list[str], partial_text: str
+    ctx: Ctx,
+    labels: list[str],
+    partial_text: str,
+    *,
+    realize_contracts: bool = False,
 ) -> tuple[ParsedModule, list[str]] | None:
     """Recover complete target declarations from a timed-out call's output.
 
@@ -11353,7 +12158,12 @@ def _salvage_timeout_declarations(
     if not partial_text or "```" not in partial_text:
         return None
     try:
-        parsed = _ingest_model_lean(ctx, labels, partial_text).parsed
+        parsed = _ingest_model_lean(
+            ctx,
+            labels,
+            partial_text,
+            realize_contracts=realize_contracts,
+        ).parsed
     except (ValueError, Exception):
         return None
     delivered_names = {decl.name for decl in parsed.decls if decl.name}
@@ -11895,7 +12705,7 @@ def _bulk_skeleton_pass(
     # Initial declarations are boilerplate only. Any Phase-1 bulk caller uses
     # the same shared planner as the normal top-down and bottom-up paths.
     if not initial_only:
-        _ensure_phase1_design_plan(ctx, set(order), sections)
+        _ensure_phase1_semantic_plan(ctx, set(order))
     # Stage 2: transcribe the plan in section-sized chunks.
     if initial_only and ctx.workers > 1:
         return _parallel_initial_emission(ctx, order, sections, alloc)
@@ -11962,7 +12772,12 @@ def _bulk_skeleton_pass(
             _log("  design pass returned a decomposition refusal; leaving it to the section loop")
             break
         try:
-            parsed = _ingest_model_lean(ctx, chunk, result.text).parsed
+            parsed = _ingest_model_lean(
+                ctx,
+                chunk,
+                result.text,
+                realize_contracts=not initial_only,
+            ).parsed
         except ValueError:
             _log("  design pass returned no Lean code; falling back")
             break
@@ -12437,7 +13252,12 @@ def _freeze_section(
                 # budget: that pattern cost 300s + 600s before any subdivision,
                 # and timeouts are the largest category of wasted model time.
                 # Instead: keep whatever the backend already emitted, then split.
-                salvage = _salvage_timeout_declarations(ctx, labels, result.partial_text)
+                salvage = _salvage_timeout_declarations(
+                    ctx,
+                    labels,
+                    result.partial_text,
+                    realize_contracts=not initial_only,
+                )
                 if salvage is not None:
                     parsed_partial, delivered = salvage
                     _log(
@@ -12784,7 +13604,12 @@ def _freeze_section(
                     section_labels=labels,
                 )
 
-            parsed = _ingest_model_lean(ctx, labels, result.text).parsed
+            parsed = _ingest_model_lean(
+                ctx,
+                labels,
+                result.text,
+                realize_contracts=not initial_only,
+            ).parsed
             missing_imports = _missing_olean_imports(parsed.imports)
             if missing_imports:
                 ctx.unavailable_imports.update(missing_imports)
@@ -12854,7 +13679,9 @@ def _freeze_section(
                 )
             patch_note = ""
             if findings:
-                plan_revision_required = _findings_require_plan_revision(findings)
+                plan_revision_required = _findings_require_plan_revision(
+                    ctx, findings
+                )
                 patched, patch_note = (None, "plan revision required")
                 if plan_revision_required:
                     evidence = _format_skeleton_findings(findings)
@@ -13816,7 +14643,7 @@ def _generate_phase1_statement_group(
             continue
         try:
             replacement_module = _ingest_model_lean(
-                ctx, labels, candidate
+                ctx, labels, candidate, realize_contracts=True
             ).parsed
             replacement_code, _ = _compose_module(
                 replacement_module.imports,
@@ -14057,7 +14884,7 @@ def _generate_uncompiled_phase1_candidate(
     )
     findings += _skeleton_deterministic_findings(code, ctx, labels)
     if findings:
-        plan_revision_required = _findings_require_plan_revision(findings)
+        plan_revision_required = _findings_require_plan_revision(ctx, findings)
         patched, note = (None, "plan revision required")
         if not plan_revision_required:
             patched, note = _targeted_patch_skeleton_decls(
@@ -14205,7 +15032,7 @@ def _revise_semantic_candidates(
         if deterministic:
             evidence = _format_skeleton_findings(deterministic)
             plan_revision_required = _findings_require_plan_revision(
-                deterministic
+                ctx, deterministic
             )
             confirmed_dependencies: dict[str, set[str]] = {}
             for finding in deterministic:
@@ -16056,14 +16883,28 @@ def _run_phase1(
     if not pending:
         return sections
 
-    # Planning is root-aware regardless of traversal. Generation below still
-    # follows ``refinement_order`` exactly; this only prevents local batches
-    # from independently reinventing graph-wide interfaces.
-    closure_findings = _ensure_phase1_design_plan(
-        ctx,
-        pending,
-        sections,
-        defer_closure_repair=True,
+    # The global pass coordinates semantics and vocabulary only. Exact typed
+    # contracts are created atomically with each Phase-1 Lean candidate below;
+    # this avoids a separate typed planning phase and its correction loop.
+    _ensure_phase1_semantic_plan(ctx, pending)
+    # Resumed state from the legacy typed planner remains valid and keeps its
+    # historical closure behavior. Fresh compact-plan runs have no typed
+    # entries yet; their closure starts when each candidate realizes one.
+    legacy_plan_labels = {
+        label
+        for label in pending
+        if label in getattr(ctx, "design_plan_entries", {})
+        and (
+            (getattr(ctx, "design_plan_entries", {}).get(label) or {}).get(
+                "origin"
+            )
+            != "phase1_candidate"
+        )
+    }
+    closure_findings: dict[str, list[str]] = (
+        _validate_design_plan_contract_closure(ctx, legacy_plan_labels)
+        if legacy_plan_labels
+        else {}
     )
     _save_ctx_state(ctx, sections)
     plan_order = _design_plan_order(ctx, pending)
@@ -16145,6 +16986,9 @@ def _run_phase1(
                 groups.append(group)
                 index += len(group)
 
+            groups = _partition_phase1_groups_by_dependency_context(
+                ctx, groups, sections
+            )
             worker_count = max(1, min(getattr(ctx, "workers", 1), len(groups)))
             _record(
                 ctx.telemetry,
@@ -16232,6 +17076,9 @@ def _run_phase1(
                 label for label in group if label in ctx.quarantined_labels
             ]
             parts = _parts_around_labels(group, isolated) if isolated else [group]
+            parts = _partition_phase1_groups_by_dependency_context(
+                ctx, parts, sections
+            )
             def refine_part(part: list[str]) -> None:
                 starting_tier = (
                     _retry_next_tier(ctx, part[0], "phase1_statement")

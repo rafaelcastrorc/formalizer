@@ -122,7 +122,7 @@ class PhaseOneTrajectoryReplayTests(unittest.TestCase):
         model = HistoricalModelReplay(case["model_sequence"], model_trace)
         frontiers: list[list[str]] = []
 
-        def seed_plan(_ctx, _pending, _sections, **_kwargs):
+        def seed_plan(_ctx, _pending, _sections=None, **_kwargs):
             if case.get("plan_response_sha256"):
                 response = (
                     PLAN_RESPONSES
@@ -156,7 +156,7 @@ class PhaseOneTrajectoryReplayTests(unittest.TestCase):
         with ExitStack() as stack:
             stack.enter_context(
                 patch(
-                    "formalize_blueprint._ensure_phase1_design_plan",
+                    "formalize_blueprint._ensure_phase1_semantic_plan",
                     side_effect=seed_plan,
                 )
             )
