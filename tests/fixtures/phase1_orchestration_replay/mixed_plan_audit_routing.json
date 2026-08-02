@@ -1,0 +1,37 @@
+{
+  "run_id": "20260801-022052",
+  "blueprint": "unconditional-unclonable-encryption",
+  "elapsed_s": 1136,
+  "payload": {
+    "accepted": false,
+    "classification": "blueprint_issue",
+    "issues": [
+      {
+        "node": "def:security-parameter-negligible",
+        "severity": "reject",
+        "reason": "The blueprint defines negligibility without requiring the polynomial denominator to be eventually positive.",
+        "missing_helpers": [],
+        "missing_blueprint_information": [
+          "Polynomial denominators in the negligibility definition must be positive, or at least eventually positive on natural inputs."
+        ]
+      },
+      {
+        "node": "def:channel-povm",
+        "severity": "reject",
+        "reason": "The proposed channel interface exposes a function called linearMap but does not include the declaration-level obligation that it is linear.",
+        "missing_helpers": [],
+        "missing_blueprint_information": []
+      }
+    ]
+  },
+  "observed_incorrect_blueprint_repair_labels": [
+    "def:channel-povm",
+    "def:security-parameter-negligible"
+  ],
+  "expected_blueprint_repair_labels": [
+    "def:security-parameter-negligible"
+  ],
+  "expected_plan_correction_labels": [
+    "def:channel-povm"
+  ]
+}

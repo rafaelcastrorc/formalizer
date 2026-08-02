@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "run_id": "20260731-151554-985af190",
+      "source_log": ".auto-blueprint/formalization/unconditional-unclonable-encryption/run-20260731-151554.log",
+      "label": "def:finite-register-operators",
+      "first_rejection_elapsed_s": 650,
+      "eventual_plan_or_blueprint_route_elapsed_s": 1571,
+      "serialized_delay_s": 921,
+      "observed_route": "lean-generation",
+      "observed_reason": "The generated declaration replaces concrete finite Hilbert/operator/tensor/density semantics with arbitrary uninterpreted types and functions.",
+      "historical_evidence_of_plan_defect": "The accepted plan exposed the same abstract interface and required correction before the node was ultimately decomposed.",
+      "expected_failure_origin": "both",
+      "expected_first_route": "plan-revision",
+      "expected_stale_plan_generation_retries": 0
+    },
+    {
+      "run_id": "20260731-151554-985af190",
+      "source_log": ".auto-blueprint/formalization/unconditional-unclonable-encryption/run-20260731-151554.log",
+      "label": "def:key-space",
+      "first_rejection_elapsed_s": 2501,
+      "eventual_plan_or_blueprint_route_elapsed_s": 2698,
+      "serialized_delay_s": 197,
+      "observed_route": "lean-generation",
+      "observed_reason": "The abstract Key type permits duplicate keys and missing coordinate pairs instead of defining exactly the valid pairs.",
+      "historical_evidence_of_plan_defect": "The retry exhausted both tiers and then revised the plan from the same semantic evidence.",
+      "expected_failure_origin": "both",
+      "expected_first_route": "plan-revision",
+      "expected_stale_plan_generation_retries": 0
+    },
+    {
+      "run_id": "20260731-133708-5eb8ce81",
+      "source_log": ".auto-blueprint/formalization/unconditional-unclonable-encryption/run-20260731-133708.log",
+      "label": "def:finite-register-operators",
+      "first_rejection_elapsed_s": 511,
+      "eventual_plan_or_blueprint_route_elapsed_s": 669,
+      "serialized_delay_s": 158,
+      "observed_route": "lean-generation",
+      "observed_reason": "The generated declaration used arbitrary uninterpreted types in place of the concrete operator interface.",
+      "historical_evidence_of_plan_defect": "The contract was decomposed after the revised plan still could not expose the required concrete interface.",
+      "expected_failure_origin": "both",
+      "expected_first_route": "plan-revision",
+      "expected_stale_plan_generation_retries": 0
+    }
+  ]
+}

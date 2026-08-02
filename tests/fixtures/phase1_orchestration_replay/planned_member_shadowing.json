@@ -1,0 +1,13 @@
+{
+  "source_run": "20260801-074355",
+  "blueprint": "unconditional-unclonable-encryption",
+  "label": "def:positive-loewner-density",
+  "first_failure_s": 185,
+  "last_observed_repeat_s": 1637,
+  "outer_retries_observed": 4,
+  "shadowed_member": "DensityOperator",
+  "incorrect_global_rewrite": "_autobp_4e71d01d1b0e_DensityOperator",
+  "observed_failure": "a dependent structure field reference was rewritten to an equally named global planned helper",
+  "required_invariant": "planned structure and class members shadow bare global helper aliases throughout their declaration body",
+  "downstream_alias_resolution_must_remain_enabled": true
+}

@@ -1,0 +1,29 @@
+{
+  "source_run": "20260801-054159",
+  "blueprint": "unconditional-unclonable-encryption",
+  "label": "def:finite-register-operators",
+  "observed_events": [
+    {
+      "elapsed_s": 457,
+      "event": "phase1_design_plan_correction",
+      "tier": "base"
+    },
+    {
+      "elapsed_s": 614,
+      "event": "phase1_design_plan_correction",
+      "tier": "escalation"
+    },
+    {
+      "elapsed_s": 926,
+      "event": "phase1_design_plan_correction",
+      "tier": "escalation"
+    }
+  ],
+  "semantic_rejection": "The declaration replaces the mathematical interfaces in the blueprint by unconstrained abstract data and placeholder Prop fields.",
+  "required_lifecycle": [
+    "correct_interface_plan_once",
+    "generate_from_blueprint_after_corrected_plan_exhausts",
+    "decompose_only_after_blueprint_direct_generation_exhausts"
+  ],
+  "maximum_plan_corrections_for_statement_fingerprint": 1
+}

@@ -1,0 +1,11 @@
+{
+  "source_run": "20260801-070856",
+  "blueprint": "unconditional-unclonable-encryption",
+  "elapsed_s": 979,
+  "invalid_import": "import Mathlib.Data.Polynomial.Basic",
+  "valid_module_present": "import Mathlib.Algebra.Polynomial.Basic",
+  "detector_result": "unavailable",
+  "observed_bug": "patch import was detected only after it had already been merged into the persistent skeleton",
+  "required_boundary": "filter unavailable imports from the final merged ParsedModule",
+  "expected_repair_trials_consumed": 0
+}

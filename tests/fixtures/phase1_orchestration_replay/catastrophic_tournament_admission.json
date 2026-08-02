@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "source_run": "20260801-083320",
+  "blueprint": "unconditional-unclonable-encryption",
+  "node_count": 52,
+  "initial_frontier": [
+    "def:security-parameter-negligible",
+    "def:finite-register-operators",
+    "def:single-qubit-paulis-cliffords"
+  ],
+  "candidates": {
+    "A": {
+      "status": "ok",
+      "duration_s": 281.9727894169919,
+      "score": [0, 52, 124, 3],
+      "blocked_initial_frontier": 3
+    },
+    "B": {
+      "status": "timeout",
+      "duration_s": 300.0170325830113,
+      "planned_count": 0
+    },
+    "recovery": {
+      "status": "invalid_empty_contracts",
+      "duration_s": 17.569425916008186,
+      "response_chars": 16,
+      "planned_count": 0
+    }
+  },
+  "observed_selected_candidate": "A",
+  "observed_phase1_started": true,
+  "required_behavior": {
+    "admit_degraded_plan": false,
+    "restart_complete_tournament": true,
+    "consume_existing_repair_trial": true,
+    "authorize_blueprint_edit": false
+  }
+}

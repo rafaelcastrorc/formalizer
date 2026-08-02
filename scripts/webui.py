@@ -859,6 +859,7 @@ def libraries_payload(refresh: bool = False) -> dict:
         return {"ok": False, "message": f"resolver unavailable: {exc}"}
     try:
         current = lean_libs.current_state()
+        build_status = lean_libs.selected_build_status(current)
         known = sorted(lean_libs.KNOWN_LIBS)
         # Project-level: a library you intend to adopt must be in the
         # resolution BEFORE it is installed, or the resolver keeps proposing a
@@ -883,6 +884,7 @@ def libraries_payload(refresh: bool = False) -> dict:
             "current": current,
             "known": known,
             "selected": selected,
+            "build_status": build_status,
             "resolution": resolution,
             "checked_age_s": age_s,
             # Every pinned library must be present at its pin - checking only
@@ -892,6 +894,10 @@ def libraries_payload(refresh: bool = False) -> dict:
                 resolution.get("feasible")
                 and resolution.get("toolchain") == current.get("toolchain")
                 and lean_libs._pins_satisfied(resolution.get("pins") or {}, current)
+                and all(
+                    status.get("ready")
+                    for status in build_status.values()
+                )
             ),
         }
     except Exception as exc:  # noqa: BLE001
@@ -1000,6 +1006,7 @@ def library_update_brief(refresh: bool = False) -> dict:
             cached = res.to_dict() | {"libs": selected}
             lean_libs.save_cache(cached)
         cur = lean_libs.current_state()
+        build_status = lean_libs.selected_build_status(cur)
         checkouts = cur.get("checkouts", {})
         pins = cached.get("pins") or {}
         stale = cached.get("staleness_days") or {}
@@ -1014,6 +1021,9 @@ def library_update_brief(refresh: bool = False) -> dict:
                 # Not installed at all, or installed at a different revision.
                 "needs_update": bool(want) and have != want,
                 "behind_days": stale.get(name),
+                "build_ready": bool(build_status.get(name, {}).get("ready")),
+                "build_reason": build_status.get(name, {}).get("reason", ""),
+                "probe_module": build_status.get(name, {}).get("module", ""),
             })
         tc_now, tc_want = cur.get("toolchain"), cached.get("toolchain")
         return {
@@ -1024,7 +1034,9 @@ def library_update_brief(refresh: bool = False) -> dict:
             "toolchain_installed": tc_now,
             "toolchain_changes": bool(tc_want) and tc_now != tc_want,
             "rows": rows,
+            "needs_build": any(not r["build_ready"] for r in rows),
             "needs_update": any(r["needs_update"] for r in rows)
+                            or any(not r["build_ready"] for r in rows)
                             or (bool(tc_want) and tc_now != tc_want),
             "checked_age_s": int(time.time() - cached.get("resolved_at", 0)),
         }
@@ -1897,8 +1909,10 @@ async function loadLibraries(refresh){
   if (r.feasible){
     for (const [name, sha] of Object.entries(r.pins || {})){
       const d0 = (r.staleness_days || {})[name];
+      const build = (d.build_status || {})[name] || {};
       html += `<tr><td>${esc(name)}</td><td><code>${esc(sha.slice(0,12))}</code></td>`
-           +  `<td>${d0 === 0 ? 'head' : d0 + 'd'}</td></tr>`;
+           +  `<td>${d0 === 0 ? 'head' : d0 + 'd'}</td>`
+           +  `<td>${build.ready ? '<span class="dot built"></span> ready' : '<b>build required</b>'}</td></tr>`;
     }
   }
   html += '</table>';
@@ -1909,9 +1923,11 @@ async function loadLibraries(refresh){
     ? '<div class="hint">' + Object.entries(r.groups).map(([tc, ns]) =>
         `${esc(tc.split(':').pop())}: ${ns.map(esc).join(', ')}`).join('<br>') + '</div>'
     : '';
+  const needsBuild = Object.values(d.build_status || {}).some(s => !s.ready);
   const status = d.up_to_date
     ? '<span class="dot built"></span> up to date'
-    : (r.feasible ? '<b>differs from installed</b> &mdash; applying rebuilds Lean state' : '');
+    : (r.feasible && needsBuild ? '<b>build required</b> &mdash; prepare selected libraries'
+       : (r.feasible ? '<b>differs from installed</b> &mdash; applying rebuilds Lean state' : ''));
   const picker = (d.known || []).map(n => {
     const on = (d.selected || []).includes(n);
     const lock = n === 'mathlib' ? ' disabled' : '';
@@ -1920,6 +1936,7 @@ async function loadLibraries(refresh){
   }).join('');
   body.innerHTML = `
     <div class="hint">Keep compatible:</div><div style="margin:.3rem 0">${picker}</div>`;
+  html = html.replace('<th>behind head</th>', '<th>behind head</th><th>compile status</th>');
   body.innerHTML += `
     <div>installed: <code>${esc((cur.toolchain||'?').split(':').pop())}</code>
          &middot; mathlib <code>${esc(String(cur.mathlib_rev||'').slice(0,12))}</code></div>
@@ -1927,7 +1944,7 @@ async function loadLibraries(refresh){
     ${groups}${html}
     <button type="button" onclick="loadLibraries(true)">Check now</button>
     ${(!d.up_to_date && r.feasible)
-        ? ` <button type="button" onclick="applyLibraries(${JSON.stringify(d.selected).replace(/"/g,'&quot;')})">Apply &amp; rebuild</button>`
+        ? ` <button type="button" onclick="applyLibraries(${JSON.stringify(d.selected).replace(/"/g,'&quot;')})">${needsBuild ? 'Build / repair libraries' : 'Apply &amp; rebuild'}</button>`
         : ''}`;
 }
 
@@ -2008,9 +2025,10 @@ async function selectLibraries(){
 }
 
 async function applyLibraries(libs){
-  if (!confirm('Adopt the resolved library set?\n\nThis rewrites lean-toolchain and the '
-             + 'managed block of lakefile.lean, then rebuilds. Frozen Lean statements '
-             + 'built against the old toolchain will need re-verifying.\n\n'
+  if (!confirm('Prepare the selected Lean libraries?\n\nIf pins differ, this rewrites '
+             + 'lean-toolchain and the managed block of lakefile.lean. It then builds '
+             + 'missing library artifacts and verifies an actual import. Frozen Lean '
+             + 'statements need re-verifying only if the toolchain changes.\n\n'
              + 'lean_libs.py restores every file it touched if any step fails.')) return;
   const r = await fetch('/api/run', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({action:'libraries', libs})});
@@ -2183,10 +2201,12 @@ function libUpdateHtml(L){
     const want = r.resolved ? r.resolved.slice(0,10) : '?';
     const behind = (r.behind_days === 0) ? 'head'
                  : (r.behind_days == null ? '' : r.behind_days + 'd behind head');
+    const build = r.build_ready ? '<span class="dot built"></span> ready'
+                : `<b>build required</b>${r.build_reason ? ' &mdash; ' + esc(r.build_reason) : ''}`;
     rows += `<tr><td>${esc(r.name)}</td>`
          +  `<td><code>${esc(have)}</code></td>`
          +  `<td>${r.needs_update ? '&rarr; <code>' + esc(want) + '</code>' : 'current'}</td>`
-         +  `<td class="hint">${esc(behind)}</td></tr>`;
+         +  `<td>${build}</td><td class="hint">${esc(behind)}</td></tr>`;
   }
   const tc = L.toolchain_changes
     ? `<div><b>toolchain</b> <code>${esc((L.toolchain_installed||'').split(':').pop())}</code>`
@@ -2194,13 +2214,14 @@ function libUpdateHtml(L){
       + ` &mdash; changing it rebuilds the Lean state</div>`
     : `<div class="hint">toolchain <code>${esc((L.toolchain||'').split(':').pop())}</code></div>`;
   const action = L.needs_update
-    ? ` <button type="button" onclick="applyLibraries()">Update libraries</button>`
+    ? ` <button type="button" onclick="applyLibraries()">${L.needs_build ? 'Build / repair libraries' : 'Update libraries'}</button>`
     : '';
   return `<div style="margin-top:9px">`
-       + (L.needs_update ? `<b>Updates available</b>` : `Libraries up to date`)
+       + (L.needs_build ? `<b>Library build required</b>`
+          : (L.needs_update ? `<b>Updates available</b>` : `Libraries up to date`))
        + ` <span class="hint">&middot; checked ${age}</span>`
        + `<table class="libs" style="margin-top:5px">`
-       + `<tr><th>library</th><th>installed</th><th>resolved</th><th></th></tr>${rows}</table>`
+       + `<tr><th>library</th><th>installed</th><th>resolved</th><th>compile status</th><th></th></tr>${rows}</table>`
        + tc
        + `<button type="button" onclick="checkLean(true)">Check for updates</button>${action}</div>`;
 }
@@ -2230,7 +2251,9 @@ async function checkLean(refreshLibs){
     const L = j.libraries;
     // Keep the headline outside the fold: collapsed still has to answer
     // "is Lean ready" and "is anything out of date".
-    const badge = (L && L.ok && L.feasible && L.needs_update)
+    const badge = (L && L.ok && L.feasible && L.needs_build)
+      ? `<span class="badge">library build required</span>`
+      : (L && L.ok && L.feasible && L.needs_update)
       ? `<span class="badge">updates available</span>`
       : (L && L.ok && !L.feasible ? `<span class="badge">no common toolchain</span>` : '');
     // Something needing attention opens the box; a clean check leaves it as-is.

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "run_id": "20260731-095949",
+      "source_log": ".auto-blueprint/formalization/unconditional-unclonable-encryption/run-20260731-095949.log",
+      "stage": "phase1_statement_generation",
+      "label": "def:uniform-finite-sampling",
+      "first_repeated_retry": 10,
+      "last_repeated_retry": 100,
+      "repeated_candidate_sha256_count": 91,
+      "model_calls_during_repeated_retries": 0,
+      "incorrectly_consumed_repair_trials": 91,
+      "lean_errors": [
+        "unknown namespace `BigOperators`",
+        "expected token"
+      ],
+      "expected_zero_call_reuses_after_lean_failure": 0,
+      "expected_next_action": "model_revision",
+      "candidate_must_remain_revision_context": true
+    }
+  ]
+}

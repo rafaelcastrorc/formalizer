@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "run_id": "20260731-114400",
+      "source_log": ".auto-blueprint/formalization/unconditional-unclonable-encryption/run-20260731-114400.log",
+      "stage": "phase1_statement_generation",
+      "label": "def:security-parameter-negligible",
+      "retained_candidate_sha256": "4fd759aba90d40e8a26218911ba5ee0b1c96cd4cde1986a80ce14a39b990b547",
+      "retained_lean_status": "passed",
+      "retained_semantic_status": "rejected",
+      "distinct_revision_sha256": "0b8f730e945c8709fb21e91090795feb12a2f1ac82c0a62ae29c4c3903e48eeb",
+      "distinct_revision_lean_status": "passed",
+      "recorded_transition": "no_measurable_progress",
+      "expected_transition": "semantic_rejection_revision",
+      "expected_next_action": "semantic_audit_revision"
+    }
+  ]
+}

@@ -1,0 +1,1220 @@
+{
+  "contracts": [
+    {
+      "label": "cor:classical-cpwl-bound",
+      "target_signature": "theorem cor_classical_cpwl_bound (n : ℕ) : (def_cpwl_reluset.CPWL n) ⊆ (def_cpwl_reluset.reluset n (⌈Real.log ((n + 1 : ℕ) : ℝ) / Real.log 2⌉₊))",
+      "helpers": [],
+      "decisions": [
+        "State the corollary as the subset formulation, not as an existential network statement.",
+        "Use def_cpwl_reluset.CPWL and def_cpwl_reluset.reluset as independently defined sets.",
+        "The depth parameter is ceiling log base 2 of n+1.",
+        "Do not encode Wang--Sun or binary-tree representation into reluset."
+      ]
+    },
+    {
+      "label": "conj:hbdss-max-depth",
+      "target_signature": "theorem conj_hbdss_max_depth : ∀ n : ℕ, 1 ≤ n → def_maxn.MAX n ∈ def_cpwl_reluset.CPWL n ∧ ¬ def_maxn.MAX n ∈ def_cpwl_reluset.reluset n ((⌈Real.log (n : ℝ) / Real.log 2⌉₊) - 1)",
+      "helpers": [],
+      "decisions": [
+        "Formalize the sharp-depth conjecture as a lower-bound/non-membership statement.",
+        "The consequently optimal CPWL claim is explanatory and should not be folded into definitions.",
+        "Do not redefine reluset to make the conjecture true by construction."
+      ]
+    },
+    {
+      "label": "thm:cpwl-improved-bound",
+      "target_signature": "theorem thm_cpwl_improved_bound (n : ℕ) (hn : 3 ≤ n) : def_cpwl_reluset.CPWL n = def_cpwl_reluset.reluset n ((⌈Real.log ((n - 1 : ℕ) : ℝ) / Real.log 3⌉₊) + 1)",
+      "helpers": [],
+      "decisions": [
+        "State equality of independently defined function sets.",
+        "Keep the lower inclusion available from lem_relu_network_cpwl rather than built into reluset.",
+        "Depth is ceiling log base 3 of n-1 plus one."
+      ]
+    },
+    {
+      "label": "cor:near-tight-decimal",
+      "target_signature": "theorem cor_near_tight_decimal : ∀ m : ℕ, 4 ≤ m → def_relu_network.DecimalFractionDepthGap (def_maxn.MAX m) (⌈Real.log ((m - 2 : ℕ) : ℝ) / Real.log 3⌉₊ + 1) (⌈Real.log (m : ℝ) / Real.log 3⌉₊) ≤ 1",
+      "helpers": [],
+      "decisions": [
+        "Use the decimal-fraction interface owned by def_relu_network.",
+        "Compare the constructed depth from cor_max_arbitrary_depth against the AHM lower bound.",
+        "The claim is about hidden-layer gap at most one, not exact optimality."
+      ]
+    },
+    {
+      "label": "lem:support-polytope-equivalence",
+      "target_signature": "theorem lem_support_polytope_equivalence (n : ℕ) : ∀ f : EuclideanSpace ℝ (Fin n) → ℝ, def_cpwl.CPWL f ∧ ConvexOn ℝ Set.univ f ∧ PositivelyHomogeneous ℝ f ↔ ∃! P : Set (EuclideanSpace ℝ (Fin n)), def_polytope.Polytope P ∧ f = def_support_newton.support P",
+      "helpers": [],
+      "decisions": [
+        "Expose uniqueness of the representing polytope with ∃!.",
+        "Do not make Newton polytope a total opaque choice that assumes existence.",
+        "Convexity, positive homogeneity, and CPWL are all part of the characterization."
+      ]
+    },
+    {
+      "label": "lem:valuation-identity",
+      "target_signature": "theorem lem_valuation_identity {n : ℕ} {P Q : Set (EuclideanSpace ℝ (Fin n))} (hP : def_polytope.Polytope P) (hQ : def_polytope.Polytope Q) (hU : def_polytope.Polytope (P ∪ Q)) : def_minkowski_join.msum (P ∪ Q) (P ∩ Q) = def_minkowski_join.msum P Q",
+      "helpers": [],
+      "decisions": [
+        "State the equation using independently defined union, intersection, and Minkowski sum.",
+        "Require P, Q, and P ∪ Q to be polytopes.",
+        "Do not encode the valuation identity into msum."
+      ]
+    },
+    {
+      "label": "lem:faces-preserve-Pk",
+      "target_signature": "theorem lem_faces_preserve_Pk {n k m : ℕ} {Q : Fin m → Set (EuclideanSpace ℝ (Fin n))} (hcell : ∀ i, def_Pk.InPk k (Q i)) (hface : ∀ S : Finset (Fin m), S.Nonempty → ∃ i ∈ S, def_Pk.IsFace (⋂ j ∈ S, Q j) (Q i)) : ∀ S : Finset (Fin m), S.Nonempty → def_Pk.InPk k (⋂ j ∈ S, Q j)",
+      "helpers": [],
+      "decisions": [
+        "Quantify over finite indexed subdivisions abstractly.",
+        "Use nonempty finite intersections Q_S.",
+        "Face preservation must be a property in def_Pk, not hidden in InPk."
+      ]
+    },
+    {
+      "label": "lem:delta4-subdivision-to-M",
+      "target_signature": "theorem lem_delta4_subdivision_to_M : def_m_function.M = fun x => (1 / 2 : ℝ) * (def_p1.P x + def_p2.P x + def_p3.P x + def_p4.P x + def_q.Q x - def_r13.R x - def_r14.R x - def_r23.R x - def_r24.R x)",
+      "helpers": [],
+      "decisions": [
+        "Record the signed formula for M as the public consequence.",
+        "The support-function correspondence of cells is proof content.",
+        "Do not define M by appealing to this lemma."
+      ]
+    },
+    {
+      "label": "rem:higher-dimensional-intuition",
+      "target_signature": "theorem rem_higher_dimensional_intuition : ∀ a b : ℕ, def_calT.RhombicStep a b ∧ def_calT.AlternativeReductionFactor 3",
+      "helpers": [],
+      "decisions": [
+        "Represent the remark as a semantic bridge from Claim 5 to ternary reduction.",
+        "Do not introduce new operations beyond def_calT interfaces.",
+        "The log_3 upper bound is already supplied by thm_max_3n_plus_2."
+      ]
+    },
+    {
+      "label": "conj:constant-depth-max",
+      "target_signature": "theorem conj_constant_depth_max : ∃ k : ℕ, ∀ m : ℕ, 1 ≤ m → def_maxn.MAX m ∈ def_cpwl_reluset.reluset m k",
+      "helpers": [],
+      "decisions": [
+        "State the open question as an existential uniform constant depth.",
+        "Do not assert k = 2 in the main conjecture.",
+        "Use reluset membership for representability."
+      ]
+    },
+    {
+      "label": "conj:max6-two-layers",
+      "target_signature": "theorem conj_max6_two_layers : def_maxn.MAX 6 ∈ def_cpwl_reluset.reluset 6 2",
+      "helpers": [],
+      "decisions": [
+        "State the open case directly as two-layer representability of MAX_6.",
+        "Keep prop_max5_depth_two as supporting context only.",
+        "Do not generalize to all m."
+      ]
+    },
+    {
+      "label": "lem:relu-network-cpwl",
+      "target_signature": "theorem lem_relu_network_cpwl {n k : ℕ} {f : EuclideanSpace ℝ (Fin n) → ℝ} (hf : def_relu_network.Representable n k f) : def_cpwl.CPWL f",
+      "helpers": [],
+      "decisions": [
+        "This supplies the reluset subset CPWL direction externally.",
+        "Do not build CPWL into Representable.",
+        "The computed function is a scalar-valued function on EuclideanSpace."
+      ]
+    },
+    {
+      "label": "lem:binary-tree-max",
+      "target_signature": "theorem lem_binary_tree_max (m : ℕ) (hm : 1 ≤ m) : def_relu_network.Representable m (⌈Real.log (m : ℝ) / Real.log 2⌉₊) (def_maxn.MAX m)",
+      "helpers": [],
+      "decisions": [
+        "Use network representability rather than reluset membership.",
+        "Depth is ceiling log base 2 of m.",
+        "The binary max primitive comes from lem_max2_one_hidden."
+      ]
+    },
+    {
+      "label": "thm:wang-sun-representation",
+      "target_signature": "theorem thm_wang_sun_representation {n : ℕ} {f : EuclideanSpace ℝ (Fin n) → ℝ} (hf : def_cpwl.CPWL f) : ∃ s : ℕ, ∃ A : Fin s → def_affine_map.AffineMap n (n + 1), ∃ σ : Fin s → ℝ, (∀ i, σ i = 1 ∨ σ i = -1) ∧ ∀ x, f x = ∑ i : Fin s, σ i * def_maxn.MAX (n + 1) ((A i).toFun x)",
+      "helpers": [],
+      "decisions": [
+        "Represent the finite family with Fin s.",
+        "Signs are real scalars constrained to ±1.",
+        "Affine maps target dimension n+1.",
+        "Do not put this representation inside the definition of CPWL."
+      ]
+    },
+    {
+      "label": "cor:max-arbitrary-depth",
+      "target_signature": "theorem cor_max_arbitrary_depth (m : ℕ) (hm : 4 ≤ m) : def_relu_network.Representable m ((⌈Real.log ((m - 2 : ℕ) : ℝ) / Real.log 3⌉₊) + 1) (def_maxn.MAX m)",
+      "helpers": [],
+      "decisions": [
+        "State representability of MAX_m for m ≥ 4.",
+        "Depth is ceiling log base 3 of m-2 plus one.",
+        "Do not mention CPWL-reluset unless a later theorem converts it."
+      ]
+    },
+    {
+      "label": "rem:binary-fraction-weights",
+      "target_signature": "theorem rem_binary_fraction_weights : def_relu_network.BinaryFractionConstruction thm_max_3n_plus_2 ∧ def_relu_network.DecimalFractionConstruction thm_max_3n_plus_2",
+      "helpers": [],
+      "decisions": [
+        "Record that construction weights are dyadic and hence decimal fractions.",
+        "The assertion attaches to constructions from Claims 5 and 7 and Theorem 1.",
+        "Do not alter the general ReLU network definition to require decimal weights."
+      ]
+    },
+    {
+      "label": "lem:ahm-lower-bound",
+      "target_signature": "theorem lem_ahm_lower_bound (m k : ℕ) (hm : 1 ≤ m) (hnet : def_relu_network.DecimalRepresentable m k (def_maxn.MAX m)) : ⌈Real.log (m : ℝ) / Real.log 3⌉₊ ≤ k",
+      "helpers": [],
+      "decisions": [
+        "State as a lower bound on any decimal-fraction representation depth.",
+        "Do not claim existence of a decimal-fraction representation.",
+        "Use the decimal subinterface from def_relu_network."
+      ]
+    },
+    {
+      "label": "lem:subdivision-upper-bound",
+      "target_signature": "theorem lem_subdivision_upper_bound {n k m : ℕ} (hcover : def_Pk.SimplexSubdivisionByPkIntersections n k m) : def_relu_network.RequiredDepth (def_maxn.MAX n) ≤ k",
+      "helpers": [],
+      "decisions": [
+        "Package the subdivision hypotheses in def_Pk-owned interface.",
+        "Conclusion is an upper bound on required hidden layers for MAX_n.",
+        "Do not define RequiredDepth from this lemma."
+      ]
+    },
+    {
+      "label": "constr:delta4-P2",
+      "target_signature": "def constr_delta4_P2 : Delta4P2Subdivision",
+      "helpers": [
+        {
+          "name": "Delta4P2Subdivision",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "cells",
+              "type": "Fin 4 → Set (EuclideanSpace ℝ (Fin 5))"
+            },
+            {
+              "name": "covers_delta4",
+              "type": "def_convex_hull.simplex 4 = ⋃ i, cells i"
+            },
+            {
+              "name": "cell_in_P2",
+              "type": "∀ i : Fin 4, def_Pk.InPk 2 (cells i)"
+            },
+            {
+              "name": "cone_formula",
+              "type": "∀ i : Fin 4, cells i = def_minkowski_join.join (constr_delta3_rhombic.remainingVertexJoin i) (constr_delta3_rhombic.rhombicCell i)"
+            }
+          ],
+          "purpose": "Interface for the four-cell Delta_4 subdivision into P_2 cells."
+        }
+      ],
+      "decisions": [
+        "Expose cells, cover property, and P_2 membership explicitly.",
+        "Keep rhombic-pyramid data referenced through constr_delta3_rhombic.",
+        "Do not encode later signed M formula here."
+      ]
+    },
+    {
+      "label": "thm:max-3n-plus-2",
+      "target_signature": "theorem thm_max_3n_plus_2 (n : ℕ) (hn : 1 ≤ n) : def_maxn.MAX (3 ^ n + 2) ∈ def_cpwl_reluset.reluset (3 ^ n + 2) (n + 1)",
+      "helpers": [],
+      "decisions": [
+        "Use reluset membership for the final MAX construction.",
+        "The exponent n is positive as in the blueprint.",
+        "Do not generalize to arbitrary m here."
+      ]
+    },
+    {
+      "label": "lem:newton-max-simplex",
+      "target_signature": "theorem lem_newton_max_simplex (n : ℕ) (hn : 1 ≤ n) : def_support_newton.newton (def_maxn.MAX n) = def_convex_hull.simplex (n - 1)",
+      "helpers": [],
+      "decisions": [
+        "State Newton polytope equality independently of support equivalence.",
+        "Use the simplex interface from def_convex_hull.",
+        "MAX_n remains the function from def_maxn."
+      ]
+    },
+    {
+      "label": "lem:Pk-sum-closed",
+      "target_signature": "theorem lem_Pk_sum_closed {n k m : ℕ} {P : Fin m → Set (EuclideanSpace ℝ (Fin n))} (hP : ∀ i, def_Pk.InPk k (P i)) : def_Pk.InPk k (Finset.univ.sum fun i : Fin m => P i)",
+      "helpers": [],
+      "decisions": [
+        "Finite Minkowski sum uses the Minkowski additive structure exposed by def_minkowski_join.",
+        "Closure is for fixed ambient dimension and fixed k.",
+        "Do not make InPk definition close under sums by fiat."
+      ]
+    },
+    {
+      "label": "lem:relu-depth-formal-difference",
+      "target_signature": "theorem lem_relu_depth_formal_difference {n : ℕ} {X : Set (EuclideanSpace ℝ (Fin n))} (hX : def_polytope.Polytope X) : def_relu_network.RequiredDepth (def_support_newton.support X) = sInf {k : ℕ | ∃ P Q, def_Pk.InPk k P ∧ def_Pk.InPk k Q ∧ def_formal_difference.FormalDifference X P Q}",
+      "helpers": [],
+      "decisions": [
+        "State the minimum-depth characterization as equality with an infimum set.",
+        "FormalDifference is independent of support functions.",
+        "Do not define RequiredDepth via this theorem."
+      ]
+    },
+    {
+      "label": "lem:full-additivity",
+      "target_signature": "theorem lem_full_additivity {n m : ℕ} {X : Set (EuclideanSpace ℝ (Fin n))} {Q : Fin m → Set (EuclideanSpace ℝ (Fin n))} (hX : def_polytope.Polytope X) (hQ : ∀ i, def_polytope.Polytope (Q i)) (hcover : X = ⋃ i, Q i) : def_minkowski_join.msum X (Finset.univ.filter (fun S : Finset (Fin m) => S.Nonempty ∧ Even S.card)).sumIntersections Q = (Finset.univ.filter (fun S : Finset (Fin m) => S.Nonempty ∧ Odd S.card)).sumIntersections Q",
+      "helpers": [],
+      "decisions": [
+        "Separate even and odd nonempty subsets as in the valuation formula.",
+        "Q_S is the finite intersection over S.",
+        "The specialized sumIntersections notation must be implemented from existing Minkowski sum vocabulary."
+      ]
+    },
+    {
+      "label": "constr:delta3-rhombic",
+      "target_signature": "def constr_delta3_rhombic : Delta3RhombicSubdivision",
+      "helpers": [
+        {
+          "name": "Delta3RhombicSubdivision",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "vertex",
+              "type": "Fin 4 → EuclideanSpace ℝ (Fin 3)"
+            },
+            {
+              "name": "midpoint",
+              "type": "Fin 4 → Fin 4 → EuclideanSpace ℝ (Fin 3)"
+            },
+            {
+              "name": "cell",
+              "type": "Fin 4 → Set (EuclideanSpace ℝ (Fin 3))"
+            },
+            {
+              "name": "simplex_cover",
+              "type": "def_convex_hull.convexHull (Set.range vertex) = ⋃ i, cell i"
+            },
+            {
+              "name": "apex_base_table",
+              "type": "RhombicApexBaseTable vertex midpoint cell"
+            }
+          ],
+          "purpose": "Canonical data for the four rhombic pyramids subdividing Delta_3."
+        },
+        {
+          "name": "RhombicApexBaseTable",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "row0",
+              "type": "True"
+            },
+            {
+              "name": "row1",
+              "type": "True"
+            },
+            {
+              "name": "row2",
+              "type": "True"
+            },
+            {
+              "name": "row3",
+              "type": "True"
+            }
+          ],
+          "purpose": "Stable placeholder for the four apex/base incidences listed in the blueprint."
+        }
+      ],
+      "decisions": [
+        "Vertices are the four listed points in R^3.",
+        "Midpoints x_ij are literal arithmetic midpoints.",
+        "Expose the subdivision cover and cell data; P_k membership is used later."
+      ]
+    },
+    {
+      "label": "def:cpwl-reluset",
+      "target_signature": "def def_cpwl_reluset : CpwlRelusetInterface",
+      "helpers": [
+        {
+          "name": "CpwlRelusetInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "CPWL",
+              "type": "ℕ → Set (EuclideanSpace ℝ (Fin ·) → ℝ)"
+            },
+            {
+              "name": "reluset",
+              "type": "(n : ℕ) → ℕ → Set (EuclideanSpace ℝ (Fin n) → ℝ)"
+            },
+            {
+              "name": "cpwl_eq",
+              "type": "∀ n f, f ∈ CPWL n ↔ def_cpwl.CPWL f"
+            },
+            {
+              "name": "reluset_eq",
+              "type": "∀ n k f, f ∈ reluset n k ↔ def_cpwl.CPWL f ∧ def_relu_network.Representable n k f"
+            }
+          ],
+          "purpose": "Shared interface for CPWL_n and representable CPWL subsets reluset_{n,k}."
+        }
+      ],
+      "decisions": [
+        "CPWL_n and reluset_{n,k} are sets of scalar functions on R^n.",
+        "Reluset includes both CPWL and representability, but CPWL is justified separately by lem_relu_network_cpwl.",
+        "Do not build any upper bound into reluset."
+      ]
+    },
+    {
+      "label": "prop:max5-depth-two",
+      "target_signature": "theorem prop_max5_depth_two : def_relu_network.RequiredDepth (def_maxn.MAX 5) = 2",
+      "helpers": [],
+      "decisions": [
+        "State exact minimal hidden depth as an equality.",
+        "Use max5-equals-m for upper realization and max3 lower bound for lower obstruction.",
+        "Do not encode exact depth in def_maxn."
+      ]
+    },
+    {
+      "label": "lem:claim6",
+      "target_signature": "theorem lem_claim6 {n k : ℕ} (hn : 1 ≤ n) (h : def_relu_network.Representable (4 * (3 ^ n - 1) + 2) k (def_tab.T (3 ^ n - 1) 2)) : def_relu_network.Representable (3 ^ n + 2) k (def_tab.T 0 (3 ^ n + 2))",
+      "helpers": [],
+      "decisions": [
+        "Preserve the implication between T-functions at the same depth k.",
+        "Account for ambient dimensions of T_{a,b}.",
+        "Do not identify T_{0,m} with MAX_m inside def_tab."
+      ]
+    },
+    {
+      "label": "lem:claim7",
+      "target_signature": "theorem lem_claim7 {n k : ℕ} (hn : 1 ≤ n) (hk : 1 ≤ k) (h : def_relu_network.Representable (3 ^ (n - 1) + 2) (k - 1) (def_tab.T 0 (3 ^ (n - 1) + 2))) : def_relu_network.Representable (4 * 3 ^ (n - 1) + 2) k (def_tab.T (3 ^ (n - 1)) 2)",
+      "helpers": [],
+      "decisions": [
+        "State depth increases from k-1 to k.",
+        "Use T_{3^{n-1},2} exactly.",
+        "Binary max one-hidden is proof content."
+      ]
+    },
+    {
+      "label": "def:support-newton",
+      "target_signature": "def def_support_newton : SupportNewtonInterface",
+      "helpers": [
+        {
+          "name": "SupportNewtonInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "support",
+              "type": "{n : ℕ} → Set (EuclideanSpace ℝ (Fin n)) → EuclideanSpace ℝ (Fin n) → ℝ"
+            },
+            {
+              "name": "support_spec",
+              "type": "∀ {n} P x, def_polytope.Polytope P → support P x = sSup ((fun p => inner x p) '' P)"
+            },
+            {
+              "name": "newton",
+              "type": "{n : ℕ} → (EuclideanSpace ℝ (Fin n) → ℝ) → Set (EuclideanSpace ℝ (Fin n))"
+            },
+            {
+              "name": "newton_spec",
+              "type": "∀ {n} f P, f = support P → def_polytope.Polytope P → newton f = P"
+            }
+          ],
+          "purpose": "Interface for support functions and Newton polytopes."
+        }
+      ],
+      "decisions": [
+        "Support is defined from inner-product supremum over P.",
+        "Newton is characterized by uniqueness only when the support representation exists.",
+        "Do not make newton prove existence of representing polytopes."
+      ]
+    },
+    {
+      "label": "def:Pk",
+      "target_signature": "def def_Pk : PkInterface",
+      "helpers": [
+        {
+          "name": "PkInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "InPk",
+              "type": "{n : ℕ} → ℕ → Set (EuclideanSpace ℝ (Fin n)) → Prop"
+            },
+            {
+              "name": "base",
+              "type": "∀ {n} P, InPk 0 P ↔ def_polytope.OnePointPolytope P"
+            },
+            {
+              "name": "step",
+              "type": "∀ {n k} P, InPk (k + 1) P ↔ ∃ m : ℕ, ∃ A B : Fin m → Set (EuclideanSpace ℝ (Fin n)), (∀ i, InPk k (A i) ∧ InPk k (B i)) ∧ P = Finset.univ.sum fun i : Fin m => def_minkowski_join.join (A i) (B i)"
+            },
+            {
+              "name": "complexity",
+              "type": "{n : ℕ} → Set (EuclideanSpace ℝ (Fin n)) → ℕ"
+            },
+            {
+              "name": "IsFace",
+              "type": "{n : ℕ} → Set (EuclideanSpace ℝ (Fin n)) → Set (EuclideanSpace ℝ (Fin n)) → Prop"
+            }
+          ],
+          "purpose": "Recursive membership and complexity interface for polytope classes P_k."
+        }
+      ],
+      "decisions": [
+        "P_0 is one-point polytopes.",
+        "P_{k+1} is finite Minkowski sums of joins P_i * Q_i with both terms in P_k.",
+        "Complexity is least k with membership, not part of InPk itself.",
+        "Face relation is exposed for subdivision lemmas."
+      ]
+    },
+    {
+      "label": "def:formal-difference",
+      "target_signature": "def def_formal_difference : FormalDifferenceInterface",
+      "helpers": [
+        {
+          "name": "FormalDifferenceInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "FormalDifference",
+              "type": "{n : ℕ} → Set (EuclideanSpace ℝ (Fin n)) → Set (EuclideanSpace ℝ (Fin n)) → Set (EuclideanSpace ℝ (Fin n)) → Prop"
+            },
+            {
+              "name": "spec",
+              "type": "∀ {n} X P Q, FormalDifference X P Q ↔ def_minkowski_join.msum X P = Q"
+            }
+          ],
+          "purpose": "Predicate interface for X + P = Q."
+        }
+      ],
+      "decisions": [
+        "Formal difference is a relation among three polytopes/subsets.",
+        "Do not introduce subtraction of sets as a new executable operation.",
+        "Use existing Minkowski sum interface."
+      ]
+    },
+    {
+      "label": "def:cpwl",
+      "target_signature": "def def_cpwl : CPWLInterface",
+      "helpers": [
+        {
+          "name": "CPWLInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "CPWL",
+              "type": "{n : ℕ} → (EuclideanSpace ℝ (Fin n) → ℝ) → Prop"
+            },
+            {
+              "name": "subdivision_spec",
+              "type": "∀ {n} f, CPWL f ↔ ∃ cells : Finset (Set (EuclideanSpace ℝ (Fin n))), PolyhedralSubdivision cells ∧ ∀ C ∈ cells, ∃ A : def_affine_map.AffineMap n 1, ∀ x ∈ C, f x = (A.toFun x) 0"
+            },
+            {
+              "name": "continuous_on_faces",
+              "type": "∀ {n} f, CPWL f → Continuous f"
+            }
+          ],
+          "purpose": "Predicate interface for continuous piecewise linear functions."
+        },
+        {
+          "name": "PolyhedralSubdivision",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "covers",
+              "type": "∀ {n}, Finset (Set (EuclideanSpace ℝ (Fin n))) → Prop"
+            },
+            {
+              "name": "polyhedral_cells",
+              "type": "∀ {n} (cells : Finset (Set (EuclideanSpace ℝ (Fin n)))), Prop"
+            },
+            {
+              "name": "face_compatible",
+              "type": "∀ {n} (cells : Finset (Set (EuclideanSpace ℝ (Fin n)))), Prop"
+            }
+          ],
+          "purpose": "Minimal subdivision vocabulary needed to state CPWL."
+        }
+      ],
+      "decisions": [
+        "CPWL is a predicate on scalar functions.",
+        "Use finite polyhedral subdivisions and affine restrictions.",
+        "Continuity is explicit, not inferred from an opaque piecewise-linear predicate."
+      ]
+    },
+    {
+      "label": "lem:max3-depth-lower-bound",
+      "target_signature": "theorem lem_max3_depth_lower_bound : ¬ def_relu_network.Representable 3 1 (def_maxn.MAX 3)",
+      "helpers": [],
+      "decisions": [
+        "State nonrepresentability with one hidden layer.",
+        "The equivalent minimum-depth-at-least-two claim can be derived later.",
+        "Do not require decimal-fraction weights here."
+      ]
+    },
+    {
+      "label": "lem:nine-terms-two-hidden",
+      "target_signature": "theorem lem_nine_terms_two_hidden : def_relu_network.Representable 5 2 def_p1.P ∧ def_relu_network.Representable 5 2 def_p2.P ∧ def_relu_network.Representable 5 2 def_p3.P ∧ def_relu_network.Representable 5 2 def_p4.P ∧ def_relu_network.Representable 5 2 def_q.Q ∧ def_relu_network.Representable 5 2 def_r13.R ∧ def_relu_network.Representable 5 2 def_r14.R ∧ def_relu_network.Representable 5 2 def_r23.R ∧ def_relu_network.Representable 5 2 def_r24.R",
+      "helpers": [],
+      "decisions": [
+        "Expose all nine representability claims in one conjunction.",
+        "Each term is a function R^5 → R.",
+        "Use hidden depth exactly two."
+      ]
+    },
+    {
+      "label": "lem:claim5",
+      "target_signature": "theorem lem_claim5 (a b : ℕ) : def_calT.IgnoredLastCoordinateMembership (def_tab.T a (b + 4)) (a + 1) (b + 1)",
+      "helpers": [],
+      "decisions": [
+        "Preserve the ignored-last-coordinate ambient-dimension shift.",
+        "Conclusion is membership in calT_{a+1,b+1}.",
+        "The decomposition through M and P/Q/R terms is proof content."
+      ]
+    },
+    {
+      "label": "def:polytope",
+      "target_signature": "def def_polytope : PolytopeInterface",
+      "helpers": [
+        {
+          "name": "PolytopeInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "Polytope",
+              "type": "{n : ℕ} → Set (EuclideanSpace ℝ (Fin n)) → Prop"
+            },
+            {
+              "name": "spec",
+              "type": "∀ {n} P, Polytope P ↔ ∃ s : Finset (EuclideanSpace ℝ (Fin n)), P = def_convex_hull.convexHull (s : Set (EuclideanSpace ℝ (Fin n)))"
+            },
+            {
+              "name": "OnePointPolytope",
+              "type": "{n : ℕ} → Set (EuclideanSpace ℝ (Fin n)) → Prop"
+            },
+            {
+              "name": "onePoint_spec",
+              "type": "∀ {n} P, OnePointPolytope P ↔ ∃ p : EuclideanSpace ℝ (Fin n), P = {p}"
+            }
+          ],
+          "purpose": "Predicate interface for finitely generated convex hulls."
+        }
+      ],
+      "decisions": [
+        "Polytopes are subsets of fixed Euclidean ambient spaces.",
+        "Definition is finite convex hull, not arbitrary compact convex set.",
+        "One-point polytopes are exposed for P_0."
+      ]
+    },
+    {
+      "label": "def:minkowski-join",
+      "target_signature": "def def_minkowski_join : MinkowskiJoinInterface",
+      "helpers": [
+        {
+          "name": "MinkowskiJoinInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "msum",
+              "type": "{n : ℕ} → Set (EuclideanSpace ℝ (Fin n)) → Set (EuclideanSpace ℝ (Fin n)) → Set (EuclideanSpace ℝ (Fin n))"
+            },
+            {
+              "name": "msum_spec",
+              "type": "∀ {n} P Q x, x ∈ msum P Q ↔ ∃ p ∈ P, ∃ q ∈ Q, p + q = x"
+            },
+            {
+              "name": "join",
+              "type": "{n : ℕ} → Set (EuclideanSpace ℝ (Fin n)) → Set (EuclideanSpace ℝ (Fin n)) → Set (EuclideanSpace ℝ (Fin n))"
+            },
+            {
+              "name": "join_spec",
+              "type": "∀ {n} P Q, join P Q = def_convex_hull.convexHull (P ∪ Q)"
+            }
+          ],
+          "purpose": "Operations for Minkowski sum and convex-hull join."
+        }
+      ],
+      "decisions": [
+        "Minkowski sum and join are separate operations.",
+        "Minkowski sum is pointwise addition of witnesses.",
+        "Join is convex hull of union.",
+        "Do not include valuation laws in this definition."
+      ]
+    },
+    {
+      "label": "lem:max2-one-hidden",
+      "target_signature": "theorem lem_max2_one_hidden : def_relu_network.Representable 2 1 (def_maxn.MAX 2)",
+      "helpers": [],
+      "decisions": [
+        "State exact one-hidden-layer representability.",
+        "Use MAX_2 from def_maxn.",
+        "The ReLU formula is proof content."
+      ]
+    },
+    {
+      "label": "lem:max5-equals-m",
+      "target_signature": "theorem lem_max5_equals_m : ∀ x : EuclideanSpace ℝ (Fin 5), def_maxn.MAX 5 x = def_m_function.M x",
+      "helpers": [],
+      "decisions": [
+        "State pointwise equality on R^5.",
+        "Do not define MAX_5 using M.",
+        "Do not define M using this identity."
+      ]
+    },
+    {
+      "label": "lem:tab-plus-four-rewrite",
+      "target_signature": "theorem lem_tab_plus_four_rewrite (a b : ℕ) : ∀ x : EuclideanSpace ℝ (Fin (4 * a + (b + 4))), def_tab.T a (b + 4) x = max (max (max (x ⟨4 * a + b, by omega⟩) (x ⟨4 * a + b + 1, by omega⟩)) (max (x ⟨4 * a + b + 2, by omega⟩) (x ⟨4 * a + b + 3, by omega⟩))) (def_tab.T a b (def_tab.dropLastFour x))",
+      "helpers": [],
+      "decisions": [
+        "Expose the four new coordinates and old T_{a,b}.",
+        "The index i is 4a+b in zero-based Fin notation.",
+        "Use def_tab.dropLastFour interface for coordinate restriction."
+      ]
+    },
+    {
+      "label": "lem:p-terms-calT",
+      "target_signature": "theorem lem_p_terms_calT (a b : ℕ) : def_calT.Member (a + 1) (b + 1) def_p1.P ∧ def_calT.Member (a + 1) (b + 1) def_p2.P ∧ def_calT.Member (a + 1) (b + 1) def_p3.P ∧ def_calT.Member (a + 1) (b + 1) def_p4.P",
+      "helpers": [],
+      "decisions": [
+        "Bundle the four P-term memberships as one conjunction.",
+        "Membership target is calT_{a+1,b+1}.",
+        "Coordinate embedding details are proof content."
+      ]
+    },
+    {
+      "label": "lem:q-r-terms-calT",
+      "target_signature": "theorem lem_q_r_terms_calT (a b : ℕ) : def_calT.Member a (b + 2) def_q.Q ∧ def_calT.Member a (b + 3) def_r13.R ∧ def_calT.Member a (b + 3) def_r14.R ∧ def_calT.Member a (b + 3) def_r23.R ∧ def_calT.Member a (b + 3) def_r24.R",
+      "helpers": [],
+      "decisions": [
+        "Q belongs to calT_{a,b+2}.",
+        "Each R term belongs to calT_{a,b+3}.",
+        "Do not collapse Q and R memberships into a generic opaque predicate."
+      ]
+    },
+    {
+      "label": "lem:calT-padding",
+      "target_signature": "theorem lem_calT_padding (a b : ℕ) : def_calT.PaddedSubset a (b + 2) a (b + 3) ∧ def_calT.PaddedSubset a (b + 3) (a + 1) (b + 1)",
+      "helpers": [],
+      "decisions": [
+        "State both padding inclusions explicitly.",
+        "Padding means ignoring unused last coordinates.",
+        "Binary max is proof content, not part of calT definition."
+      ]
+    },
+    {
+      "label": "def:relu-network",
+      "target_signature": "def def_relu_network : ReluNetworkInterface",
+      "helpers": [
+        {
+          "name": "ReluNetworkInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "Network",
+              "type": "ℕ → ℕ → Type"
+            },
+            {
+              "name": "computes",
+              "type": "{n k : ℕ} → Network n k → (EuclideanSpace ℝ (Fin n) → ℝ)"
+            },
+            {
+              "name": "Representable",
+              "type": "(n k : ℕ) → (EuclideanSpace ℝ (Fin n) → ℝ) → Prop"
+            },
+            {
+              "name": "representable_spec",
+              "type": "∀ n k f, Representable n k f ↔ ∃ N : Network n k, computes N = f"
+            },
+            {
+              "name": "DecimalRepresentable",
+              "type": "(n k : ℕ) → (EuclideanSpace ℝ (Fin n) → ℝ) → Prop"
+            },
+            {
+              "name": "RequiredDepth",
+              "type": "{n : ℕ} → (EuclideanSpace ℝ (Fin n) → ℝ) → ℕ"
+            }
+          ],
+          "purpose": "Network, computed-function, representability, decimal-weight, and depth interface."
+        }
+      ],
+      "decisions": [
+        "A k-hidden-layer network has k ReLU activations and k+1 affine maps.",
+        "Output dimension is one.",
+        "Representable is existential over network data.",
+        "DecimalRepresentable is a restricted subinterface for decimal-fraction weights."
+      ]
+    },
+    {
+      "label": "lem:m-symmetries",
+      "target_signature": "theorem lem_m_symmetries : def_m_function.InvariantSwap12 ∧ def_m_function.InvariantSwap34 ∧ def_m_function.InvariantSwapPair12_34",
+      "helpers": [],
+      "decisions": [
+        "Expose exactly the three stated symmetries.",
+        "Symmetries are properties of M, not of all auxiliary terms.",
+        "Permutation actions are owned by def_m_function."
+      ]
+    },
+    {
+      "label": "lem:m-x5-largest",
+      "target_signature": "theorem lem_m_x5_largest : ∀ x : EuclideanSpace ℝ (Fin 5), x 4 = def_maxn.MAX 5 x → def_m_function.M x = x 4",
+      "helpers": [],
+      "decisions": [
+        "Use Fin index 4 for blueprint coordinate x_5.",
+        "Hypothesis is equality to MAX_5, not pairwise inequalities.",
+        "Conclusion identifies M with x_5."
+      ]
+    },
+    {
+      "label": "lem:m-x1-largest",
+      "target_signature": "theorem lem_m_x1_largest : ∀ x : EuclideanSpace ℝ (Fin 5), x 0 = def_maxn.MAX 5 x → def_m_function.M x = x 0",
+      "helpers": [],
+      "decisions": [
+        "Use Fin index 0 for blueprint coordinate x_1.",
+        "This is the normalized largest-coordinate case.",
+        "Other cases are derived by symmetries."
+      ]
+    },
+    {
+      "label": "def:calT",
+      "target_signature": "def def_calT : CalTInterface",
+      "helpers": [
+        {
+          "name": "CalTInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "Member",
+              "type": "(a b : ℕ) → (EuclideanSpace ℝ (Fin (4 * a + b)) → ℝ) → Prop"
+            },
+            {
+              "name": "member_spec",
+              "type": "∀ a b f, Member a b f ↔ f ∈ Submodule.span ℝ {g | ∃ L : def_affine_map.LinearMap (4 * a + b) (4 * a + b), g = fun x => def_tab.T a b (L.toFun x)}"
+            },
+            {
+              "name": "IgnoredLastCoordinateMembership",
+              "type": "{N : ℕ} → (EuclideanSpace ℝ (Fin N) → ℝ) → ℕ → ℕ → Prop"
+            },
+            {
+              "name": "PaddedSubset",
+              "type": "ℕ → ℕ → ℕ → ℕ → Prop"
+            },
+            {
+              "name": "RhombicStep",
+              "type": "ℕ → ℕ → Prop"
+            }
+          ],
+          "purpose": "Interface for the span classes calT_{a,b} and padding/embedding relations."
+        }
+      ],
+      "decisions": [
+        "calT_{a,b} is a vector-space span of T_{a,b} composed with linear maps.",
+        "Ambient dimension is 4a+b.",
+        "Expose padding and ignored-coordinate relations for Claim 5.",
+        "Do not equate calT membership with network representability."
+      ]
+    },
+    {
+      "label": "def:relu-function",
+      "target_signature": "def def_relu_function : ReluFunctionInterface",
+      "helpers": [
+        {
+          "name": "ReluFunctionInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "relu",
+              "type": "ℝ → ℝ"
+            },
+            {
+              "name": "relu_spec",
+              "type": "∀ t : ℝ, relu t = max 0 t"
+            },
+            {
+              "name": "reluVec",
+              "type": "{n : ℕ} → EuclideanSpace ℝ (Fin n) → EuclideanSpace ℝ (Fin n)"
+            },
+            {
+              "name": "reluVec_spec",
+              "type": "∀ {n} x i, reluVec x i = relu (x i)"
+            }
+          ],
+          "purpose": "Scalar and coordinatewise ReLU operation interface."
+        }
+      ],
+      "decisions": [
+        "Scalar ReLU is max(0,t).",
+        "Vector ReLU is coordinatewise.",
+        "Do not include network composition here."
+      ]
+    },
+    {
+      "label": "def:m-function",
+      "target_signature": "def def_m_function : MFunctionInterface",
+      "helpers": [
+        {
+          "name": "MFunctionInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "M",
+              "type": "EuclideanSpace ℝ (Fin 5) → ℝ"
+            },
+            {
+              "name": "spec",
+              "type": "∀ x, M x = (1 / 2 : ℝ) * (def_p1.P x + def_p2.P x + def_p3.P x + def_p4.P x + def_q.Q x - def_r13.R x - def_r14.R x - def_r23.R x - def_r24.R x)"
+            },
+            {
+              "name": "InvariantSwap12",
+              "type": "Prop"
+            },
+            {
+              "name": "InvariantSwap34",
+              "type": "Prop"
+            },
+            {
+              "name": "InvariantSwapPair12_34",
+              "type": "Prop"
+            }
+          ],
+          "purpose": "Canonical M function and symmetry predicates."
+        }
+      ],
+      "decisions": [
+        "M is defined by the signed half-sum of the nine named terms.",
+        "Do not define M as MAX_5.",
+        "Expose symmetry predicates for later lemmas."
+      ]
+    },
+    {
+      "label": "def:tab",
+      "target_signature": "def def_tab : TabInterface",
+      "helpers": [
+        {
+          "name": "TabInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "T",
+              "type": "(a b : ℕ) → EuclideanSpace ℝ (Fin (4 * a + b)) → ℝ"
+            },
+            {
+              "name": "spec",
+              "type": "∀ a b x, T a b x = def_maxn.MAX (a + b) (def_tab.blockAlternatives a b x)"
+            },
+            {
+              "name": "blockAlternatives",
+              "type": "(a b : ℕ) → EuclideanSpace ℝ (Fin (4 * a + b)) → EuclideanSpace ℝ (Fin (a + b))"
+            },
+            {
+              "name": "dropLastFour",
+              "type": "{a b : ℕ} → EuclideanSpace ℝ (Fin (4 * a + (b + 4))) → EuclideanSpace ℝ (Fin (4 * a + b))"
+            }
+          ],
+          "purpose": "Interface for T_{a,b}, block alternatives, and coordinate restriction."
+        }
+      ],
+      "decisions": [
+        "T_{a,b} takes max over a pair-sum blocks and b singleton coordinates.",
+        "Ambient dimension is exactly 4a+b.",
+        "Do not identify T_{0,b} definitionally with MAX_b."
+      ]
+    },
+    {
+      "label": "def:p1",
+      "target_signature": "def def_p1 : PTermInterface",
+      "helpers": [
+        {
+          "name": "PTermInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "P",
+              "type": "EuclideanSpace ℝ (Fin 5) → ℝ"
+            },
+            {
+              "name": "nested_spec",
+              "type": "∀ x, P x = max (max (2 * x 4) (x 0 + x 1)) (max (x 0) (x 2) + max (x 0) (x 3))"
+            },
+            {
+              "name": "flat_spec",
+              "type": "∀ x, P x = def_maxn.MAX 6 ![2 * x 4, x 0 + x 1, 2 * x 0, x 0 + x 2, x 0 + x 3, x 2 + x 3]"
+            }
+          ],
+          "purpose": "Auxiliary P_1 function interface with nested and flat formulas."
+        }
+      ],
+      "decisions": [
+        "Use Fin indices 0..4 for x_1..x_5.",
+        "Expose both nested and flat equivalent formulas.",
+        "Do not define P_1 via network representability."
+      ]
+    },
+    {
+      "label": "def:p2",
+      "target_signature": "def def_p2 : PTermInterface",
+      "helpers": [
+        {
+          "name": "PTermInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "P",
+              "type": "EuclideanSpace ℝ (Fin 5) → ℝ"
+            },
+            {
+              "name": "nested_spec",
+              "type": "∀ x, P x = max (max (2 * x 4) (x 0 + x 1)) (max (x 1) (x 2) + max (x 1) (x 3))"
+            },
+            {
+              "name": "flat_spec",
+              "type": "∀ x, P x = def_maxn.MAX 6 ![2 * x 4, x 0 + x 1, 2 * x 1, x 1 + x 2, x 1 + x 3, x 2 + x 3]"
+            }
+          ],
+          "purpose": "Auxiliary P_2 function interface with nested and flat formulas."
+        }
+      ],
+      "decisions": [
+        "Use the x_2-centered formula.",
+        "Preserve the common alternatives 2x_5 and x_1+x_2.",
+        "Expose flat six-term maximum."
+      ]
+    },
+    {
+      "label": "def:p3",
+      "target_signature": "def def_p3 : PTermInterface",
+      "helpers": [
+        {
+          "name": "PTermInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "P",
+              "type": "EuclideanSpace ℝ (Fin 5) → ℝ"
+            },
+            {
+              "name": "nested_spec",
+              "type": "∀ x, P x = max (max (2 * x 4) (x 2 + x 3)) (max (x 2) (x 0) + max (x 2) (x 1))"
+            },
+            {
+              "name": "flat_spec",
+              "type": "∀ x, P x = def_maxn.MAX 6 ![2 * x 4, x 2 + x 3, 2 * x 2, x 2 + x 0, x 2 + x 1, x 0 + x 1]"
+            }
+          ],
+          "purpose": "Auxiliary P_3 function interface with nested and flat formulas."
+        }
+      ],
+      "decisions": [
+        "Use the x_3-centered formula.",
+        "Preserve pair x_3+x_4 in the first max.",
+        "Expose flat six-term maximum."
+      ]
+    },
+    {
+      "label": "def:p4",
+      "target_signature": "def def_p4 : PTermInterface",
+      "helpers": [
+        {
+          "name": "PTermInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "P",
+              "type": "EuclideanSpace ℝ (Fin 5) → ℝ"
+            },
+            {
+              "name": "nested_spec",
+              "type": "∀ x, P x = max (max (2 * x 4) (x 2 + x 3)) (max (x 3) (x 0) + max (x 3) (x 1))"
+            },
+            {
+              "name": "flat_spec",
+              "type": "∀ x, P x = def_maxn.MAX 6 ![2 * x 4, x 2 + x 3, 2 * x 3, x 3 + x 0, x 3 + x 1, x 0 + x 1]"
+            }
+          ],
+          "purpose": "Auxiliary P_4 function interface with nested and flat formulas."
+        }
+      ],
+      "decisions": [
+        "Use the x_4-centered formula.",
+        "Preserve pair x_3+x_4 in the first max.",
+        "Expose flat six-term maximum."
+      ]
+    },
+    {
+      "label": "def:q",
+      "target_signature": "def def_q : QTermInterface",
+      "helpers": [
+        {
+          "name": "QTermInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "Q",
+              "type": "EuclideanSpace ℝ (Fin 5) → ℝ"
+            },
+            {
+              "name": "nested_spec",
+              "type": "∀ x, Q x = max (2 * x 4) (max (x 0 + x 1) (x 2 + x 3))"
+            },
+            {
+              "name": "flat_spec",
+              "type": "∀ x, Q x = def_maxn.MAX 3 ![2 * x 4, x 0 + x 1, x 2 + x 3]"
+            }
+          ],
+          "purpose": "Auxiliary Q function interface."
+        }
+      ],
+      "decisions": [
+        "Q has exactly three flat alternatives.",
+        "Use common pair sums x_1+x_2 and x_3+x_4.",
+        "Do not merge Q with R terms."
+      ]
+    },
+    {
+      "label": "def:r13",
+      "target_signature": "def def_r13 : RTermInterface",
+      "helpers": [
+        {
+          "name": "RTermInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "R",
+              "type": "EuclideanSpace ℝ (Fin 5) → ℝ"
+            },
+            {
+              "name": "nested_spec",
+              "type": "∀ x, R x = max (max (2 * x 4) (x 0 + x 2)) (max (x 0 + x 1) (x 2 + x 3))"
+            },
+            {
+              "name": "flat_spec",
+              "type": "∀ x, R x = def_maxn.MAX 4 ![2 * x 4, x 0 + x 2, x 0 + x 1, x 2 + x 3]"
+            }
+          ],
+          "purpose": "Auxiliary R_13 function interface."
+        }
+      ],
+      "decisions": [
+        "R_13 uses cross pair x_1+x_3.",
+        "Common pair maxima are x_1+x_2 and x_3+x_4.",
+        "Expose four-term flat formula."
+      ]
+    },
+    {
+      "label": "def:r14",
+      "target_signature": "def def_r14 : RTermInterface",
+      "helpers": [
+        {
+          "name": "RTermInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "R",
+              "type": "EuclideanSpace ℝ (Fin 5) → ℝ"
+            },
+            {
+              "name": "nested_spec",
+              "type": "∀ x, R x = max (max (2 * x 4) (x 0 + x 3)) (max (x 0 + x 1) (x 2 + x 3))"
+            },
+            {
+              "name": "flat_spec",
+              "type": "∀ x, R x = def_maxn.MAX 4 ![2 * x 4, x 0 + x 3, x 0 + x 1, x 2 + x 3]"
+            }
+          ],
+          "purpose": "Auxiliary R_14 function interface."
+        }
+      ],
+      "decisions": [
+        "R_14 uses cross pair x_1+x_4.",
+        "Common pair maxima are x_1+x_2 and x_3+x_4.",
+        "Expose four-term flat formula."
+      ]
+    },
+    {
+      "label": "def:r23",
+      "target_signature": "def def_r23 : RTermInterface",
+      "helpers": [
+        {
+          "name": "RTermInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "R",
+              "type": "EuclideanSpace ℝ (Fin 5) → ℝ"
+            },
+            {
+              "name": "nested_spec",
+              "type": "∀ x, R x = max (max (2 * x 4) (x 1 + x 2)) (max (x 0 + x 1) (x 2 + x 3))"
+            },
+            {
+              "name": "flat_spec",
+              "type": "∀ x, R x = def_maxn.MAX 4 ![2 * x 4, x 1 + x 2, x 0 + x 1, x 2 + x 3]"
+            }
+          ],
+          "purpose": "Auxiliary R_23 function interface."
+        }
+      ],
+      "decisions": [
+        "R_23 uses cross pair x_2+x_3.",
+        "Common pair maxima are x_1+x_2 and x_3+x_4.",
+        "Expose four-term flat formula."
+      ]
+    },
+    {
+      "label": "def:r24",
+      "target_signature": "def def_r24 : RTermInterface",
+      "helpers": [
+        {
+          "name": "RTermInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "R",
+              "type": "EuclideanSpace ℝ (Fin 5) → ℝ"
+            },
+            {
+              "name": "nested_spec",
+              "type": "∀ x, R x = max (max (2 * x 4) (x 1 + x 3)) (max (x 0 + x 1) (x 2 + x 3))"
+            },
+            {
+              "name": "flat_spec",
+              "type": "∀ x, R x = def_maxn.MAX 4 ![2 * x 4, x 1 + x 3, x 0 + x 1, x 2 + x 3]"
+            }
+          ],
+          "purpose": "Auxiliary R_24 function interface."
+        }
+      ],
+      "decisions": [
+        "R_24 uses cross pair x_2+x_4.",
+        "Common pair maxima are x_1+x_2 and x_3+x_4.",
+        "Expose four-term flat formula."
+      ]
+    },
+    {
+      "label": "def:maxn",
+      "target_signature": "def def_maxn : MaxnInterface",
+      "helpers": [
+        {
+          "name": "MaxnInterface",
+          "kind": "structure",
+          "members": [
+            {
+              "name": "MAX",
+              "type": "(n : ℕ) → EuclideanSpace ℝ (Fin n) → ℝ"
+            },
+            {
+              "name": "spec",
+              "type": "∀ n x, 1 ≤ n → MAX n x = sSup (Set.range x)"
+            },
+            {
+              "name": "binary_spec",
+              "type": "∀ x : EuclideanSpace ℝ (Fin 2), MAX 2 x = max (x 0) (x 1)"
+            }
+          ],
+          "purpose": "Canonical maximum function MAX_n."
+        }
+      ],
+      "decisions": [
+        "MAX_n is defined for finite coordinate vectors.",
+        "Require n ≥ 1 for the intended maximum-over-coordinates specification.",
+        "Do not encode network representability or depth facts into MAX_n."
+      ]
+    }
+  ]
+}

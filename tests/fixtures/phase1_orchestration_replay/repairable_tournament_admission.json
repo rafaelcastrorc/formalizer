@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "source_run": "20260801-180629",
+  "blueprint": "unconditional-unclonable-encryption",
+  "node_count": 52,
+  "tournament_number": 2,
+  "elapsed_s": 653,
+  "initial_frontier": [
+    "def:security-parameter-negligible",
+    "def:finite-register-operators",
+    "def:single-qubit-paulis-cliffords"
+  ],
+  "candidate": {
+    "id": "B",
+    "status": "ok",
+    "score": [0, 4, 4, 4],
+    "missing_contracts": 0,
+    "blocked_contracts": 4,
+    "closure_findings": 4,
+    "repair_components": 4,
+    "blocked_initial_frontier": [
+      "def:finite-register-operators"
+    ]
+  },
+  "observed_behavior": {
+    "discarded_complete_candidate": true,
+    "restarted_full_tournament": true,
+    "additional_full_tournaments_before_clean_plan": 3,
+    "clean_plan_selected_at_s": 1572
+  },
+  "cost_model": {
+    "repair_work": 16,
+    "full_tournament_work": 104,
+    "formula": "repair=2*blocked_contracts+closure_findings+repair_components; tournament=2*node_count"
+  },
+  "required_behavior": {
+    "admit_for_scoped_repair": true,
+    "restart_complete_tournament": false,
+    "repair_before_statement_generation": true,
+    "authorize_blueprint_edit": false
+  }
+}

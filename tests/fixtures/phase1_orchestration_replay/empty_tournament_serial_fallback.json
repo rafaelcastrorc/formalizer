@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "source_run": "20260801-051352",
+  "blueprint": "unconditional-unclonable-encryption",
+  "candidate_a_first_empty_s": 25,
+  "candidate_a_second_empty_s": 35,
+  "candidate_b_timeout_s": 309,
+  "serial_recovery_finished_s": 601,
+  "serial_missing_tail_finished_s": 633,
+  "recovery_full_call_duration_s": 292.4415169999993,
+  "recovery_missing_tail_duration_s": 31.367191458004527,
+  "expected_overlapped_recovery_start_s": 35,
+  "expected_overlapped_complete_s": 359,
+  "minimum_saved_critical_path_s": 274
+}

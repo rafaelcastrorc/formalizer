@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "run_id": "20260731-061030",
+      "source_log": ".auto-blueprint/formalization/simplex/run-20260731-061030.log",
+      "stage": "skeleton_declaration_patch",
+      "labels": [
+        "lem:relu-network-stored-dimension-endpoints",
+        "lem:relu-network-stored-layer-typing",
+        "lem:relu-network-stored-dimension-unique"
+      ],
+      "error": "codex failed after 1 attempts: codex CLI exit 1: ERROR: Reconnecting... 4/5\nERROR codex_api::endpoint::responses_websocket: failed transport connection",
+      "individual_transport_failures": 19,
+      "incorrectly_consumed_repair_trials": [9, 10, 11, 12, 13, 14, 15],
+      "expected_classification": "transport_exhausted",
+      "expected_repair_budget_delta": 0
+    }
+  ]
+}

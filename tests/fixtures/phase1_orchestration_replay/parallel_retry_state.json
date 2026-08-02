@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "source_run": "20260801-041251",
+  "blueprint": "unconditional-unclonable-encryption",
+  "wave_started_s": 1051,
+  "configured_workers": 3,
+  "simultaneous_generation_calls": 3,
+  "next_generation_call_s": 1070,
+  "shared_state": [
+    "generation_candidates",
+    "generation_feedback"
+  ],
+  "required_invariants": [
+    "candidate transition and its rejection evidence are atomically visible",
+    "parallel feedback updates for one statement epoch are cumulative",
+    "saved continuation state is a coherent snapshot"
+  ]
+}

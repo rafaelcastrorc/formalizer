@@ -1,0 +1,304 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "run_id": "20260730-191253",
+      "blueprint": "simplex",
+      "source": "tests/fixtures/phase1_plan_replay/runs/20260730-191253-ca1e75f3.jsonl",
+      "plan_response_sha256": "e36e8931f51d7c4a106b61add6e6e66ac552ccbe5a601c778c0f8e6b9548cd95",
+      "nodes": [
+        {"label": "def:binary-max", "uses": [], "mathlibok": true},
+        {"label": "def:affine-map", "uses": [], "mathlibok": true},
+        {"label": "def:relu-function", "uses": ["def:binary-max"]},
+        {"label": "def:maxn", "uses": ["def:binary-max"]},
+        {"label": "def:relu-network", "uses": ["def:affine-map", "def:relu-function"]},
+        {"label": "lem:max2-one-hidden", "uses": ["def:maxn", "def:relu-function", "def:relu-network"]},
+        {"label": "lem:binary-tree-max", "uses": ["def:maxn", "def:relu-network", "lem:max2-one-hidden"]}
+      ],
+      "pending": [
+        "def:relu-function",
+        "def:maxn",
+        "def:relu-network",
+        "lem:max2-one-hidden",
+        "lem:binary-tree-max"
+      ],
+      "model_sequence": [
+        {"purpose": "phase1_design_plan_audit", "labels": ["def:maxn", "def:relu-function"], "response": {"accepted": true, "classification": "accepted", "issues": []}},
+        {"purpose": "phase1_design_plan_audit", "labels": ["def:relu-network"], "response": {"accepted": true, "classification": "accepted", "issues": []}},
+        {"purpose": "phase1_design_plan_audit", "labels": ["lem:max2-one-hidden"], "response": {"accepted": true, "classification": "accepted", "issues": []}},
+        {"purpose": "phase1_design_plan_audit", "labels": ["lem:binary-tree-max"], "response": {"accepted": true, "classification": "accepted", "issues": []}}
+      ],
+      "expected_frontiers": [
+        ["def:maxn", "def:relu-function"],
+        ["def:relu-network"],
+        ["lem:max2-one-hidden"],
+        ["lem:binary-tree-max"]
+      ],
+      "expected_corrections": [],
+      "expected_frozen": [
+        "def:relu-function",
+        "def:maxn",
+        "def:relu-network",
+        "lem:max2-one-hidden",
+        "lem:binary-tree-max"
+      ]
+    },
+    {
+      "run_id": "20260731-233344",
+      "blueprint": "unconditional-unclonable-encryption",
+      "source": ".auto-blueprint/formalization/unconditional-unclonable-encryption/run-20260731-233344.log",
+      "historical_serialized_delay_s": 1114,
+      "nodes": [
+        {"label": "def:security-parameter-negligible", "uses": []},
+        {"label": "def:key-space", "uses": ["def:security-parameter-negligible"]},
+        {"label": "alg:key-generation", "uses": ["def:key-space"]}
+      ],
+      "pending": [
+        "def:security-parameter-negligible",
+        "def:key-space",
+        "alg:key-generation"
+      ],
+      "initial_contracts": [
+        {
+          "label": "def:security-parameter-negligible",
+          "target_signature": "def def_security_parameter_negligible : SecurityParameterNegligibleInterface",
+          "helpers": [
+            {
+              "name": "SecurityParameterNegligibleInterface",
+              "kind": "structure",
+              "members": [
+                {"name": "SecurityParameter", "type": "Nat -> Prop"},
+                {"name": "UniformSample", "type": "Type -> Type"},
+                {"name": "PolynomialBound", "type": "(Nat -> Real) -> Prop"},
+                {"name": "Negligible", "type": "(Nat -> Real) -> Prop"},
+                {"name": "negligible_iff", "type": "forall mu, Negligible mu <-> forall p : Nat -> Real, PolynomialBound p -> exists Np : Nat, forall n, n >= Np -> mu n < 1 / p n"}
+              ],
+              "purpose": "Historical under-specified security-parameter and sampling interface."
+            }
+          ],
+          "decisions": ["Uniform sampling was left abstract in the historical plan."]
+        },
+        {
+          "label": "def:key-space",
+          "target_signature": "def def_key_space : KeySpaceInterface",
+          "helpers": [
+            {
+              "name": "KeySpaceInterface",
+              "kind": "structure",
+              "members": [
+                {"name": "Key", "type": "Nat -> Type"},
+                {"name": "keys", "type": "forall n, Finset (Key n)"},
+                {"name": "IsKey", "type": "forall n, Key n -> Prop"},
+                {"name": "xCoord", "type": "forall {n}, Key n -> Fin n -> Nat"},
+                {"name": "zCoord", "type": "forall {n}, Key n -> Fin n -> Nat"},
+                {"name": "card", "type": "Nat -> Nat"},
+                {"name": "card_eq", "type": "forall n, 1 <= n -> card n = 2 ^ (2 * n - 1)"}
+              ],
+              "purpose": "Historical abstract key-space interface that omitted the concrete key representation."
+            }
+          ],
+          "decisions": ["The historical plan described K_n in prose but did not enforce it in the interface."]
+        },
+        {
+          "label": "alg:key-generation",
+          "target_signature": "def alg_key_generation : KeyGenerationAlgorithmInterface",
+          "helpers": [
+            {
+              "name": "KeyGenerationAlgorithmInterface",
+              "kind": "structure",
+              "members": [
+                {"name": "gen", "type": "forall n, def_key_space.Key n"},
+                {"name": "is_key", "type": "forall n, def_key_space.IsKey n (gen n)"}
+              ],
+              "purpose": "Minimal key-generation interface used by the replay's third frontier."
+            }
+          ],
+          "decisions": ["Key generation depends on the corrected key-space contract."]
+        }
+      ],
+      "model_sequence": [
+        {
+          "purpose": "phase1_design_plan_audit",
+          "labels": ["def:security-parameter-negligible"],
+          "response": {
+            "accepted": false,
+            "classification": "lean_translation_issue",
+            "issues": [
+              {
+                "node": "def:security-parameter-negligible",
+                "severity": "reject",
+                "reason": "The uniform sampling component permits a sampler unrelated to the finite set being sampled from.",
+                "missing_helpers": [],
+                "missing_blueprint_information": []
+              }
+            ]
+          }
+        },
+        {
+          "purpose": "phase1_design_plan_correction",
+          "labels": ["def:security-parameter-negligible"],
+          "response": {
+            "contracts": [
+              {
+                "label": "def:security-parameter-negligible",
+                "target_signature": "def def_security_parameter_negligible : SecurityParameterNegligibleInterface",
+                "helpers": [
+                  {
+                    "name": "UniformFiniteSample",
+                    "kind": "structure",
+                    "members": [
+                      {"name": "prob", "type": "alpha -> Real"},
+                      {"name": "zero_off_input_set", "type": "forall x : alpha, x notin S -> prob x = 0"},
+                      {"name": "uniform_on_input_set", "type": "forall x y : alpha, x in S -> y in S -> prob x = prob y"}
+                    ],
+                    "purpose": "Historical correction ties the sampler to its input finite set."
+                  },
+                  {
+                    "name": "SecurityParameterNegligibleInterface",
+                    "kind": "structure",
+                    "members": [
+                      {"name": "UniformSample", "type": "forall {alpha : Type} (S : Finset alpha), S.Nonempty -> UniformFiniteSample alpha S"},
+                      {"name": "Negligible", "type": "(Nat -> Real) -> Prop"},
+                      {"name": "negligible_iff", "type": "forall mu, Negligible mu <-> forall p : Nat -> Real, exists Np : Nat, forall n, n >= Np -> mu n < 1 / p n"}
+                    ],
+                    "purpose": "Corrected security-parameter, sampling, and negligible-function interface."
+                  }
+                ],
+                "decisions": ["UniformSample is dependent on the exact input set S."]
+              }
+            ]
+          }
+        },
+        {"purpose": "phase1_design_plan_audit", "labels": ["def:security-parameter-negligible"], "response": {"accepted": true, "classification": "accepted", "issues": []}},
+        {
+          "purpose": "phase1_design_plan_audit",
+          "labels": ["def:key-space"],
+          "response": {
+            "accepted": false,
+            "classification": "lean_translation_issue",
+            "issues": [
+              {
+                "node": "def:key-space",
+                "severity": "reject",
+                "reason": "The contract replaces the concrete key space of bit-string pairs with an underconstrained abstract interface.",
+                "missing_helpers": [],
+                "missing_blueprint_information": []
+              }
+            ]
+          }
+        },
+        {
+          "purpose": "phase1_design_plan_correction",
+          "labels": ["def:key-space"],
+          "response": {
+            "contracts": [
+              {
+                "label": "def:key-space",
+                "target_signature": "def def_key_space : KeySpaceInterface",
+                "helpers": [
+                  {
+                    "name": "KeySpaceInterface",
+                    "kind": "structure",
+                    "members": [
+                      {"name": "Key", "type": "Nat -> Type"},
+                      {"name": "keys", "type": "forall n, Finset (Key n)"},
+                      {"name": "IsKey", "type": "forall n, Key n -> Prop"},
+                      {"name": "keys_mem_iff_IsKey", "type": "forall n k, k in keys n <-> IsKey n k"},
+                      {"name": "xCoord", "type": "forall {n}, Key n -> Fin n -> Fin 2"},
+                      {"name": "zCoord", "type": "forall {n}, Key n -> Fin n -> Fin 2"},
+                      {"name": "x1_eq_one", "type": "forall n k, IsKey n k -> xCoord k 0 = 1"},
+                      {"name": "card", "type": "Nat -> Nat"},
+                      {"name": "card_eq", "type": "forall n, 1 <= n -> card n = 2 ^ (2 * n - 1)"}
+                    ],
+                    "purpose": "Corrected concrete bit-valued key-space surface."
+                  }
+                ],
+                "decisions": ["Keys are pairs of bit strings with the first x bit fixed to one."]
+              }
+            ]
+          }
+        },
+        {"purpose": "phase1_design_plan_audit", "labels": ["def:key-space"], "response": {"accepted": true, "classification": "accepted", "issues": []}},
+        {"purpose": "phase1_design_plan_audit", "labels": ["alg:key-generation"], "response": {"accepted": true, "classification": "accepted", "issues": []}}
+      ],
+      "expected_frontiers": [
+        ["def:security-parameter-negligible"],
+        ["def:key-space"],
+        ["alg:key-generation"]
+      ],
+      "expected_corrections": [
+        "def:security-parameter-negligible",
+        "def:key-space"
+      ],
+      "expected_frozen": [
+        "def:security-parameter-negligible",
+        "def:key-space",
+        "alg:key-generation"
+      ]
+    },
+    {
+      "run_id": "20260801-014205",
+      "blueprint": "unconditional-unclonable-encryption",
+      "source": ".auto-blueprint/formalization/unconditional-unclonable-encryption/run-20260801-014205.log",
+      "historical_stall_before_first_gateway_s": 913,
+      "use_real_closure": true,
+      "nodes": [
+        {"label": "def:security-parameter-negligible", "uses": []},
+        {"label": "def:one-time-private-key-ue", "uses": ["def:security-parameter-negligible"]}
+      ],
+      "pending": [
+        "def:security-parameter-negligible",
+        "def:one-time-private-key-ue"
+      ],
+      "initial_contracts": [
+        {
+          "label": "def:security-parameter-negligible",
+          "target_signature": "def def_security_parameter_negligible : Nat",
+          "helpers": [],
+          "decisions": ["Minimal ready-provider contract for frontier-isolation replay."]
+        },
+        {
+          "label": "def:one-time-private-key-ue",
+          "target_signature": "def def_one_time_private_key_ue : def_security_parameter_negligible.supportedKey",
+          "helpers": [],
+          "decisions": ["Historical future consumer invented a provider member."]
+        }
+      ],
+      "model_sequence": [
+        {
+          "purpose": "phase1_design_plan_audit",
+          "labels": ["def:security-parameter-negligible"],
+          "response": {"accepted": true, "classification": "accepted", "issues": []}
+        },
+        {
+          "purpose": "phase1_design_plan_correction",
+          "labels": ["def:one-time-private-key-ue"],
+          "response": {
+            "contracts": [
+              {
+                "label": "def:one-time-private-key-ue",
+                "target_signature": "def def_one_time_private_key_ue : Nat",
+                "helpers": [],
+                "decisions": ["Do not require a member absent from the frozen provider interface."]
+              }
+            ]
+          }
+        },
+        {
+          "purpose": "phase1_design_plan_audit",
+          "labels": ["def:one-time-private-key-ue"],
+          "response": {"accepted": true, "classification": "accepted", "issues": []}
+        }
+      ],
+      "expected_frontiers": [
+        ["def:security-parameter-negligible"],
+        ["def:one-time-private-key-ue"]
+      ],
+      "expected_corrections": ["def:one-time-private-key-ue"],
+      "expected_frozen": [
+        "def:security-parameter-negligible",
+        "def:one-time-private-key-ue"
+      ]
+    }
+  ]
+}

@@ -37,6 +37,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPTS_DIR.parent
 MIRROR_DIR = REPO_ROOT / ".auto-blueprint" / "lib-mirrors"
 CACHE_PATH = REPO_ROOT / ".auto-blueprint" / "lib-compat.json"
+BUILD_STATUS_DIR = REPO_ROOT / ".auto-blueprint" / "library-build-status"
 LAKEFILE = REPO_ROOT / "lakefile.lean"
 TOOLCHAIN_FILE = REPO_ROOT / "lean-toolchain"
 MANIFEST = REPO_ROOT / "lake-manifest.json"
@@ -314,6 +315,106 @@ def _lean_lib_target(pkg_dir: Path, name: str) -> str | None:
     return None
 
 
+def _normalized_name(name: str) -> str:
+    return name.lower().replace("-", "").replace("_", "")
+
+
+def _package_dir(name: str) -> Path | None:
+    """Return the installed package directory matching a registry name."""
+    packages = REPO_ROOT / ".lake" / "packages"
+    if not packages.is_dir():
+        return None
+    key = _normalized_name(name)
+    for child in packages.iterdir():
+        if child.is_dir() and _normalized_name(child.name) == key:
+            return child
+    return None
+
+
+def _build_stamp_path(name: str) -> Path:
+    return BUILD_STATUS_DIR / f"{_normalized_name(name)}.json"
+
+
+def _probe_module(pkg_dir: Path, lib: str) -> tuple[str, Path] | None:
+    """Pick a stable source module whose import proves the built library loads."""
+    source_root = pkg_dir / lib
+    if not source_root.is_dir():
+        source_root = next(
+            (
+                child for child in pkg_dir.iterdir()
+                if child.is_dir() and _normalized_name(child.name) == _normalized_name(lib)
+            ),
+            None,
+        )
+    if source_root is None or not source_root.is_dir():
+        return None
+    sources = sorted(source_root.rglob("*.lean"), key=lambda path: (len(path.parts), str(path)))
+    if not sources:
+        return None
+    root_init = source_root / "Init.lean"
+    source = root_init if root_init.is_file() else sources[0]
+    module = ".".join(source.relative_to(pkg_dir).with_suffix("").parts)
+    return module, source
+
+
+def library_build_status(name: str, cur: dict | None = None) -> dict:
+    """Whether an installed library is compiled for the active pinned state.
+
+    A checkout is not usable merely because its source revision matches the
+    manifest. Optional libraries are ready only after their selected lean_lib
+    target built and an import probe passed for this exact revision/toolchain.
+    Mathlib readiness is covered by the ordinary preflight and its cached root
+    artifact, so it does not require a local stamp.
+    """
+    cur = cur or current_state()
+    pkg_dir = _package_dir(name)
+    revision = cur.get("checkouts", {}).get(_normalized_name(name), "")
+    if pkg_dir is None or not revision:
+        return {"ready": False, "reason": "source not installed", "module": ""}
+
+    lib = _lean_lib_target(pkg_dir, name)
+    if not lib:
+        return {
+            "ready": False,
+            "reason": "could not identify the package lean_lib target",
+            "module": "",
+        }
+    probe = _probe_module(pkg_dir, lib)
+    if probe is None:
+        return {"ready": False, "reason": "library has no importable Lean module", "module": ""}
+    module, source = probe
+    artifact = pkg_dir / ".lake" / "build" / "lib" / "lean" / source.relative_to(pkg_dir)
+    artifact = artifact.with_suffix(".olean")
+
+    if name == "mathlib":
+        return {
+            "ready": artifact.is_file(),
+            "reason": "" if artifact.is_file() else "compiled Mathlib artifact is missing",
+            "module": module,
+        }
+
+    try:
+        stamp = json.loads(_build_stamp_path(name).read_text(encoding="utf-8"))
+    except Exception:
+        stamp = {}
+    expected = {
+        "revision": revision,
+        "toolchain": cur.get("toolchain", ""),
+        "module": module,
+    }
+    ready = artifact.is_file() and all(stamp.get(key) == value for key, value in expected.items())
+    return {
+        "ready": ready,
+        "reason": "" if ready else "build or import verification is required",
+        "module": module,
+    }
+
+
+def selected_build_status(cur: dict | None = None) -> dict[str, dict]:
+    cur = cur or current_state()
+    return {name: library_build_status(name, cur) for name in selected_libraries()}
+
+
 def _pins_satisfied(pins: dict[str, str], cur: dict) -> bool:
     """True only if EVERY pinned library is present and checked out at its pin.
 
@@ -359,7 +460,7 @@ def write_managed_block(pins: dict[str, str]) -> None:
     LAKEFILE.write_text(text, encoding="utf-8")
 
 
-def apply(res: Resolution, *, run_build: bool = True) -> bool:
+def apply(res: Resolution, *, run_build: bool = True, adopt: bool = True) -> bool:
     """Adopt a resolution, restoring every touched file if anything fails."""
     if not res.feasible:
         print(f"refusing to apply an infeasible resolution: {res.reason}")
@@ -371,47 +472,56 @@ def apply(res: Resolution, *, run_build: bool = True) -> bool:
     }
 
     def restore(why: str) -> bool:
-        for p, text in snapshot.items():
-            p.write_text(text, encoding="utf-8")
-        print(f"\nFAILED: {why}\nrestored lakefile.lean, lean-toolchain, lake-manifest.json")
+        if adopt:
+            for p, text in snapshot.items():
+                p.write_text(text, encoding="utf-8")
+            suffix = "\nrestored lakefile.lean, lean-toolchain, lake-manifest.json"
+        else:
+            suffix = ""
+        print(f"\nFAILED: {why}{suffix}")
         return False
 
-    print(f"==> toolchain -> {res.toolchain}")
-    TOOLCHAIN_FILE.write_text(res.toolchain + "\n", encoding="utf-8")
-    for name, sha in res.pins.items():
-        print(f"==> {name} -> {sha[:12]} ({res.staleness_days.get(name, 0)}d behind head)")
-    write_managed_block(res.pins)
+    if adopt:
+        print(f"==> toolchain -> {res.toolchain}")
+        TOOLCHAIN_FILE.write_text(res.toolchain + "\n", encoding="utf-8")
+        for name, sha in res.pins.items():
+            print(f"==> {name} -> {sha[:12]} ({res.staleness_days.get(name, 0)}d behind head)")
+        write_managed_block(res.pins)
 
-    before = json.loads(snapshot[MANIFEST]) if MANIFEST in snapshot else {"packages": []}
-    before_revs = {p["name"]: p.get("rev") for p in before.get("packages", [])}
+        before = json.loads(snapshot[MANIFEST]) if MANIFEST in snapshot else {"packages": []}
+        before_revs = {p["name"]: p.get("rev") for p in before.get("packages", [])}
 
-    print("==> lake update (scoped)")
-    proc = subprocess.run(
-        ["lake", "update", *res.pins.keys()],
-        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=1800,
-    )
-    if proc.returncode != 0:
-        return restore(f"lake update: {proc.stderr.strip()[-400:]}")
+        print("==> lake update (scoped)")
+        proc = subprocess.run(
+            ["lake", "update", *res.pins.keys()],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=1800,
+        )
+        if proc.returncode != 0:
+            return restore(f"lake update: {proc.stderr.strip()[-400:]}")
 
-    # Hard gate: nothing we did not ask for may have moved.
-    after = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    for p in after.get("packages", []):
-        name, rev = p.get("name"), p.get("rev")
-        if name in res.pins:
-            continue
-        if name in before_revs and before_revs[name] != rev:
-            return restore(
-                f"lake update moved an unrequested package: {name} "
-                f"{str(before_revs[name])[:10]} -> {str(rev)[:10]}"
-            )
+        # Hard gate: nothing we did not ask for may have moved.
+        after = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        for p in after.get("packages", []):
+            name, rev = p.get("name"), p.get("rev")
+            if name in res.pins:
+                continue
+            if name in before_revs and before_revs[name] != rev:
+                return restore(
+                    f"lake update moved an unrequested package: {name} "
+                    f"{str(before_revs[name])[:10]} -> {str(rev)[:10]}"
+                )
+    else:
+        print("==> library pins are current; repairing compiled artifacts only")
+        after = json.loads(MANIFEST.read_text(encoding="utf-8"))
 
     if not run_build:
         print("==> skipping build (--no-build)")
         return True
 
     # Mathlib comes prebuilt; everything else must be compiled from source.
-    print("==> lake exe cache get (mathlib oleans)")
-    subprocess.run(["lake", "exe", "cache", "get"], cwd=str(REPO_ROOT), timeout=3600)
+    if adopt:
+        print("==> lake exe cache get (mathlib oleans)")
+        subprocess.run(["lake", "exe", "cache", "get"], cwd=str(REPO_ROOT), timeout=3600)
 
     # Build ONLY the selected libraries, never a blanket `lake build` of every
     # installed package. Each is built once here, on purpose, so that the first
@@ -427,6 +537,10 @@ def apply(res: Resolution, *, run_build: bool = True) -> bool:
     for name in res.pins:
         if name == "mathlib":
             continue
+        if library_build_status(name)["ready"]:
+            print(f"==> {name} build already verified")
+            continue
+        _build_stamp_path(name).unlink(missing_ok=True)
         pkg = manifest_names.get(name.lower().replace("-", "").replace("_", "")) or name
         # Build ONLY the selected library, not every default target of its
         # package: physlib's defaults also include QuantumInfo, which roughly
@@ -441,12 +555,41 @@ def apply(res: Resolution, *, run_build: bool = True) -> bool:
         )
         if proc.returncode != 0:
             return restore(f"lake build {target} failed")
+        probe = _probe_module(REPO_ROOT / ".lake" / "packages" / pkg, lib or name)
+        if probe is None:
+            return restore(f"could not find an import probe for {name}")
+        module, _source = probe
+        probe_path = REPO_ROOT / ".auto-blueprint" / "preflight" / f"Library{name.title()}.lean"
+        probe_path.parent.mkdir(parents=True, exist_ok=True)
+        probe_path.write_text(f"import {module}\n", encoding="utf-8")
+        print(f"==> verify import {module}")
+        proc = subprocess.run(
+            ["lake", "env", "lean", str(probe_path)],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=300,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stdout + proc.stderr).strip()[-400:]
+            return restore(f"import {module} failed: {detail}")
+        BUILD_STATUS_DIR.mkdir(parents=True, exist_ok=True)
+        _build_stamp_path(name).write_text(
+            json.dumps(
+                {
+                    "revision": res.pins[name],
+                    "toolchain": res.toolchain,
+                    "module": module,
+                    "verified_at": int(time.time()),
+                },
+                indent=2,
+            ) + "\n",
+            encoding="utf-8",
+        )
 
-    print("==> lake build (this package)")
-    proc = subprocess.run(["lake", "build"], cwd=str(REPO_ROOT), timeout=7200)
-    if proc.returncode != 0:
-        return restore("lake build failed")
-    print("\nOK: applied and built.")
+    if adopt:
+        print("==> lake build (this package)")
+        proc = subprocess.run(["lake", "build"], cwd=str(REPO_ROOT), timeout=7200)
+        if proc.returncode != 0:
+            return restore("lake build failed")
+    print("\nOK: " + ("applied and built." if adopt else "library builds repaired."))
     return True
 
 
@@ -564,7 +707,11 @@ def cmd_apply(args) -> int:
             print(f"  {tc}: {', '.join(names)}")
         return 1
     cur = current_state()
-    if res.toolchain == cur["toolchain"] and _pins_satisfied(res.pins, cur):
+    pins_current = res.toolchain == cur["toolchain"] and _pins_satisfied(res.pins, cur)
+    builds_current = all(
+        library_build_status(name, cur)["ready"] for name in libs
+    )
+    if pins_current and (args.no_build or builds_current):
         print("already up to date; nothing to do")
         return 0
     if not args.yes:
@@ -572,7 +719,7 @@ def cmd_apply(args) -> int:
               ", ".join(f"{n}@{s[:8]}" for n, s in res.pins.items()))
         print("re-run with --yes to apply")
         return 0
-    ok = apply(res, run_build=not args.no_build)
+    ok = apply(res, run_build=not args.no_build, adopt=not pins_current)
     if ok:
         save_cache(res.to_dict() | {"libs": libs, "current": current_state()})
     return 0 if ok else 1

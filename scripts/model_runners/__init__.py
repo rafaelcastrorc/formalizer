@@ -12,7 +12,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from .api import AnthropicRunner, OpenAIRunner
-from .base import ModelRunner, RunnerError, RunResult, load_context_file
+from .base import (
+    ModelRunner,
+    RunnerError,
+    RunResult,
+    TransientRunnerError,
+    load_context_file,
+)
 from .cli import ClaudeCodeRunner, CodexRunner
 from .mock import MockRunner
 
@@ -52,6 +58,7 @@ __all__ = [
     "OpenAIRunner",
     "RunResult",
     "RunnerError",
+    "TransientRunnerError",
     "get_runner",
     "load_context_file",
 ]

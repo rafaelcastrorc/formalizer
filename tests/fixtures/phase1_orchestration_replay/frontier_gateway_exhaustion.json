@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "run_id": "20260801-014205",
+  "blueprint": "unconditional-unclonable-encryption",
+  "label": "def:finite-register-operators",
+  "first_rejection_at_s": 1276,
+  "configured_repair_budget": 100,
+  "no_work_retries": 98,
+  "last_retry_at_s": 1278,
+  "rejection": "The reduced-operator/partial-trace interface swaps the tensor factors.",
+  "required_transition": "invalidate exhausted frontier plan entry and request fresh scoped planning"
+}

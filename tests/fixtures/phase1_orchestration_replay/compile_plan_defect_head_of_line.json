@@ -1,0 +1,14 @@
+{
+  "source_run": "run-20260801-030727.log",
+  "description": "A plan-realizing compile defect was known at +1265s, but correction did not start until +1631s because the coordinator waited for unrelated sibling patch calls.",
+  "layer": 0,
+  "plan_defect_label": "def:finite-register-operators",
+  "slow_sibling_label": "def:tensor-pauli-notation",
+  "failure_detected_s": 1265,
+  "correction_started_s": 1631,
+  "avoidable_head_of_line_s": 366,
+  "expected": {
+    "route_completed_failure_before_sibling_barrier": true,
+    "preserve_failure_classification": "plan_revision_required"
+  }
+}

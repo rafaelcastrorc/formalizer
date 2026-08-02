@@ -751,6 +751,25 @@ def _library_roots(preferred: list[str] | None = None) -> list[tuple[str, Path]]
             if root is not None:
                 found[key] = root
 
+    # Optional source checkouts are not usable library candidates until their
+    # selected lean_lib target has built and passed an import probe for the
+    # active revision/toolchain. Mathlib is covered by the ordinary preflight.
+    try:
+        import lean_libs
+
+        readiness = lean_libs.selected_build_status()
+        ready_keys = {
+            name.lower().replace("-", "").replace("_", "")
+            for name, status in readiness.items()
+            if status.get("ready")
+        }
+        found = {
+            key: root for key, root in found.items()
+            if key == "mathlib" or key in ready_keys
+        }
+    except Exception:
+        found = {key: root for key, root in found.items() if key == "mathlib"}
+
     if not preferred:
         # No declared preference: Mathlib only. Selecting a library installs it
         # and keeps it toolchain-compatible; making it SEARCHED is a separate,
@@ -1119,7 +1138,7 @@ def _search_local_lean_libraries(
         "- Candidate modules below were found by deterministic local search; "
         "treat module paths as already verified."
     )
-    if not any(lib == "CSLib" for lib, _root in roots):
+    if not any(lib.lower() == "cslib" for lib, _root in roots):
         lines.append("- CS Lib: not installed locally under `.lake/packages/`; search used available local libraries only.")
     for cand in candidates:
         rel = cand.file
@@ -1626,6 +1645,7 @@ def _statement_audit_prompt(
     paper_text: str,
     *,
     skeleton_phase: bool = False,
+    design_plan_entries: dict[str, dict] | None = None,
 ) -> str:
     pairs: list[str] = []
     for label, node in sorted(nodes.items(), key=lambda item: (item[1].file, item[1].line, item[0])):
@@ -1638,12 +1658,26 @@ def _statement_audit_prompt(
             if decl is not None
             else "(missing)"
         )
+        plan_block = ""
+        if skeleton_phase and design_plan_entries is not None:
+            entry = design_plan_entries.get(label)
+            plan_block = (
+                "\nCurrent Phase-1 design-plan contract:\n"
+                "```json\n"
+                + (
+                    json.dumps(entry, sort_keys=True, indent=2)[:8000]
+                    if isinstance(entry, dict)
+                    else "(missing)"
+                )
+                + "\n```\n"
+            )
         pairs.append(
             f"## Node {label}\n"
             f"- kind: {node.kind}\n"
             f"- expected Lean declaration name: {lean_name}\n"
             f"- uses: {', '.join(sorted(node.uses)) or '(none)'}\n"
             f"\nBlueprint text:\n```tex\n{blueprint_blocks.get(label, '')[:5000]}\n```\n"
+            f"{plan_block}"
             "\nGenerated Lean declaration and referenced local helpers:\n"
             f"```lean\n{visible_decl[:12000]}\n```\n"
         )
@@ -1667,6 +1701,15 @@ STATEMENT-PHASE CONVENTIONS (this audit runs BEFORE any proofs are written):
   its completed body receives a separate semantic audit in Phase 2. Structure
   fields and inductive constructors are part of the interface and must already
   be complete here.
+- The blueprint is the source of truth. The design-plan contract is an
+  untrusted intermediate artifact used to decide which artifact needs
+  correction; never weaken the blueprint to agree with the plan.
+- For each rejected `lean_translation_issue`, compare all three artifacts and
+  set `failure_origin` to `lean`, `plan`, or `both`. Use `plan` when the Lean
+  declaration faithfully realizes an inadequate plan, and `both` when the
+  plan omits blueprint content and the Lean declaration also fails to realize
+  the plan. For `plan` or `both`, list the exact omitted blueprint obligations
+  in `missing_plan_requirements`. Without that evidence, use `lean`.
 """
     classification_options = '"lean_translation_issue" | "blueprint_issue"'
     decomposition_guidance = ""
@@ -1726,6 +1769,10 @@ If anything should block publication, return:
       ],
       "missing_blueprint_information": [
         "exact mathematical fact absent from the blueprint"
+      ],
+      "failure_origin": "lean" | "plan" | "both",
+      "missing_plan_requirements": [
+        "exact blueprint obligation absent from the current design plan"
       ]
     }}
   ]
@@ -1750,6 +1797,16 @@ existing label in `required_dependencies`. Include only public-statement
 dependencies, never proof-only conveniences, and otherwise return an empty
 list. This reports a dependency-contract mismatch; it does not by itself mean
 that the blueprint's mathematical claim is wrong.
+During the statement phase, `failure_origin` locates a
+`lean_translation_issue`; it does not change whether the blueprint is correct.
+Use `lean` when the current plan already contains every obligation needed for a
+faithful statement but the generated declaration omits or mistranslates one.
+Use `plan` when the declaration follows the plan but the plan itself omits a
+blueprint obligation. Use `both` when both defects are independently present.
+For `plan` and `both`, `missing_plan_requirements` MUST be nonempty and quote
+the mathematical obligations visible in the blueprint but absent from the
+plan. Never infer a plan defect merely because another valid Lean encoding is
+possible. Outside the statement phase, use `lean` and an empty list.
 {decomposition_guidance}
 
 Reject examples:

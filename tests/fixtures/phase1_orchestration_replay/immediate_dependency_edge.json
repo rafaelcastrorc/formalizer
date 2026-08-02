@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "run_id": "20260731-133708-5eb8ce81",
+      "source_log": ".auto-blueprint/formalization/unconditional-unclonable-encryption/run-20260731-133708.log",
+      "label": "def:local-basis-unitary",
+      "first_audit_routing_seq": 686,
+      "first_audit_elapsed_s": 2119,
+      "reported_classification": "lean_translation_issue",
+      "routed_kind": "lean-generation",
+      "blueprint_repair_authorized": false,
+      "required_dependencies": {
+        "def:local-basis-unitary": [
+          "def:single-qubit-paulis-cliffords"
+        ]
+      },
+      "eventual_edge_application_elapsed_s": 2467,
+      "model_calls_before_edge_application": 11,
+      "model_seconds_before_edge_application": 275.19603445599205,
+      "model_purposes_before_edge_application": [
+        "phase1_design_plan_correction",
+        "phase1_statement_generation",
+        "skeleton_declaration_patch",
+        "skeleton_declaration_patch",
+        "statement_audit",
+        "skeleton_declaration_patch",
+        "phase1_design_plan_correction",
+        "phase1_statement_generation",
+        "statement_audit",
+        "skeleton_declaration_patch",
+        "statement_audit"
+      ],
+      "expected_model_calls_before_edge_application": 0,
+      "expected_outer_route": "dependency-edge-repair",
+      "model_blueprint_rewrite_authorized_by_dependency_alone": false
+    }
+  ]
+}

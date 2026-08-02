@@ -19,6 +19,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 from formalize_blueprint import (  # noqa: E402
     AlignmentAuditResult,
     DESIGN_PLAN_SCHEMA_VERSION,
+    DesignPlanCandidate,
     PHASE1_STATEMENT_ORDER,
     PHASE2_PROOF_ORDER,
     _add_phase1_boilerplate_names,
@@ -30,6 +31,7 @@ from formalize_blueprint import (  # noqa: E402
     _apply_required_dependency_edges,
     _apply_skeleton_replacements,
     _audit_phase1_design_plan,
+    _phase1_frontier_plan_gateway,
     _audit_phase1_layer_candidates,
     _dependency_contract_table,
     _delivered_decl_texts,
@@ -39,6 +41,8 @@ from formalize_blueprint import (  # noqa: E402
     _design_plan_prompt,
     _design_plan_contract_closure_issues,
     _design_plan_contract_closure_findings,
+    _design_plan_dependency_closure_details,
+    _design_plan_closure_repair_components,
     _validate_design_plan_contract_closure,
     _ensure_phase1_design_plan,
     _findings_require_plan_revision,
@@ -48,6 +52,10 @@ from formalize_blueprint import (  # noqa: E402
     _route_lean_generation_failure,
     _invalidate_after_repair,
     _insert_statement_dependencies,
+    _initial_plan_admission,
+    _initial_plan_repair_admission,
+    _initial_plan_repair_costs,
+    _initial_design_plan_tournament,
     _lean_error_shape,
     _lean_failure_fingerprint,
     _lean_name,
@@ -55,6 +63,9 @@ from formalize_blueprint import (  # noqa: E402
     _lean_declarations,
     _load_state,
     _model_alignment_audit,
+    _audit_post_repair_boundary,
+    _mark_repair_boundary_pending,
+    _pending_repair_boundary_request,
     _minimal_dependency_interface,
     _note_frozen_section,
     _next_phase1_group,
@@ -76,7 +87,11 @@ from formalize_blueprint import (  # noqa: E402
     _closure_findings_for_scope,
     _planned_helper_owner_by_name,
     _plan_owned_declaration_cycle_findings,
+    _plan_realized_semantic_rejections,
+    _phase1_compile_plan_defects,
     _candidate_is_reusable_uncompiled,
+    _candidate_exactly_realizes_plan,
+    _candidate_plan_fingerprint,
     _candidate_transition_decision,
     _decomposition_orientation_findings,
     _isolated_deterministic_failure_labels,
@@ -97,6 +112,7 @@ from formalize_blueprint import (  # noqa: E402
     _salvage_partial_phase1_response,
     _semantic_repair_candidate,
     _semantic_first_failure_request,
+    _semantic_exhaustion_policy,
     _route_exhausted_phase1_semantics,
     _revise_semantic_candidates,
     _revise_exhausted_phase1_contracts,
@@ -111,12 +127,14 @@ from formalize_blueprint import (  # noqa: E402
     _retry_next_tier,
     _freeze_parts,
     _freeze_section,
+    _freeze_section_from_code,
     _frozen_labels,
     _phase2_body_progress,
     _generate_phase1_statement_group,
     _proved_labels,
     _reserved_labels,
     _requires_initial_declaration_pass,
+    _requires_blueprint_transaction,
     _skeleton_code_findings,
     _skeleton_deterministic_findings,
     _target_components_from_helpers,
@@ -202,6 +220,50 @@ class PhaseOneRoutingTests(unittest.TestCase):
         ctx.stmt_fps["lem:a"] = "statement-v2"
         self.assertEqual(_prune_stale_generation_feedback(ctx), {"lem:a"})
         self.assertEqual(_generation_feedback_for(ctx, ["lem:a"]), "")
+
+    def test_parallel_generation_feedback_updates_are_not_lost(self) -> None:
+        """Overlapping workers must retain every finding for one contract."""
+
+        class SlowFeedback(dict):
+            def get(self, key, default=None):
+                value = super().get(key, default)
+                # Without a state transaction, workers can all observe the old
+                # value here and overwrite one another after this pause.
+                time.sleep(0.01)
+                return value
+
+        label = "lem:a"
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "statement-v1"},
+            generation_feedback=SlowFeedback(),
+            telemetry=FakeTelemetry(),
+        )
+        worker_count = 6
+        start = threading.Barrier(worker_count)
+
+        def save_finding(index: int) -> None:
+            start.wait()
+            _store_generation_feedback(
+                ctx,
+                [label],
+                f"worker-{index}-finding",
+                source=f"worker-{index}",
+            )
+
+        threads = [
+            threading.Thread(target=save_finding, args=(index,))
+            for index in range(worker_count)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        combined = _generation_feedback_for(ctx, [label])
+        for index in range(worker_count):
+            self.assertIn(f"worker-{index}-finding", combined)
 
     def test_candidate_transition_requires_monotonic_deterministic_progress(self) -> None:
         previous = {
@@ -433,6 +495,59 @@ class PhaseOneRoutingTests(unittest.TestCase):
         self.assertIn("network depth", entry["semantic_evidence"])
         self.assertEqual(entry["revision"], 1)
 
+    def test_semantically_rejected_best_does_not_block_clean_revision(self) -> None:
+        label = "def:security-parameter-negligible"
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "statement-v1"},
+            design_plan_entries={},
+            generation_candidates={},
+            generation_feedback={},
+            telemetry=FakeTelemetry(),
+        )
+        rejected = "def def_security_parameter_negligible : Nat := sorry"
+        revision = "def def_security_parameter_negligible : Int := sorry"
+
+        _store_generation_candidates(
+            ctx,
+            [label],
+            rejected,
+            source="phase1_layer_0_alignment",
+            repair_stage="semantic_rejected",
+            lean_status="passed",
+            semantic_status="rejected",
+            semantic_evidence="the interface weakens the blueprint definition",
+        )
+        _store_generation_candidates(
+            ctx,
+            [label],
+            revision,
+            source="phase1_statement_generation",
+            repair_stage="deterministic_valid",
+        )
+
+        entry = ctx.generation_candidates[label]
+        self.assertEqual(entry["code"], revision)
+        self.assertEqual(entry["semantic_status"], "unknown")
+        transitions = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_candidate_transition"
+        ]
+        self.assertEqual(
+            transitions[-1]["decision_reasons"],
+            ["semantic_rejection_revision"],
+        )
+
+        _store_generation_candidates(
+            ctx,
+            [label],
+            revision,
+            source="validated_contract_compile",
+            lean_status="passed",
+        )
+        self.assertEqual(ctx.generation_candidates[label]["lean_status"], "passed")
+
     def test_generation_candidate_is_reused_only_for_same_statement(self) -> None:
         telemetry = FakeTelemetry()
         ctx = SimpleNamespace(
@@ -521,6 +636,61 @@ class PhaseOneRoutingTests(unittest.TestCase):
         self.assertIn("open scoped BigOperators", candidate.parsed.preamble)
         self.assertIn("def def_a : Nat := 1", candidate.parsed.decls[0].text)
 
+    def test_lean_rejected_candidate_is_revision_context_not_zero_call_reuse(self) -> None:
+        label = "def:uniform-finite-sampling"
+        telemetry = FakeTelemetry()
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "statement-v1"},
+            design_plan_entries={},
+            generation_candidates={},
+            generation_feedback={},
+            unavailable_imports=set(),
+            telemetry=telemetry,
+        )
+        code = (
+            "open BigOperators\n\n"
+            "def def_uniform_finite_sampling : Nat := 1\n"
+        )
+        error = (
+            "Skeleton06.lean:7:12: error: unknown namespace `BigOperators`\n"
+            "Skeleton06.lean:14:16: error: expected token\n"
+        )
+        _store_generation_candidates(
+            ctx,
+            [label],
+            code,
+            source="semantic_first_pre_audit",
+            reusable_uncompiled=True,
+        )
+        self.assertTrue(
+            _candidate_is_reusable_uncompiled(ctx.generation_candidates[label])
+        )
+
+        # This is the exact transition missed by run-20260731-095949: the
+        # compile result describes the same bytes that had been marked as a
+        # reusable, deterministic-clean candidate.
+        _store_generation_candidates(
+            ctx,
+            [label],
+            code,
+            source="validated_contract_compile",
+            lean_status="failed",
+            lean_output=error,
+        )
+
+        entry = ctx.generation_candidates[label]
+        self.assertEqual(entry["lean_status"], "failed")
+        self.assertFalse(entry["reusable_uncompiled"])
+        self.assertFalse(_candidate_is_reusable_uncompiled(entry))
+        self.assertIsNone(_reusable_uncompiled_candidate(ctx, [label], []))
+        # Failed code is still supplied to the next model as exact revision
+        # context; only the unsafe no-call shortcut is disabled.
+        self.assertIn(
+            "def def_uniform_finite_sampling",
+            _generation_candidates_for(ctx, [label]),
+        )
+
     def test_rejected_candidate_cannot_bypass_regeneration(self) -> None:
         ctx = SimpleNamespace(
             nodes={"def:a": node("def:a")},
@@ -551,6 +721,15 @@ class PhaseOneRoutingTests(unittest.TestCase):
                 {
                     "source": "semantic_first_deterministic",
                     "reusable_uncompiled": False,
+                }
+            )
+        )
+        self.assertFalse(
+            _candidate_is_reusable_uncompiled(
+                {
+                    "source": "phase1_layer_7_incomplete_generation",
+                    "reusable_uncompiled": True,
+                    "lean_status": "failed",
                 }
             )
         )
@@ -941,6 +1120,125 @@ theorem lem_c : Nat = Nat := by sorry
         self.assertEqual(routing[-1]["reported_classification"], "blueprint_issue")
         self.assertFalse(routing[-1]["blueprint_repair_authorized"])
 
+    def test_alignment_audit_reports_plan_and_combined_origins_with_evidence(self) -> None:
+        plan_only = "def:plan-only"
+        combined = "def:combined"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={plan_only: node(plan_only), combined: node(combined)},
+            tex_blocks={
+                plan_only: "Keys are exactly coordinate pairs satisfying P.",
+                combined: "The operator is the concrete tensor product.",
+            },
+            design_plan_entries={
+                plan_only: {
+                    "target_signature": "def def_plan_only : Type",
+                    "decisions": ["Use an abstract key type."],
+                },
+                combined: {
+                    "target_signature": "def def_combined : Type",
+                    "decisions": ["Use an abstract operator type."],
+                },
+            },
+            paper_text="",
+            telemetry=FakeTelemetry(),
+            base_timeout=10,
+            base_effort="medium",
+            hard_timeout=20,
+            escalation_effort="high",
+        )
+        response = CallResult(
+            status="ok",
+            text=json.dumps(
+                {
+                    "accepted": False,
+                    "classification": "lean_translation_issue",
+                    "issues": [
+                        {
+                            "node": plan_only,
+                            "severity": "reject",
+                            "classification": "lean_translation_issue",
+                            "reason": "The plan permits duplicate abstract keys.",
+                            "failure_origin": "plan",
+                            "missing_plan_requirements": [
+                                "keys are extensionally exactly the valid coordinate pairs"
+                            ],
+                        },
+                        {
+                            "node": combined,
+                            "severity": "reject",
+                            "classification": "lean_translation_issue",
+                            "reason": "The plan is abstract and Lean returns identity.",
+                            "failure_origin": "both",
+                            "missing_plan_requirements": [
+                                "the operator is the indexed tensor product"
+                            ],
+                        },
+                    ],
+                }
+            ),
+        )
+        code = (
+            "def def_plan_only : Type := Nat\n\n"
+            "def def_combined : Type := Nat\n"
+        )
+        with patch("formalize_blueprint._call_model", return_value=response) as call:
+            audit = _model_alignment_audit(ctx, [plan_only, combined], code)
+
+        self.assertIsNotNone(audit)
+        self.assertEqual(audit.labels_for_origin("plan"), {plan_only})
+        self.assertEqual(audit.labels_for_origin("both"), {combined})
+        self.assertEqual(
+            audit.plan_requirements_for({plan_only, combined}),
+            [
+                "keys are extensionally exactly the valid coordinate pairs",
+                "the operator is the indexed tensor product",
+            ],
+        )
+        prompt = call.call_args.args[1]
+        self.assertIn("Current Phase-1 design-plan contract", prompt)
+        self.assertIn("Use an abstract key type.", prompt)
+
+    def test_alignment_audit_ignores_unsupported_plan_origin(self) -> None:
+        label = "def:claim"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={label: node(label)},
+            tex_blocks={label: "A concrete definition."},
+            design_plan_entries={label: {"target_signature": "def def_claim : Type"}},
+            paper_text="",
+            telemetry=FakeTelemetry(),
+            base_timeout=10,
+            base_effort="medium",
+            hard_timeout=20,
+            escalation_effort="high",
+        )
+        response = CallResult(
+            status="ok",
+            text=json.dumps(
+                {
+                    "accepted": False,
+                    "classification": "lean_translation_issue",
+                    "issues": [
+                        {
+                            "node": label,
+                            "severity": "reject",
+                            "reason": "The statement is wrong.",
+                            "failure_origin": "plan",
+                            "missing_plan_requirements": [],
+                        }
+                    ],
+                }
+            ),
+        )
+        with patch("formalize_blueprint._call_model", return_value=response):
+            audit = _model_alignment_audit(
+                ctx, [label], "def def_claim : Type := Nat\n"
+            )
+
+        self.assertEqual(audit.labels_for_origin("lean"), {label})
+        self.assertEqual(audit.plan_requirements_for({label}), [])
+
     def test_alignment_audit_requires_named_missing_fact_for_blueprint_repair(self) -> None:
         label = "thm:claim"
         ctx = SimpleNamespace(
@@ -1023,6 +1321,148 @@ theorem lem_c : Nat = Nat := by sorry
 
         self.assertIsNotNone(audit)
         self.assertEqual(audit.required_dependencies, {target: {dependency}})
+
+    def test_post_repair_boundary_routes_missing_edge_before_lean(self) -> None:
+        target = "lem:key-generation-support"
+        dependency = "def:key-generation-free-coordinate-sampler"
+        nodes = {
+            target: node(target),
+            dependency: node(dependency),
+        }
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes=nodes,
+            stmt_blocks={
+                target: "Every supported key has a unique free-coordinate preimage.",
+                dependency: "The free-coordinate sampler assembles keys.",
+            },
+            tex_blocks={
+                target: "Every supported key has a unique free-coordinate preimage.",
+                dependency: "The free-coordinate sampler assembles keys.",
+            },
+            stmt_fps={target: "target-v2", dependency: "dependency-v1"},
+            paper_text="Key generation samples free coordinates and assembles a supported key.",
+            telemetry=FakeTelemetry(),
+            base_timeout=30,
+            base_effort="medium",
+            repair_boundary_pending={
+                "mode": "audit",
+                "labels": [target],
+                "statement_fps": {target: "target-v2"},
+                "previous_statements": {target: "Every generated key is supported."},
+                "evidence": "",
+                "repair_labels": [],
+                "required_dependencies": {},
+                "decomposition_helpers": [],
+            },
+        )
+        response = CallResult(
+            status="ok",
+            text=json.dumps(
+                {
+                    "accepted": False,
+                    "issues": [
+                        {
+                            "node": target,
+                            "severity": "reject",
+                            "classification": "missing_statement_dependency",
+                            "reason": "The repaired support claim uses the sampler's assembly map.",
+                            "required_dependencies": [dependency],
+                            "missing_helpers": [],
+                        }
+                    ],
+                }
+            ),
+        )
+        with patch("formalize_blueprint._call_model", return_value=response):
+            request = _pending_repair_boundary_request(ctx)
+
+        self.assertIsNotNone(request)
+        assert request is not None
+        self.assertEqual(request.required_dependencies, {target: {dependency}})
+        self.assertEqual(request.model_repair_labels, [])
+        self.assertEqual(ctx.repair_boundary_pending["mode"], "repair")
+
+    def test_post_repair_boundary_acceptance_adds_no_repair(self) -> None:
+        label = "lem:repaired"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={label: node(label)},
+            stmt_blocks={label: "The repaired statement."},
+            tex_blocks={label: "The repaired statement."},
+            stmt_fps={label: "statement-v2"},
+            paper_text="",
+            telemetry=FakeTelemetry(),
+            base_timeout=30,
+            base_effort="medium",
+            repair_boundary_pending={
+                "mode": "audit",
+                "labels": [label],
+                "statement_fps": {label: "statement-v2"},
+                "previous_statements": {label: "The old statement."},
+            },
+        )
+        response = CallResult(
+            status="ok", text=json.dumps({"accepted": True, "issues": []})
+        )
+        with patch("formalize_blueprint._call_model", return_value=response) as call:
+            request = _pending_repair_boundary_request(ctx)
+
+        self.assertIsNone(request)
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(ctx.repair_boundary_pending, {})
+
+    def test_post_repair_boundary_unavailable_falls_through_once(self) -> None:
+        label = "lem:repaired"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={label: node(label)},
+            stmt_blocks={label: "The repaired statement."},
+            tex_blocks={label: "The repaired statement."},
+            stmt_fps={label: "statement-v2"},
+            paper_text="",
+            telemetry=FakeTelemetry(),
+            base_timeout=30,
+            base_effort="medium",
+            repair_boundary_pending={
+                "mode": "audit",
+                "labels": [label],
+                "statement_fps": {label: "statement-v2"},
+                "previous_statements": {label: "The old statement."},
+            },
+        )
+        with patch(
+            "formalize_blueprint._call_model",
+            return_value=CallResult(status="timeout", error="timed out"),
+        ) as call:
+            self.assertIsNone(_pending_repair_boundary_request(ctx))
+            self.assertIsNone(_pending_repair_boundary_request(ctx))
+
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(ctx.repair_boundary_pending, {})
+
+    def test_proof_prose_only_repair_does_not_queue_boundary_call(self) -> None:
+        label = "lem:proof-only"
+        before = {label: node(label)}
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "same-public-statement"},
+            telemetry=FakeTelemetry(),
+            repair_boundary_pending={},
+        )
+        with patch(
+            "formalize_blueprint._statement_blocks",
+            return_value={label: "unchanged statement"},
+        ), patch(
+            "formalize_blueprint._statement_fingerprints",
+            return_value={label: "same-public-statement"},
+        ), patch("formalize_blueprint._call_model") as call:
+            queued = _mark_repair_boundary_pending(ctx, {label}, before)
+            request = _pending_repair_boundary_request(ctx)
+
+        self.assertEqual(queued, set())
+        self.assertIsNone(request)
+        call.assert_not_called()
 
     def test_dependency_edge_insertion_preserves_node_prose(self) -> None:
         source = (
@@ -1236,6 +1676,19 @@ theorem lem_c : Nat = Nat := by sorry
             raised.exception.required_dependencies,
             {target: {dependency}},
         )
+        self.assertFalse(raised.exception.authorizes_blueprint_repair)
+        self.assertTrue(
+            _requires_blueprint_transaction(
+                raised.exception.authorizes_blueprint_repair,
+                raised.exception.required_dependencies,
+            )
+        )
+
+    def test_generation_retry_without_dependency_evidence_stays_out_of_blueprint_transaction(
+        self,
+    ) -> None:
+        self.assertFalse(_requires_blueprint_transaction(False, {}))
+        self.assertTrue(_requires_blueprint_transaction(True, {}))
 
     def test_semantic_first_request_preserves_required_dependencies(self) -> None:
         target = "lem:claim"
@@ -1332,6 +1785,38 @@ theorem lem_c : Nat = Nat := by sorry
             )
         self.assertEqual(call.call_count, 2)
 
+    def test_alignment_cache_invalidates_when_design_plan_changes(self) -> None:
+        label = "lem:cached"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={label: node(label)},
+            tex_blocks={label: "The cached statement."},
+            design_plan_entries={
+                label: {"target_signature": "theorem lem_cached : True"}
+            },
+            paper_text="",
+            telemetry=FakeTelemetry(),
+            base_timeout=10,
+            base_effort="medium",
+            hard_timeout=20,
+            escalation_effort="high",
+        )
+        response = CallResult(
+            status="ok",
+            text=json.dumps(
+                {"accepted": True, "classification": "accepted", "issues": []}
+            ),
+        )
+        code = "theorem lem_cached : True := by sorry\n"
+        with patch("formalize_blueprint._call_model", return_value=response) as call:
+            self.assertIsNone(_model_alignment_audit(ctx, [label], code))
+            self.assertIsNone(_model_alignment_audit(ctx, [label], code))
+            ctx.design_plan_entries[label]["decisions"] = [
+                "Expose an additional blueprint obligation."
+            ]
+            self.assertIsNone(_model_alignment_audit(ctx, [label], code))
+        self.assertEqual(call.call_count, 2)
+
     def test_statement_audit_prompt_includes_referenced_local_interface(self) -> None:
         label = "def:relu-function"
         code = (
@@ -1390,6 +1875,48 @@ theorem lem_c : Nat = Nat := by sorry
         self.assertEqual(
             _invalid_mathlib_refusal_mappings(self.ctx, refusal),
             {"def_inner_norm": "inner", "def_finite_real_arrays": "Fin"},
+        )
+
+    def test_plan_parser_normalizes_exact_mathlib_aliases(self) -> None:
+        label = "def:consumer"
+        ctx = SimpleNamespace(
+            nodes={
+                "def:affine-map": node(
+                    "def:affine-map", mathlibok=True, lean_decl="AffineMap"
+                ),
+                label: node(label, uses={"def:affine-map"}),
+            },
+            stmt_fps={label: "consumer-v1"},
+        )
+        response = json.dumps(
+            {
+                "contracts": [
+                    {
+                        "label": label,
+                        "target_signature": "def def_consumer : def_affine_map",
+                        "helpers": [
+                            {
+                                "name": "ConsumerInterface",
+                                "kind": "structure",
+                                "members": [
+                                    {"name": "map", "type": "def_affine_map"}
+                                ],
+                                "purpose": "consumer interface",
+                            }
+                        ],
+                        "decisions": [],
+                    }
+                ]
+            }
+        )
+
+        parsed = _parse_design_plan_entries(ctx, [label], response)
+
+        self.assertEqual(
+            parsed[label]["target_signature"], "def def_consumer : AffineMap"
+        )
+        self.assertEqual(
+            parsed[label]["helpers"][0]["members"][0]["type"], "AffineMap"
         )
 
     def test_plan_closure_rejects_mathlib_alias_in_target_signature(self) -> None:
@@ -1493,7 +2020,7 @@ theorem lem_c : Nat = Nat := by sorry
         )
         self.assertIn("closure_fp", ctx.design_plan_entries[label])
 
-    def test_plan_closure_reports_all_missing_statement_dependencies_once(self) -> None:
+    def test_plan_closure_observes_missing_dependencies_without_blocking(self) -> None:
         left = "def:left"
         right = "def:right"
         consumer = "lem:consumer"
@@ -1513,18 +2040,106 @@ theorem lem_c : Nat = Nat := by sorry
             },
         )
 
-        issues = [
-            issue
-            for issue in _design_plan_contract_closure_issues(ctx, [consumer])
-            if issue.missing_required_dependencies
-        ]
+        details = _design_plan_dependency_closure_details(ctx, consumer)
 
-        self.assertEqual(len(issues), 1)
         self.assertEqual(
-            set(issues[0].missing_required_dependencies),
+            set(details["missing"]),
             {f"{left} -> `def_left`", f"{right} -> `def_right`"},
         )
-        self.assertEqual(set(issues[0].providers), {left, right})
+        self.assertEqual(set(details["generated_providers"]), {left, right})
+        self.assertEqual(
+            _design_plan_contract_closure_findings(ctx, [consumer]),
+            {},
+        )
+
+    def test_missing_dependency_observation_blocks_neither_contract(self) -> None:
+        provider = "def:provider"
+        consumer = "lem:consumer"
+        ctx = SimpleNamespace(
+            nodes={
+                provider: node(provider),
+                consumer: node(consumer, uses={provider}),
+            },
+            design_plan_entries={
+                provider: {
+                    "target_signature": "def def_provider : Nat",
+                    "helpers": [],
+                },
+                consumer: {
+                    "target_signature": "theorem lem_consumer : True",
+                    "helpers": [],
+                },
+            },
+        )
+
+        findings = _design_plan_contract_closure_findings(ctx, [consumer])
+        components = _design_plan_closure_repair_components(ctx, findings)
+
+        self.assertEqual(findings, {})
+        self.assertEqual(components, [])
+        self.assertEqual(_closure_blocked_labels(ctx, findings), set())
+
+    def test_missing_member_still_repairs_provider_and_consumer_atomically(self) -> None:
+        provider = "def:provider"
+        consumer = "lem:consumer"
+        ctx = SimpleNamespace(
+            nodes={
+                provider: node(provider),
+                consumer: node(consumer, uses={provider}),
+            },
+            design_plan_entries={
+                provider: {
+                    "target_signature": "structure def_provider where\n  value : Nat",
+                    "helpers": [],
+                },
+                consumer: {
+                    "target_signature": (
+                        "theorem lem_consumer : "
+                        "def_provider.missing = def_provider.missing"
+                    ),
+                    "helpers": [],
+                },
+            },
+        )
+
+        findings = _design_plan_contract_closure_findings(ctx, [consumer])
+        components = _design_plan_closure_repair_components(ctx, findings)
+
+        self.assertEqual(set(components[0]), {provider, consumer})
+        self.assertEqual(
+            _closure_blocked_labels(ctx, findings), {provider, consumer}
+        )
+
+    def test_unauthorized_missing_member_does_not_block_provider(self) -> None:
+        provider = "def:provider"
+        consumer = "lem:consumer"
+        ctx = SimpleNamespace(
+            nodes={
+                provider: node(provider),
+                consumer: node(consumer),
+            },
+            design_plan_entries={
+                provider: {
+                    "target_signature": "structure def_provider where\n  value : Nat",
+                    "helpers": [],
+                },
+                consumer: {
+                    "target_signature": (
+                        "theorem lem_consumer : "
+                        "def_provider.invented = def_provider.invented"
+                    ),
+                    "helpers": [],
+                },
+            },
+        )
+
+        findings = _design_plan_contract_closure_findings(ctx, [consumer])
+        components = _design_plan_closure_repair_components(ctx, findings)
+
+        self.assertIn(consumer, findings)
+        self.assertNotIn("exposes no such member", "\n".join(findings[consumer]))
+        self.assertEqual(components, [[consumer]])
+        self.assertEqual(_closure_blocked_labels(ctx, findings), {consumer})
 
     def test_plan_closure_ignores_proof_only_dependencies(self) -> None:
         dependency = "def:proof-tool"
@@ -1795,6 +2410,37 @@ theorem lem_target : True := by trivial
         existing = next(decl.text for decl in patched.decls if decl.name == "existing_helper")
         self.assertIn(":= 2", existing)
 
+    def test_statement_replacement_filters_unavailable_import_after_merge(self) -> None:
+        original = _parse_module(
+            "import Mathlib.Data.Nat.Basic\n\n"
+            "theorem lem_target : True := by sorry\n"
+        )
+        replacement = (
+            "import Mathlib.Data.Polynomial.Basic\n\n"
+            "theorem lem_target : True := by trivial\n"
+        )
+        unavailable: set[str] = set()
+
+        with patch(
+            "formalize_blueprint._missing_olean_imports",
+            return_value=["import Mathlib.Data.Polynomial.Basic"],
+        ):
+            patched = _apply_skeleton_replacements(
+                original,
+                ["lem:target"],
+                ["lem:target"],
+                replacement,
+                unavailable_imports=unavailable,
+            )
+
+        self.assertIsNotNone(patched)
+        assert patched is not None
+        self.assertEqual(patched.imports, ["import Mathlib.Data.Nat.Basic"])
+        self.assertEqual(
+            unavailable, {"import Mathlib.Data.Polynomial.Basic"}
+        )
+        self.assertIn("by trivial", patched.decls[0].text)
+
     def test_corollary_is_parsed_and_normalized_without_duplicate_fallback(self) -> None:
         nodes = {"cor:result": node("cor:result")}
         parsed = _parse_module(
@@ -1927,6 +2573,203 @@ def def_polytope (n : Nat) : Type := sorry
         ).parsed
         self.assertIn(helper_name, downstream.decls[0].text)
         self.assertNotIn("def_polytope.Polytope", downstream.decls[0].text)
+
+    def test_unique_bare_planned_helper_is_canonicalized_downstream(self) -> None:
+        provider = "def:maxn"
+        consumer = "def:p1"
+        ctx = SimpleNamespace(
+            name="simplex",
+            nodes={
+                provider: node(provider),
+                consumer: node(consumer, uses={provider}),
+            },
+            design_plan_entries={
+                provider: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "target_signature": "def def_maxn : MaxNInterface",
+                    "helpers": [
+                        {
+                            "name": "MaxNInterface",
+                            "kind": "structure",
+                            "members": [{"name": "MAX", "type": "Nat"}],
+                        }
+                    ],
+                },
+                consumer: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "target_signature": (
+                        "def def_p1 (m : MaxNInterface) : P1Interface m"
+                    ),
+                    "helpers": [
+                        {
+                            "name": "P1Interface",
+                            "kind": "structure",
+                            "members": [{"name": "value", "type": "Nat"}],
+                        }
+                    ],
+                },
+            },
+        )
+        canonical_provider = _canonicalize_model_lean(
+            ctx,
+            [provider],
+            "structure MaxNInterface where\n"
+            "  MAX : Nat\n\n"
+            "def def_maxn : MaxNInterface := sorry\n",
+        ).parsed
+        maxn_helper = canonical_provider.decls[0].name or ""
+        canonical_consumer = _canonicalize_model_lean(
+            ctx,
+            [consumer],
+            "structure P1Interface (m : MaxNInterface) where\n"
+            "  value : Nat\n\n"
+            "def def_p1 (m : MaxNInterface) : P1Interface m := sorry\n",
+        ).parsed
+        downstream_code = "\n".join(
+            declaration.text for declaration in canonical_consumer.decls
+        )
+        self.assertIn(maxn_helper, downstream_code)
+        self.assertNotRegex(downstream_code, r"(?<!_)\bMaxNInterface\b")
+
+    def test_helper_alias_does_not_rename_same_named_class_field(self) -> None:
+        """Regression for simplex run-20260731-025106's weightOf loop."""
+        label = "lem:ahm-lower-bound"
+        ctx = SimpleNamespace(
+            name="simplex",
+            nodes={label: node(label)},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "target_signature": "theorem lem_ahm_lower_bound : True",
+                    "helpers": [
+                        {
+                            "name": "weightOf",
+                            "kind": "class",
+                            "members": [
+                                {
+                                    "name": "weightOf",
+                                    "type": "Nat -> Nat -> Prop",
+                                }
+                            ],
+                            "required_members": ["weightOf"],
+                        }
+                    ],
+                }
+            },
+        )
+        canonical = _canonicalize_model_lean(
+            ctx,
+            [label],
+            "class weightOf where\n"
+            "  weightOf : Nat -> Nat -> Prop\n\n"
+            "theorem lem_ahm_lower_bound : True := sorry\n",
+        )
+        code = "\n\n".join(decl.text for decl in canonical.parsed.decls)
+        helper_name = canonical.parsed.decls[0].name or ""
+
+        self.assertRegex(helper_name, r"^_autobp_[0-9a-f]{12}_weightOf$")
+        self.assertIn(f"class {helper_name} where", code)
+        self.assertIn("\n  weightOf : Nat -> Nat -> Prop", code)
+        self.assertNotIn(f"\n  {helper_name} :", code)
+        self.assertEqual(
+            _skeleton_deterministic_findings(code, ctx, [label]), []
+        )
+
+    def test_helper_alias_respects_dependent_member_shadowing(self) -> None:
+        """Regression for run-20260801-074355's density-interface loop."""
+        label = "def:positive-loewner-density"
+        ctx = SimpleNamespace(
+            name="unconditional-unclonable-encryption",
+            nodes={label: node(label)},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "target_signature": (
+                        "def def_positive_loewner_density : "
+                        "PositiveLoewnerDensityInterface"
+                    ),
+                    "helpers": [
+                        {
+                            "name": "DensityOperator",
+                            "kind": "structure",
+                            "members": [
+                                {"name": "space", "type": "Nat"},
+                            ],
+                        },
+                        {
+                            "name": "PositiveLoewnerDensityInterface",
+                            "kind": "structure",
+                            "members": [
+                                {
+                                    "name": "DensityOperator",
+                                    "type": "Nat -> Type",
+                                },
+                                {
+                                    "name": "density_to_value",
+                                    "type": "forall n, DensityOperator n -> Nat",
+                                },
+                            ],
+                        },
+                    ],
+                }
+            },
+        )
+        canonical = _canonicalize_model_lean(
+            ctx,
+            [label],
+            "structure DensityOperator (n : Nat) where\n"
+            "  space : Nat\n\n"
+            "structure PositiveLoewnerDensityInterface where\n"
+            "  DensityOperator : Nat -> Type\n"
+            "  density_to_value : forall n, DensityOperator n -> Nat\n\n"
+            "def def_positive_loewner_density : "
+            "PositiveLoewnerDensityInterface := sorry\n",
+        ).parsed
+
+        density_helper = next(
+            decl for decl in canonical.decls
+            if (decl.name or "").endswith("_DensityOperator")
+        )
+        interface = next(
+            decl for decl in canonical.decls
+            if (decl.name or "").endswith("_PositiveLoewnerDensityInterface")
+        )
+        target = next(
+            decl for decl in canonical.decls
+            if decl.name == "def_positive_loewner_density"
+        )
+
+        self.assertNotEqual(density_helper.name, "DensityOperator")
+        self.assertIn("DensityOperator : Nat -> Type", interface.text)
+        self.assertIn(
+            "forall n, DensityOperator n -> Nat", interface.text
+        )
+        self.assertNotIn(density_helper.name or "", interface.text)
+        self.assertIn(interface.name or "", target.text)
+
+    def test_ambiguous_bare_planned_helper_is_not_guessed(self) -> None:
+        labels = ["def:left", "def:right", "def:consumer"]
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={label: node(label) for label in labels},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "helpers": (
+                        [{"name": "Interface", "kind": "structure", "members": []}]
+                        if label != "def:consumer"
+                        else []
+                    ),
+                }
+                for label in labels
+            },
+        )
+        parsed = _canonicalize_model_lean(
+            ctx,
+            ["def:consumer"],
+            "def def_consumer (_x : Interface) : Type := sorry\n",
+        ).parsed
+        self.assertIn("Interface", parsed.decls[0].text)
 
     def test_phase1_accepts_transparent_alias_to_owned_structural_contract(self) -> None:
         label = "def:finite-subdivision"
@@ -2214,6 +3057,94 @@ def def_tab : Type := sorry
         self.assertTrue(
             _findings_require_plan_revision(
                 [SkeletonFinding("invalid plan", category="plan_contract_closure")]
+            )
+        )
+
+    def test_exact_plan_realization_detects_current_semantic_plan_defect(self) -> None:
+        label = "def:polyhedral-cell"
+        ctx = SimpleNamespace(
+            name="simplex",
+            nodes={label: node(label)},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "target_signature": (
+                        "def def_polyhedral_cell (n : ℕ) (C : Set ℝ) : Prop"
+                    ),
+                    "helpers": [],
+                    "decisions": [
+                        "Full-dimensionality is intentionally separate."
+                    ],
+                }
+            },
+        )
+        code = "def def_polyhedral_cell (n : ℕ) (C : Set ℝ) : Prop := sorry"
+
+        self.assertTrue(_candidate_exactly_realizes_plan(ctx, label, code))
+        self.assertEqual(
+            _plan_realized_semantic_rejections(ctx, [label], code), {label}
+        )
+
+    def test_plan_realization_rejects_changed_target_or_helper_type(self) -> None:
+        label = "def:join"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={label: node(label)},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "target_signature": "def def_join : Prop",
+                    "helpers": [{
+                        "name": "JoinInterface",
+                        "kind": "structure",
+                        "members": [{"name": "join", "type": "Nat → Nat"}],
+                        "required_members": ["join"],
+                    }],
+                }
+            },
+        )
+        canonical = next(iter(_planned_helper_owner_by_name(ctx, [label])))
+        wrong_target = (
+            f"structure {canonical} where\n  join : Nat → Nat\n\n"
+            "def def_join : True := sorry"
+        )
+        wrong_helper = (
+            f"structure {canonical} where\n  join : Nat → Int\n\n"
+            "def def_join : Prop := sorry"
+        )
+        exact_helper = (
+            f"structure {canonical} where\n  join : Nat → Nat\n\n"
+            "def def_join : Prop := sorry"
+        )
+
+        self.assertTrue(
+            _candidate_exactly_realizes_plan(ctx, label, exact_helper)
+        )
+        self.assertFalse(
+            _candidate_exactly_realizes_plan(ctx, label, wrong_target)
+        )
+        self.assertFalse(
+            _candidate_exactly_realizes_plan(ctx, label, wrong_helper)
+        )
+
+    def test_revised_plan_does_not_take_immediate_revision_route_twice(self) -> None:
+        label = "lem:claim"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={label: node(label)},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "semantic_revision_count": 1,
+                    "target_signature": "theorem lem_claim : True",
+                    "helpers": [],
+                }
+            },
+        )
+
+        self.assertFalse(
+            _candidate_exactly_realizes_plan(
+                ctx, label, "theorem lem_claim : True := sorry"
             )
         )
 
@@ -3533,11 +4464,28 @@ end ModelOutput
                             "decisions": ["alternate contract"],
                         }
                     },
+                    blueprint_direct_generation={
+                        "hard": {
+                            "statement_fp": "hard-v1",
+                            "source": "historical_semantic_exhaustion",
+                            "evidence": "the corrected plan remained opaque",
+                            "activations": 1,
+                        }
+                    },
+                    repair_boundary_pending={
+                        "mode": "repair",
+                        "labels": ["hard"],
+                        "statement_fps": {"hard": "hard-v1"},
+                        "previous_statements": {"hard": "old hard statement"},
+                        "evidence": "missing dependency",
+                        "repair_labels": ["hard"],
+                        "required_dependencies": {"hard": ["peer"]},
+                    },
                     effective_section_size=6,
                     refinement_order="top-down",
                 )
             payload = json.loads(state.read_text(encoding="utf-8"))
-            self.assertEqual(payload["version"], 17)
+            self.assertEqual(payload["version"], 19)
             self.assertEqual(payload["refinement_order"], "top-down")
             self.assertEqual(
                 payload["scheduler"]["quarantine"],
@@ -3549,6 +4497,11 @@ end ModelOutput
                 },
             )
             self.assertEqual(payload["scheduler"]["effective_section_size"], 6)
+            self.assertEqual(
+                payload["scheduler"]["repair_boundary_pending"]
+                ["required_dependencies"],
+                {"hard": ["peer"]},
+            )
             self.assertEqual(
                 payload["scheduler"]["local_group_partitions"]["hard"]["group"],
                 ["hard", "peer"],
@@ -3595,6 +4548,11 @@ end ModelOutput
                 ["target_signature"],
                 "hard : False",
             )
+            self.assertEqual(
+                payload["scheduler"]["blueprint_direct_generation"]["hard"]
+                ["evidence"],
+                "the corrected plan remained opaque",
+            )
             self.assertTrue(payload["sections"][0]["deferred"])
             self.assertEqual(payload["sections"][0]["refined_labels"], [])
 
@@ -3620,6 +4578,7 @@ end ModelOutput
                 design_plan="",
                 design_plan_entries={},
                 design_plan_alternates={},
+                blueprint_direct_generation={},
                 effective_section_size=0,
                 section_size=12,
                 refinement_order="top-down",
@@ -3674,6 +4633,15 @@ end ModelOutput
             self.assertEqual(
                 ctx.design_plan_alternates["hard"]["target_signature"],
                 "hard : False",
+            )
+            self.assertEqual(
+                ctx.blueprint_direct_generation["hard"]["evidence"],
+                "the corrected plan remained opaque",
+            )
+            self.assertEqual(ctx.repair_boundary_pending["mode"], "repair")
+            self.assertEqual(
+                ctx.repair_boundary_pending["required_dependencies"],
+                {"hard": {"peer"}},
             )
             compile_mock.assert_not_called()
 
@@ -3959,6 +4927,7 @@ end ModelOutput
             design_plan_entries={},
             telemetry=FakeTelemetry(),
             base_timeout=120,
+            hard_timeout=120,
             base_effort="medium",
         )
         first = CallResult(
@@ -3982,7 +4951,9 @@ end ModelOutput
             _ensure_phase1_design_plan(ctx, set(nodes), [])
 
         self.assertEqual(set(ctx.design_plan_entries), set(nodes))
-        self.assertEqual(call_model.call_count, 2)
+        # Both lanes are submitted, but an admissible first result may cancel
+        # the sibling before its provider call starts.
+        self.assertIn(call_model.call_count, {1, 2})
         local_plan = _design_plan_block(ctx, ["def:leaf"])
         self.assertIn("def def_leaf : Nat", local_plan)
         self.assertIn("lem_middle (n : Nat) : def_leaf", local_plan)
@@ -4039,6 +5010,61 @@ end ModelOutput
         self.assertIn("Return JSON only", prompt)
         self.assertNotIn("NEEDS-DECOMPOSITION", prompt)
         self.assertNotIn("return the Lean code block", prompt)
+
+    def test_design_plan_prompt_uses_authoritative_scoped_dependency_table(self) -> None:
+        statement_dep = "def:statement-input"
+        proof_dep = "lem:proof-tool"
+        target = "lem:result"
+        nodes = {
+            statement_dep: node(statement_dep),
+            proof_dep: node(proof_dep),
+            target: Node(
+                label=target,
+                kind="lemma",
+                file=Path("content.tex"),
+                line=1,
+                uses={statement_dep, proof_dep},
+                statement_uses={statement_dep},
+                proof_uses={proof_dep},
+            ),
+        }
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes=nodes,
+            stmt_blocks={
+                statement_dep: "Define the input.",
+                proof_dep: "Prove the proof tool.",
+                target: "The result follows.",
+            },
+            unavailable_imports=set(),
+            library_candidates=[],
+            library_context="",
+        )
+
+        prompt = _design_plan_prompt(
+            ctx,
+            [target],
+            [],
+            [],
+            timeout_s=120,
+            root_context_labels=[target],
+        )
+
+        self.assertIn(
+            f"{target} -> {statement_dep} (statement interface)", prompt
+        )
+        self.assertIn(f"{target} -> {proof_dep} (proof only)", prompt)
+        self.assertIn("sole authoritative\nallowed-symbol table", prompt)
+        self.assertIn(
+            "A `proof only` entry may guide the later\n"
+            "Phase-2 implementation, but it MUST NOT appear in `target_signature`",
+            prompt,
+        )
+        self.assertIn(
+            "Root context\nmay shape the meaning and strength of an interface, "
+            "but it cannot add a\ndependency edge absent from the blueprint graph.",
+            prompt,
+        )
 
     def test_design_plan_candidates_merge_only_complete_closure_components(self) -> None:
         provider = "def:network"
@@ -4099,6 +5125,373 @@ end ModelOutput
         self.assertEqual(merged.entries[unrelated], plan_a[unrelated])
         self.assertEqual(components, [[unrelated]])
 
+    def test_tournament_admits_first_complete_initial_frontier(self) -> None:
+        label = "def:leaf"
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "def:leaf-v1"},
+            design_plan="",
+            design_plan_entries={},
+            telemetry=FakeTelemetry(),
+            base_timeout=30,
+            hard_timeout=60,
+        )
+        release_sibling = threading.Event()
+
+        accepted = DesignPlanCandidate(
+            candidate_id="A",
+            entries={label: {"target_signature": "def def_leaf : Nat"}},
+            missing=[],
+            findings={},
+            blocked=set(),
+            components=[],
+        )
+
+        def generate(*args, **kwargs):
+            candidate_id = args[5]
+            if candidate_id == "A":
+                return accepted
+            self.assertEqual(candidate_id, "B")
+            release_sibling.wait(1.0)
+            return DesignPlanCandidate(
+                candidate_id="B",
+                entries={},
+                missing=[label],
+                findings={label: ["missing contract"]},
+                blocked={label},
+                components=[[label]],
+            )
+
+        try:
+            with patch(
+                "formalize_blueprint._generate_design_plan_candidate",
+                side_effect=generate,
+            ):
+                started = time.monotonic()
+                selected, _alternate = _initial_design_plan_tournament(
+                    ctx, [label], [], [], [label]
+                )
+                elapsed = time.monotonic() - started
+        finally:
+            release_sibling.set()
+
+        self.assertEqual(selected.candidate_id, "A")
+        self.assertLess(elapsed, 0.5)
+
+    def test_tournament_rejects_catastrophic_plan_and_requests_full_restart(self) -> None:
+        provider = "def:left"
+        consumer = "def:right"
+        labels = [consumer, provider]
+        ctx = SimpleNamespace(
+            nodes={
+                provider: node(provider),
+                consumer: node(consumer, uses={provider}),
+            },
+            stmt_fps={label: f"{label}-v1" for label in labels},
+            design_plan="",
+            design_plan_entries={},
+            generation_feedback={},
+            telemetry=FakeTelemetry(),
+            base_timeout=30,
+            hard_timeout=60,
+        )
+
+        def rejected(candidate_id: str) -> DesignPlanCandidate:
+            entries = {
+                provider: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "statement_fp": f"{provider}-v1",
+                    "target_signature": "structure def_left where\n  existing : Nat",
+                    "helpers": [],
+                    "decisions": [],
+                },
+                consumer: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "statement_fp": f"{consumer}-v1",
+                    "target_signature": "def def_right : def_left.Missing",
+                    "helpers": [],
+                    "decisions": [],
+                },
+            }
+            return _evaluate_design_plan_candidate(
+                ctx, labels, entries, candidate_id
+            )
+
+        with patch(
+            "formalize_blueprint._generate_design_plan_candidate",
+            side_effect=[rejected("A"), rejected("B")],
+        ):
+            with self.assertRaises(RepairRequest) as raised:
+                _initial_design_plan_tournament(ctx, labels, [], [], labels)
+
+        self.assertFalse(raised.exception.authorizes_blueprint_repair)
+        self.assertEqual(set(raised.exception.labels), set(labels))
+        self.assertIn("restart the full-context planning tournament", raised.exception.evidence)
+
+    def test_initial_plan_admission_requires_complete_ready_frontier(self) -> None:
+        leaves = ["def:left", "def:right"]
+        root = "lem:root"
+        ctx = SimpleNamespace(
+            nodes={
+                leaves[0]: node(leaves[0]),
+                leaves[1]: node(leaves[1]),
+                root: node(root, uses=set(leaves)),
+            }
+        )
+        entries = {
+            label: {"target_signature": f"def {_lean_name(label)} : Nat"}
+            for label in leaves
+        }
+        entries[root] = {"target_signature": f"theorem {_lean_name(root)} : True"}
+        candidate = DesignPlanCandidate(
+            candidate_id="historical-bad-plan",
+            entries=entries,
+            missing=[],
+            findings={leaves[0]: ["invalid leaf interface"]},
+            blocked={leaves[0]},
+            components=[[leaves[0]]],
+        )
+
+        admitted, frontier, blocked = _initial_plan_admission(
+            ctx, [root, *leaves], candidate
+        )
+
+        self.assertFalse(admitted)
+        self.assertEqual(set(frontier), set(leaves))
+        self.assertEqual(blocked, [leaves[0]])
+
+    def test_initial_plan_admits_cheaper_scoped_repair_after_both_lanes(self) -> None:
+        frontier = [
+            "def:security-parameter-negligible",
+            "def:finite-register-operators",
+            "def:single-qubit-paulis-cliffords",
+        ]
+        future = [f"lem:future-{index}" for index in range(49)]
+        ordered = [*frontier, *future]
+        ctx = SimpleNamespace(
+            nodes={
+                **{label: node(label) for label in frontier},
+                **{
+                    label: node(label, uses={frontier[index % len(frontier)]})
+                    for index, label in enumerate(future)
+                },
+            }
+        )
+        entries = {
+            label: {"target_signature": f"theorem {_lean_name(label)} : True"}
+            for label in ordered
+        }
+        blocked = {
+            "def:finite-register-operators",
+            future[0],
+            future[1],
+            future[2],
+        }
+        candidate = DesignPlanCandidate(
+            candidate_id="historical-tournament-2-b",
+            entries=entries,
+            missing=[],
+            findings={label: [f"closure finding for {label}"] for label in blocked},
+            blocked=blocked,
+            components=[[label] for label in blocked],
+        )
+
+        admitted, ready, blocked_ready, repair_work, tournament_work = (
+            _initial_plan_repair_admission(ctx, ordered, candidate)
+        )
+
+        self.assertTrue(admitted)
+        self.assertEqual(set(ready), set(frontier))
+        self.assertEqual(blocked_ready, ["def:finite-register-operators"])
+        self.assertEqual((repair_work, tournament_work), (16, 104))
+
+    def test_initial_plan_repair_cost_rejects_catastrophic_candidate(self) -> None:
+        labels = [f"def:node-{index}" for index in range(52)]
+        candidate = DesignPlanCandidate(
+            candidate_id="historical-catastrophic",
+            entries={label: {} for label in labels},
+            missing=[],
+            findings={
+                label: [f"finding {index}" for index in range(2)]
+                for label in labels
+            },
+            blocked=set(labels),
+            components=[labels[:18], labels[18:35], labels[35:]],
+        )
+
+        repair_work, tournament_work = _initial_plan_repair_costs(
+            candidate, len(labels)
+        )
+
+        self.assertGreater(repair_work, tournament_work)
+
+    def test_tournament_selects_repairable_plan_instead_of_restarting(self) -> None:
+        leaves = ["def:left", "def:right"]
+        future = ["lem:left-result", "lem:right-result"]
+        ordered = [*leaves, *future]
+        ctx = SimpleNamespace(
+            nodes={
+                leaves[0]: node(leaves[0]),
+                leaves[1]: node(leaves[1]),
+                future[0]: node(future[0], uses={leaves[0]}),
+                future[1]: node(future[1], uses={leaves[1]}),
+            },
+            stmt_fps={label: f"{label}-v1" for label in ordered},
+            design_plan="",
+            design_plan_entries={},
+            generation_feedback={},
+            telemetry=FakeTelemetry(),
+            base_timeout=30,
+            hard_timeout=60,
+        )
+        entries = {
+            label: {"target_signature": f"theorem {_lean_name(label)} : True"}
+            for label in ordered
+        }
+        repairable = DesignPlanCandidate(
+            candidate_id="B",
+            entries=entries,
+            missing=[],
+            findings={leaves[0]: ["one isolated closure defect"]},
+            blocked={leaves[0]},
+            components=[[leaves[0]]],
+        )
+        catastrophic = DesignPlanCandidate(
+            candidate_id="A",
+            entries=entries,
+            missing=[],
+            findings={label: ["bad", "worse"] for label in ordered},
+            blocked=set(ordered),
+            components=[ordered],
+        )
+
+        def generate(*args, **kwargs):
+            return catastrophic if args[5] == "A" else repairable
+
+        with patch(
+            "formalize_blueprint._generate_design_plan_candidate",
+            side_effect=generate,
+        ), patch(
+            "formalize_blueprint._merge_design_plan_candidates",
+            return_value=(repairable, []),
+        ):
+            selected, _alternate = _initial_design_plan_tournament(
+                ctx, ordered, [], [], ordered
+            )
+
+        self.assertEqual(selected.candidate_id, "B")
+        tournament_events = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_design_plan_tournament"
+        ]
+        self.assertEqual(
+            tournament_events[-1]["selection_mode"], "cheaper_scoped_repair"
+        )
+
+    def test_tournament_uses_repair_cost_not_lexicographic_plan_score(self) -> None:
+        leaves = ["def:left", "def:right"]
+        future = ["lem:left-result", "lem:right-result"]
+        ordered = [*leaves, *future]
+        ctx = SimpleNamespace(
+            nodes={
+                leaves[0]: node(leaves[0]),
+                leaves[1]: node(leaves[1]),
+                future[0]: node(future[0], uses={leaves[0]}),
+                future[1]: node(future[1], uses={leaves[1]}),
+            },
+            stmt_fps={label: f"{label}-v1" for label in ordered},
+            design_plan="",
+            design_plan_entries={},
+            generation_feedback={},
+            telemetry=FakeTelemetry(),
+            base_timeout=30,
+            hard_timeout=60,
+        )
+        entries = {
+            label: {"target_signature": f"theorem {_lean_name(label)} : True"}
+            for label in ordered
+        }
+        lexicographic_winner = DesignPlanCandidate(
+            candidate_id="A",
+            entries=entries,
+            missing=[],
+            findings={leaves[0]: [f"finding-{index}" for index in range(6)]},
+            blocked={leaves[0]},
+            components=[[leaves[0]]],
+        )
+        cheaper_repair = DesignPlanCandidate(
+            candidate_id="B",
+            entries=entries,
+            missing=[],
+            findings={leaves[0]: ["one finding"]},
+            blocked=set(leaves),
+            components=[leaves],
+        )
+        self.assertLess(lexicographic_winner.score, cheaper_repair.score)
+        self.assertGreater(
+            _initial_plan_repair_costs(lexicographic_winner, len(ordered))[0],
+            _initial_plan_repair_costs(cheaper_repair, len(ordered))[0],
+        )
+
+        def generate(*args, **kwargs):
+            return lexicographic_winner if args[5] == "A" else cheaper_repair
+
+        with patch(
+            "formalize_blueprint._generate_design_plan_candidate",
+            side_effect=generate,
+        ), patch(
+            "formalize_blueprint._merge_design_plan_candidates",
+            return_value=(lexicographic_winner, []),
+        ):
+            selected, _alternate = _initial_design_plan_tournament(
+                ctx, ordered, [], [], ordered
+            )
+
+        self.assertEqual(selected.candidate_id, "B")
+
+    def test_design_plan_merge_cannot_reduce_ready_frontier(self) -> None:
+        leaf = "def:leaf"
+        later = "lem:later"
+        ctx = SimpleNamespace(
+            nodes={leaf: node(leaf), later: node(later, uses={leaf})}
+        )
+        primary = DesignPlanCandidate(
+            candidate_id="B",
+            entries={leaf: {"target_signature": "def def_leaf : Nat"}, later: {}},
+            missing=[],
+            findings={later: ["first defect", "second defect"]},
+            blocked={later},
+            components=[[later]],
+        )
+        alternate = DesignPlanCandidate(
+            candidate_id="A",
+            entries={leaf: {"target_signature": "def def_leaf : Nat"}, later: {}},
+            missing=[],
+            findings={},
+            blocked=set(),
+            components=[],
+        )
+        globally_better_but_frontier_blocking = DesignPlanCandidate(
+            candidate_id="merge:B+A",
+            entries=copy.deepcopy(primary.entries),
+            missing=[],
+            findings={leaf: ["replacement blocks the ready leaf"]},
+            blocked={leaf},
+            components=[[leaf]],
+        )
+
+        with patch(
+            "formalize_blueprint._evaluate_design_plan_candidate",
+            return_value=globally_better_but_frontier_blocking,
+        ):
+            merged, components = _merge_design_plan_candidates(
+                ctx, [leaf, later], primary, alternate
+            )
+
+        self.assertIs(merged, primary)
+        self.assertEqual(components, [])
+
     def test_rejected_closed_contract_tries_retained_alternate_without_model(self) -> None:
         label = "def:leaf"
         selected = {
@@ -4107,6 +5500,7 @@ end ModelOutput
             "target_signature": "def def_leaf : Nat",
             "helpers": [],
             "decisions": ["selected"],
+            "semantic_revision_count": 1,
         }
         alternate = {
             **selected,
@@ -4130,7 +5524,65 @@ end ModelOutput
         self.assertTrue(changed)
         call_model.assert_not_called()
         self.assertIn("Int", ctx.design_plan_entries[label]["target_signature"])
+        self.assertEqual(
+            ctx.design_plan_entries[label]["semantic_revision_count"], 1
+        )
         self.assertNotIn(label, ctx.design_plan_alternates)
+
+    def test_model_plan_correction_preserves_semantic_revision_count(self) -> None:
+        label = "def:leaf"
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "def:leaf-v1"},
+            tex_blocks={label: r"\begin{definition}\label{def:leaf}Leaf\end{definition}"},
+            design_plan="",
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "statement_fp": "def:leaf-v1",
+                    "target_signature": "def def_leaf : Nat",
+                    "helpers": [],
+                    "decisions": ["old strategy"],
+                    "semantic_revision_count": 1,
+                }
+            },
+            design_plan_alternates={},
+            telemetry=FakeTelemetry(),
+            base_timeout=120,
+            hard_timeout=300,
+            base_effort="medium",
+            escalation_effort="high",
+        )
+        corrected = CallResult(
+            status="ok",
+            text=json.dumps(
+                {
+                    "contracts": [
+                        {
+                            "label": label,
+                            "target_signature": "def def_leaf : Int",
+                            "helpers": [],
+                            "decisions": ["new strategy"],
+                        }
+                    ]
+                }
+            ),
+        )
+
+        with patch("formalize_blueprint._call_model", return_value=corrected):
+            changed = _correct_phase1_design_plan(
+                ctx,
+                [label],
+                "the previous strategy was semantically rejected",
+                escalated=True,
+                try_alternate=False,
+            )
+
+        self.assertTrue(changed)
+        self.assertIn("Int", ctx.design_plan_entries[label]["target_signature"])
+        self.assertEqual(
+            ctx.design_plan_entries[label]["semantic_revision_count"], 1
+        )
 
     def test_empty_design_plan_retries_once_with_completeness_feedback(self) -> None:
         label = "def:leaf"
@@ -4182,7 +5634,7 @@ end ModelOutput
         ]
         self.assertEqual(statuses, ["invalid_empty_contracts", "ok"])
 
-    def test_design_plan_closure_is_corrected_before_statement_generation(self) -> None:
+    def test_invalid_initial_plan_restarts_before_statement_generation(self) -> None:
         provider = "def:network"
         consumer = "lem:representable"
         nodes = {
@@ -4228,19 +5680,6 @@ end ModelOutput
             ),
         )
 
-        def correct(
-            _ctx, labels, evidence, *, escalated=False, try_alternate=True
-        ):
-            self.assertEqual(set(labels), {provider, consumer})
-            self.assertFalse(escalated)
-            self.assertFalse(try_alternate)
-            self.assertIn("def_network.Representable", evidence)
-            self.assertIn("Provider contract(s) implicated", evidence)
-            _ctx.design_plan_entries[consumer]["target_signature"] = (
-                "theorem lem_representable : def_network.realizes"
-            )
-            return True
-
         with patch(
             "formalize_blueprint._sections_for_deps", return_value=[]
         ), patch(
@@ -4249,15 +5688,16 @@ end ModelOutput
             "formalize_blueprint._call_model", return_value=planned
         ), patch(
             "formalize_blueprint._correct_phase1_design_plan",
-            side_effect=correct,
+            return_value=True,
         ) as correction:
-            _ensure_phase1_design_plan(ctx, set(nodes), [])
+            with self.assertRaises(RepairRequest) as raised:
+                _ensure_phase1_design_plan(ctx, set(nodes), [])
 
-        correction.assert_called_once()
-        self.assertIn("closure_fp", ctx.design_plan_entries[provider])
-        self.assertIn("closure_fp", ctx.design_plan_entries[consumer])
+        correction.assert_not_called()
+        self.assertFalse(raised.exception.authorizes_blueprint_repair)
+        self.assertEqual(ctx.design_plan_entries, {})
 
-    def test_unclosed_plan_gets_one_correction_then_invalidates_component(self) -> None:
+    def test_unclosed_initial_plan_is_discarded_without_correction(self) -> None:
         provider = "def:network"
         consumer = "lem:representable"
         nodes = {
@@ -4315,23 +5755,91 @@ end ModelOutput
             with self.assertRaises(RepairRequest):
                 _ensure_phase1_design_plan(ctx, set(nodes), [])
 
-        self.assertEqual(
-            [call.kwargs["escalated"] for call in correction.call_args_list],
-            [False],
-        )
+        correction.assert_not_called()
         self.assertNotIn(provider, ctx.design_plan_entries)
         self.assertNotIn(consumer, ctx.design_plan_entries)
-        invalidations = [
+        rejections = [
             fields
             for event, fields in ctx.telemetry.events
-            if event == "phase1_design_plan_invalidated"
-            and fields.get("reason") == "contract_closure_correction_exhausted"
+            if event == "phase1_design_plan_tournament"
+            and fields.get("status") == "rejected_no_admissible_plan"
         ]
-        self.assertEqual(
-            set(invalidations[0]["labels"]),
-            {provider, consumer},
+        self.assertEqual(len(rejections), 1)
+        self.assertEqual(rejections[0]["selected_candidate"], "")
+
+    def test_closure_correction_preserves_partial_progress_without_retry(self) -> None:
+        provider = "def:network"
+        consumer = "lem:representable"
+        nodes = {
+            provider: node(provider),
+            consumer: node(consumer, uses={provider}),
+        }
+        ctx = SimpleNamespace(
+            name="test",
+            nodes=nodes,
+            stmt_fps={label: f"{label}-v1" for label in nodes},
+            design_plan="",
+            design_plan_entries={
+                provider: {
+                    "target_signature": (
+                        "structure def_network where\n  realizes : Prop"
+                    ),
+                    "helpers": [],
+                },
+                consumer: {
+                    "target_signature": (
+                        "theorem lem_representable : "
+                        "def_network.First ∧ def_network.Second"
+                    ),
+                    "helpers": [],
+                },
+            },
+            design_plan_alternates={},
+            paper_text="",
+            telemetry=FakeTelemetry(),
+            workers=1,
+            base_timeout=120,
+            hard_timeout=300,
+            base_effort="medium",
+            escalation_effort="high",
         )
-        self.assertEqual(invalidations[0]["rejected_labels"], [consumer])
+        findings = _validate_design_plan_contract_closure(ctx, list(nodes))
+        observed_evidence: list[str] = []
+
+        def correct(isolated, labels, evidence, **_kwargs):
+            observed_evidence.append(evidence)
+            self.assertEqual(set(labels), {provider, consumer})
+            isolated.design_plan_entries[provider]["target_signature"] = (
+                "structure def_network where\n"
+                "  realizes : Prop\n"
+                "  First : Prop"
+            )
+            return True
+
+        with patch(
+            "formalize_blueprint._correct_phase1_design_plan",
+            side_effect=correct,
+        ) as correction:
+            with self.assertRaises(RepairRequest):
+                _repair_phase1_design_plan_closure(ctx, list(nodes), findings)
+
+        self.assertEqual(correction.call_count, 1)
+        self.assertNotIn(provider, ctx.design_plan_entries)
+        self.assertNotIn(consumer, ctx.design_plan_entries)
+        self.assertIn(
+            "First",
+            ctx.design_plan_alternates[provider]["target_signature"],
+        )
+        self.assertNotIn(
+            "Second",
+            ctx.design_plan_alternates[provider]["target_signature"],
+        )
+        attempts = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_design_plan_closure_attempt"
+        ]
+        self.assertEqual([item["improved"] for item in attempts], [True])
 
     def test_disjoint_plan_closure_components_correct_concurrently(self) -> None:
         providers = ["def:a", "def:b"]
@@ -4343,10 +5851,22 @@ end ModelOutput
             consumers[1]: node(consumers[1], uses={providers[1]}),
         }
         entries = {
-            providers[0]: {"target_signature": "def def_a : Nat", "helpers": []},
-            providers[1]: {"target_signature": "def def_b : Nat", "helpers": []},
-            consumers[0]: {"target_signature": "theorem lem_a : True", "helpers": []},
-            consumers[1]: {"target_signature": "theorem lem_b : True", "helpers": []},
+            providers[0]: {
+                "target_signature": "structure def_a where\n  value : Nat",
+                "helpers": [],
+            },
+            providers[1]: {
+                "target_signature": "structure def_b where\n  value : Nat",
+                "helpers": [],
+            },
+            consumers[0]: {
+                "target_signature": "theorem lem_a : def_a.required = 0",
+                "helpers": [],
+            },
+            consumers[1]: {
+                "target_signature": "theorem lem_b : def_b.required = 0",
+                "helpers": [],
+            },
         }
         ctx = SimpleNamespace(
             name="test",
@@ -4364,17 +5884,20 @@ end ModelOutput
         peak = 0
         lock = threading.Lock()
 
-        def correct(isolated, labels, _evidence, **_kwargs):
+        def correct(isolated, labels, _evidence, **kwargs):
             nonlocal active, peak
+            self.assertEqual(len(set(labels) & set(providers)), 1)
+            self.assertEqual(len(set(labels) & set(consumers)), 1)
             with lock:
                 active += 1
                 peak = max(peak, active)
             time.sleep(0.03)
             for consumer, provider in zip(consumers, providers):
                 if consumer in labels:
-                    isolated.design_plan_entries[consumer]["target_signature"] = (
-                        f"theorem {_lean_name(consumer)} : "
-                        f"{_lean_name(provider)} = {_lean_name(provider)}"
+                    isolated.design_plan_entries[provider]["target_signature"] = (
+                        f"structure {_lean_name(provider)} where\n"
+                        "  value : Nat\n"
+                        "  required : Nat"
                     )
             with lock:
                 active -= 1
@@ -4389,8 +5912,8 @@ end ModelOutput
             )
 
         self.assertEqual(peak, 2)
-        self.assertIn("def_a", ctx.design_plan_entries[consumers[0]]["target_signature"])
-        self.assertIn("def_b", ctx.design_plan_entries[consumers[1]]["target_signature"])
+        self.assertIn("required", ctx.design_plan_entries[providers[0]]["target_signature"])
+        self.assertIn("required", ctx.design_plan_entries[providers[1]]["target_signature"])
         waves = [
             fields
             for event, fields in ctx.telemetry.events
@@ -4415,19 +5938,19 @@ end ModelOutput
             design_plan="",
             design_plan_entries={
                 good_provider: {
-                    "target_signature": "def def_good : Nat",
+                    "target_signature": "structure def_good where\n  value : Nat",
                     "helpers": [],
                 },
                 bad_provider: {
-                    "target_signature": "def def_bad : Nat",
+                    "target_signature": "structure def_bad where\n  value : Nat",
                     "helpers": [],
                 },
                 good_consumer: {
-                    "target_signature": "theorem lem_good : True",
+                    "target_signature": "theorem lem_good : def_good.required = 0",
                     "helpers": [],
                 },
                 bad_consumer: {
-                    "target_signature": "theorem lem_bad : True",
+                    "target_signature": "theorem lem_bad : def_bad.required = 0",
                     "helpers": [],
                 },
             },
@@ -4441,8 +5964,8 @@ end ModelOutput
         def correct(isolated, labels, _evidence, **_kwargs):
             if good_consumer not in labels:
                 return False
-            isolated.design_plan_entries[good_consumer]["target_signature"] = (
-                "theorem lem_good : def_good = def_good"
+            isolated.design_plan_entries[good_provider]["target_signature"] = (
+                "structure def_good where\n  value : Nat\n  required : Nat"
             )
             return True
 
@@ -4457,11 +5980,13 @@ end ModelOutput
 
         self.assertIn(good_provider, ctx.design_plan_entries)
         self.assertIn(good_consumer, ctx.design_plan_entries)
-        self.assertIn("def_good", ctx.design_plan_entries[good_consumer]["target_signature"])
+        self.assertIn("required", ctx.design_plan_entries[good_provider]["target_signature"])
+        # A true missing-member failure invalidates the provider and consumer
+        # together because either public surface may own the mismatch.
         self.assertNotIn(bad_provider, ctx.design_plan_entries)
         self.assertNotIn(bad_consumer, ctx.design_plan_entries)
 
-    def test_deferred_closure_blocks_provider_component_not_unrelated_work(self) -> None:
+    def test_deferred_closure_cannot_admit_invalid_initial_plan(self) -> None:
         provider = "def:network"
         consumer = "lem:representable"
         unrelated = "def:scalar"
@@ -4523,26 +6048,19 @@ end ModelOutput
         ), patch(
             "formalize_blueprint._correct_phase1_design_plan"
         ) as correction:
-            findings = _ensure_phase1_design_plan(
-                ctx,
-                set(nodes),
-                [],
-                defer_closure_repair=True,
-            )
+            with self.assertRaises(RepairRequest) as raised:
+                _ensure_phase1_design_plan(
+                    ctx,
+                    set(nodes),
+                    [],
+                    defer_closure_repair=True,
+                )
 
         correction.assert_not_called()
-        self.assertEqual(set(findings), {consumer})
-        self.assertEqual(
-            _closure_blocked_labels(ctx, findings),
-            {provider, consumer},
-        )
-        self.assertEqual(
-            _closure_findings_for_scope(ctx, findings, [unrelated]),
-            {},
-        )
-        self.assertIn("closure_fp", ctx.design_plan_entries[unrelated])
+        self.assertFalse(raised.exception.authorizes_blueprint_repair)
+        self.assertEqual(ctx.design_plan_entries, {})
 
-    def test_bottom_up_phase1_runs_closed_work_before_blocked_component_repair(self) -> None:
+    def test_bottom_up_phase1_does_not_block_provider_for_future_consumer(self) -> None:
         provider = "def:network"
         consumer = "lem:representable"
         unrelated = "def:scalar"
@@ -4619,9 +6137,9 @@ end ModelOutput
         ):
             sections = _run_phase1(ctx, [], set(nodes), "bottom-up")
 
-        self.assertEqual(events[0], ("generate", {unrelated}))
-        self.assertEqual(events[1][0], "repair")
-        self.assertIn(provider, events[1][1])
+        self.assertEqual(events[0], ("generate", {provider, unrelated}))
+        self.assertEqual(events[1], ("generate", {consumer}))
+        self.assertFalse(any(kind == "repair" for kind, _labels in events))
         self.assertEqual(_frozen_labels(sections), set(nodes))
 
     def test_design_plan_preserves_helpers_and_generation_decisions(self) -> None:
@@ -5037,17 +6555,28 @@ def def_network : NetworkData := sorry
             ctx.design_plan_entries[label]["semantic_revision_count"], 1
         )
 
-    def test_second_semantic_exhaustion_routes_only_revised_node_to_decomposition(
+    def test_blueprint_direct_exhaustion_routes_only_that_node_to_decomposition(
         self,
     ) -> None:
         repeated = "def:repeated"
         first_exhaustion = "lem:first-exhaustion"
         ctx = SimpleNamespace(
+            nodes={
+                repeated: node(repeated),
+                first_exhaustion: node(first_exhaustion),
+            },
             design_plan_entries={
                 repeated: {"semantic_revision_count": 1},
                 first_exhaustion: {"semantic_revision_count": 0},
             },
             stmt_fps={repeated: "repeated-v1", first_exhaustion: "first-v1"},
+            blueprint_direct_generation={
+                repeated: {
+                    "statement_fp": "repeated-v1",
+                    "source": "test",
+                    "evidence": "blueprint-direct generation also failed",
+                }
+            },
             telemetry=FakeTelemetry(),
         )
         with patch(
@@ -5077,6 +6606,95 @@ def def_network : NetworkData := sorry
         ]
         self.assertEqual(events[-1]["labels"], [repeated])
         self.assertEqual(events[-1]["source"], "test")
+
+    def test_real_repeated_plan_rejection_uses_bounded_three_stage_lifecycle(
+        self,
+    ) -> None:
+        fixture = json.loads(
+            (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "phase1_orchestration_replay"
+                / "repeated_plan_semantic_exhaustion.json"
+            ).read_text(encoding="utf-8")
+        )
+        label = fixture["label"]
+        ctx = SimpleNamespace(
+            name=fixture["blueprint"],
+            nodes={label: node(label)},
+            stmt_fps={label: "finite-register-v1"},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "statement_fp": "finite-register-v1",
+                    "target_signature": "def def_finite_register_operators : Prop",
+                    "semantic_revision_count": 0,
+                }
+            },
+            design_plan_alternates={},
+            blueprint_direct_generation={},
+            generation_feedback={},
+            generation_candidates={},
+            retry_lifecycle={},
+            quarantined_labels=set(),
+            quarantine={},
+            telemetry=FakeTelemetry(),
+        )
+        evidence = fixture["semantic_rejection"]
+
+        with patch(
+            "formalize_blueprint._correct_phase1_design_plan", return_value=True
+        ) as correct:
+            self.assertEqual(
+                _semantic_exhaustion_policy(ctx, label), "plan-revision"
+            )
+            decomposition, revised, unresolved = (
+                _route_exhausted_phase1_semantics(
+                    ctx,
+                    [label],
+                    evidence,
+                    layer_no=0,
+                    source="historical-replay",
+                )
+            )
+            self.assertEqual(decomposition, set())
+            self.assertEqual(revised, {label})
+            self.assertEqual(unresolved, set())
+            self.assertEqual(
+                _semantic_exhaustion_policy(ctx, label), "blueprint-direct"
+            )
+
+            decomposition, revised, unresolved = (
+                _route_exhausted_phase1_semantics(
+                    ctx,
+                    [label],
+                    evidence,
+                    layer_no=0,
+                    source="historical-replay",
+                )
+            )
+            self.assertEqual(decomposition, set())
+            self.assertEqual(revised, {label})
+            self.assertEqual(unresolved, set())
+            self.assertIn(label, ctx.blueprint_direct_generation)
+            self.assertEqual(
+                _semantic_exhaustion_policy(ctx, label), "decomposition"
+            )
+
+            decomposition, revised, unresolved = (
+                _route_exhausted_phase1_semantics(
+                    ctx,
+                    [label],
+                    evidence,
+                    layer_no=0,
+                    source="historical-replay",
+                )
+            )
+            self.assertEqual(decomposition, {label})
+            self.assertEqual(revised, set())
+            self.assertEqual(unresolved, set())
+            correct.assert_called_once()
 
     def test_first_decomposition_verdict_revises_plan_before_blueprint(self) -> None:
         label = "def:cpwl"
@@ -5335,6 +6953,89 @@ def def_network : NetworkData := sorry
         self.assertEqual(call_model.call_count, 1)
         self.assertFalse(ctx.design_plan_entries[label].get("audit_fp"))
 
+    def test_mixed_plan_audit_authorizes_blueprint_repair_per_node(self) -> None:
+        fixture = json.loads(
+            (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "phase1_orchestration_replay"
+                / "mixed_plan_audit_routing.json"
+            ).read_text(encoding="utf-8")
+        )
+        security, channel = (
+            "def:security-parameter-negligible",
+            "def:channel-povm",
+        )
+        labels = [security, channel]
+        ctx = SimpleNamespace(
+            nodes={label: node(label) for label in labels},
+            stmt_fps={label: f"{label}-v1" for label in labels},
+            tex_blocks={
+                security: "Negligible for every eventually positive polynomial.",
+                channel: "A completely positive trace-preserving linear map.",
+            },
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "statement_fp": f"{label}-v1",
+                    "target_signature": f"def {_lean_name(label)} : Prop",
+                    "helpers": [],
+                    "decisions": [],
+                }
+                for label in labels
+            },
+            design_plan_alternates={},
+            design_plan="",
+            paper_text="",
+            base_timeout=120,
+            hard_timeout=300,
+            base_effort="medium",
+            escalation_effort="high",
+            retry_lifecycle={},
+            generation_candidates={},
+            telemetry=FakeTelemetry(),
+        )
+        response = CallResult(status="ok", text=json.dumps(fixture["payload"]))
+        with patch("formalize_blueprint._call_model", return_value=response):
+            audit = _audit_phase1_design_plan(ctx, labels)
+
+        self.assertIsInstance(audit, AlignmentAuditResult)
+        assert audit is not None
+        self.assertEqual(audit.kind, "mixed")
+        self.assertEqual(audit.labels_for("blueprint"), {security})
+        self.assertEqual(audit.labels_for("lean-generation"), {channel})
+        self.assertEqual(
+            ctx.design_plan_entries[security]["rejected_kind"], "blueprint"
+        )
+        self.assertEqual(
+            ctx.design_plan_entries[channel]["rejected_kind"], "lean-generation"
+        )
+
+        with patch(
+            "formalize_blueprint._audit_phase1_design_plan", return_value=audit
+        ):
+            with self.assertRaises(RepairRequest) as raised:
+                _phase1_frontier_plan_gateway(ctx, labels, labels, {})
+
+        self.assertTrue(raised.exception.authorizes_blueprint_repair)
+        self.assertEqual(raised.exception.labels, [security])
+        self.assertEqual(
+            raised.exception.labels,
+            fixture["expected_blueprint_repair_labels"],
+        )
+        self.assertNotIn(channel, raised.exception.model_repair_labels)
+        routed = [
+            event
+            for event in ctx.telemetry.events
+            if event[0] == "phase1_frontier_plan_audit_routed"
+        ]
+        self.assertEqual(len(routed), 1)
+        self.assertEqual(routed[0][1]["blueprint_repair_labels"], [security])
+        self.assertEqual(
+            routed[0][1]["deferred_plan_correction_labels"], [channel]
+        )
+
     def test_plan_audit_does_not_treat_proof_uses_as_public_dependencies(self) -> None:
         dependency = node("def:polytope")
         target = node("constr:delta3-rhombic", uses={"def:polytope", "def:Pk"})
@@ -5477,6 +7178,227 @@ def def_network : NetworkData := sorry
 
         self.assertEqual(call_model.call_count, 1)
         self.assertTrue(ctx.design_plan_entries[label].get("audit_fp"))
+
+    def test_frontier_plan_gateway_corrects_only_rejected_contract_slice(self) -> None:
+        provider = "def:provider"
+        target = "lem:target"
+        consumer = "thm:consumer"
+        nodes = {
+            provider: node(provider),
+            target: node(target, uses={provider}),
+            consumer: node(consumer, uses={target}),
+        }
+        ctx = SimpleNamespace(
+            nodes=nodes,
+            stmt_fps={label: f"{label}-v1" for label in nodes},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "statement_fp": f"{label}-v1",
+                    "target_signature": f"def {_lean_name(label)} : Nat",
+                    "helpers": [],
+                    "decisions": [],
+                }
+                for label in nodes
+            },
+            design_plan="",
+            retry_lifecycle={},
+            generation_candidates={},
+            telemetry=FakeTelemetry(),
+        )
+        rejection = (
+            "lean-generation",
+            "Interface-plan audit rejected: target drops its provider relation",
+            {target},
+            [],
+        )
+        with patch(
+            "formalize_blueprint._audit_phase1_design_plan",
+            side_effect=[rejection, None],
+        ) as audit, patch(
+            "formalize_blueprint._correct_phase1_design_plan",
+            return_value=True,
+        ) as correct, patch(
+            "formalize_blueprint._validate_design_plan_contract_closure",
+            return_value={},
+        ), patch("formalize_blueprint._prune_stale_generation_candidates"):
+            remaining = _phase1_frontier_plan_gateway(
+                ctx, [target], [provider, target, consumer], {}
+            )
+
+        self.assertEqual(remaining, {})
+        self.assertEqual(audit.call_count, 2)
+        self.assertEqual(correct.call_args.args[1], [target])
+        self.assertEqual(
+            set(correct.call_args.kwargs["context_labels"]),
+            {provider, consumer},
+        )
+        self.assertFalse(correct.call_args.kwargs["escalated"])
+        gateway_events = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_frontier_plan_gateway"
+        ]
+        self.assertEqual(gateway_events[-1]["status"], "accepted_after_correction")
+
+    def test_frontier_plan_gateway_rechecks_scoped_closure_after_correction(self) -> None:
+        provider = "def:provider"
+        target = "lem:target"
+        nodes = {
+            provider: node(provider),
+            target: node(target, uses={provider}),
+        }
+        ctx = SimpleNamespace(
+            nodes=nodes,
+            stmt_fps={label: f"{label}-v1" for label in nodes},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "statement_fp": f"{label}-v1",
+                    "target_signature": f"def {_lean_name(label)} : Nat",
+                    "helpers": [],
+                    "decisions": [],
+                }
+                for label in nodes
+            },
+            design_plan="",
+            retry_lifecycle={},
+            generation_candidates={},
+            telemetry=FakeTelemetry(),
+        )
+        rejection = (
+            "lean-generation",
+            "Interface-plan audit rejected: missing provider field",
+            {target},
+            [],
+        )
+        closure = {target: [f"{target}: missing member on {provider}"]}
+        with patch(
+            "formalize_blueprint._audit_phase1_design_plan",
+            side_effect=[rejection, None],
+        ), patch(
+            "formalize_blueprint._correct_phase1_design_plan",
+            return_value=True,
+        ) as correct, patch(
+            "formalize_blueprint._validate_design_plan_contract_closure",
+            side_effect=[closure, {}],
+        ), patch("formalize_blueprint._prune_stale_generation_candidates"):
+            remaining = _phase1_frontier_plan_gateway(
+                ctx, [target], [provider, target], {}
+            )
+
+        self.assertEqual(remaining, {})
+        self.assertEqual(correct.call_count, 2)
+        self.assertEqual(
+            correct.call_args.args[1], [target]
+        )
+
+    def test_future_consumer_closure_does_not_block_ready_provider(self) -> None:
+        provider = "def:provider"
+        consumer = "def:consumer"
+        nodes = {
+            provider: node(provider),
+            consumer: node(consumer, uses={provider}),
+        }
+        ctx = SimpleNamespace(
+            nodes=nodes,
+            stmt_fps={label: f"{label}-v1" for label in nodes},
+            design_plan_entries={
+                provider: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "statement_fp": f"{provider}-v1",
+                    "target_signature": "def def_provider : Nat",
+                    "helpers": [],
+                    "decisions": [],
+                },
+                consumer: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "statement_fp": f"{consumer}-v1",
+                    "target_signature": (
+                        "def def_consumer : def_provider.futureMember"
+                    ),
+                    "helpers": [],
+                    "decisions": [],
+                },
+            },
+            design_plan="",
+            retry_lifecycle={},
+            generation_candidates={},
+            telemetry=FakeTelemetry(),
+        )
+        future_finding = {
+            consumer: [
+                f"{consumer}: target signature requires "
+                "`def_provider.futureMember`, but planned declaration "
+                "`def_provider` exposes no such member"
+            ]
+        }
+        with patch(
+            "formalize_blueprint._audit_phase1_design_plan",
+            return_value=None,
+        ) as audit, patch(
+            "formalize_blueprint._correct_phase1_design_plan"
+        ) as correct:
+            remaining = _phase1_frontier_plan_gateway(
+                ctx,
+                [provider],
+                [provider, consumer],
+                future_finding,
+            )
+
+        self.assertEqual(remaining, future_finding)
+        audit.assert_called_once_with(ctx, [provider])
+        correct.assert_not_called()
+
+    def test_exhausted_frontier_correction_forces_fresh_scoped_plan(self) -> None:
+        label = "def:finite-register-operators"
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "register-v1"},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "statement_fp": "register-v1",
+                    "target_signature": "def def_finite_register_operators : Nat",
+                    "helpers": [],
+                    "decisions": [],
+                    "rejected_audit_fp": "old-rejection",
+                }
+            },
+            design_plan_alternates={label: {"target_signature": "stale"}},
+            design_plan="",
+            retry_lifecycle={},
+            generation_candidates={},
+            telemetry=FakeTelemetry(),
+        )
+        rejection = (
+            "lean-generation",
+            "Interface-plan audit rejected: partial trace swaps tensor factors",
+            {label},
+            [],
+        )
+        with patch(
+            "formalize_blueprint._audit_phase1_design_plan",
+            return_value=rejection,
+        ), patch(
+            "formalize_blueprint._correct_phase1_design_plan",
+            return_value=False,
+        ) as correct:
+            with self.assertRaises(RepairRequest):
+                _phase1_frontier_plan_gateway(ctx, [label], [label], {})
+
+        self.assertEqual(correct.call_count, 2)
+        self.assertNotIn(label, ctx.design_plan_entries)
+        self.assertNotIn(label, ctx.design_plan_alternates)
+        invalidations = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_frontier_plan_invalidated"
+        ]
+        self.assertEqual(invalidations[-1]["labels"], [label])
+        self.assertEqual(
+            invalidations[-1]["next_action"], "fresh_scoped_planning"
+        )
 
     def test_bottom_up_phase1_freezes_dependency_layers_directly(self) -> None:
         nodes = {
@@ -5977,6 +7899,238 @@ def def_network : NetworkData := sorry
         self.assertIn("Lean failed for def:a", raised.exception.evidence)
         self.assertIn("Lean failed for def:b", raised.exception.evidence)
 
+    def test_parallel_compile_revises_only_plan_defect_in_mixed_failure(self) -> None:
+        labels = ["lem:plan-defect", "lem:generated-defect"]
+        candidate = Phase1LayerCandidate(
+            labels=labels,
+            parsed=_parse_module(
+                "theorem lem_plan_defect : True := sorry\n\n"
+                "theorem lem_generated_defect : True := sorry\n"
+            ),
+            import_modules=[],
+            generation_tier="base",
+        )
+        ctx = SimpleNamespace(workers=1, telemetry=FakeTelemetry())
+
+        def fail_compile(_ctx, _labels, *_args, **kwargs):
+            kwargs["failure_evidence"].append("Lean rejected both declarations")
+            return None
+
+        with patch(
+            "formalize_blueprint._freeze_section_from_code",
+            side_effect=fail_compile,
+        ), patch(
+            "formalize_blueprint._phase1_compile_plan_defects",
+            return_value={labels[0]: "plan-owned unknown name"},
+        ), patch(
+            "formalize_blueprint._revise_exhausted_phase1_contracts",
+            return_value={labels[0]},
+        ) as revise, patch(
+            "formalize_blueprint._store_generation_candidates"
+        ), patch(
+            "formalize_blueprint._store_generation_feedback"
+        ):
+            with self.assertRaises(RepairRequest) as raised:
+                _compile_semantic_phase1_candidates(
+                    ctx,
+                    [candidate],
+                    [],
+                    _SectionNumberAllocator(1),
+                    layer_no=0,
+                )
+
+        self.assertEqual(raised.exception.labels, [labels[1]])
+        self.assertEqual(raised.exception.failure_route.failed_labels, (labels[1],))
+        self.assertFalse(raised.exception.plan_revision_required)
+        self.assertEqual(
+            revise.call_args.kwargs["policy"],
+            "post_compile_plan_realization",
+        )
+
+    def test_parallel_compile_all_plan_defects_restart_without_quarantine(self) -> None:
+        label = "lem:plan-defect"
+        candidate = Phase1LayerCandidate(
+            labels=[label],
+            parsed=_parse_module("theorem lem_plan_defect : True := sorry\n"),
+            import_modules=[],
+            generation_tier="base",
+        )
+        ctx = SimpleNamespace(workers=1, telemetry=FakeTelemetry())
+
+        def fail_compile(_ctx, _labels, *_args, **kwargs):
+            kwargs["failure_evidence"].append("unknown plan-owned identifier")
+            return None
+
+        with patch(
+            "formalize_blueprint._freeze_section_from_code",
+            side_effect=fail_compile,
+        ), patch(
+            "formalize_blueprint._phase1_compile_plan_defects",
+            return_value={label: "plan-owned unknown name"},
+        ), patch(
+            "formalize_blueprint._revise_exhausted_phase1_contracts",
+            return_value={label},
+        ), patch(
+            "formalize_blueprint._store_generation_candidates"
+        ), patch(
+            "formalize_blueprint._store_generation_feedback"
+        ):
+            with self.assertRaises(RepairRequest) as raised:
+                _compile_semantic_phase1_candidates(
+                    ctx,
+                    [candidate],
+                    [],
+                    _SectionNumberAllocator(1),
+                    layer_no=0,
+                )
+
+        self.assertEqual(raised.exception.labels, [label])
+        self.assertTrue(raised.exception.plan_revision_required)
+        self.assertIsNone(raised.exception.failure_route)
+
+    def test_parallel_compile_routes_plan_defect_before_slow_sibling_finishes(
+        self,
+    ) -> None:
+        fixture = json.loads(
+            (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "phase1_orchestration_replay"
+                / "compile_plan_defect_head_of_line.json"
+            ).read_text(encoding="utf-8")
+        )
+        plan_label = fixture["plan_defect_label"]
+        slow_label = fixture["slow_sibling_label"]
+        candidates = [
+            Phase1LayerCandidate(
+                labels=[label],
+                parsed=_parse_module(f"def {_lean_name(label)} : Nat := 1\n"),
+                import_modules=[],
+                generation_tier="base",
+            )
+            for label in (plan_label, slow_label)
+        ]
+        ctx = SimpleNamespace(workers=2, telemetry=FakeTelemetry())
+        correction_started = threading.Event()
+        sibling_observed_correction: list[bool] = []
+
+        def fail_compile(_ctx, candidate_labels, *_args, **kwargs):
+            label = candidate_labels[0]
+            if label == slow_label:
+                sibling_observed_correction.append(
+                    correction_started.wait(timeout=0.5)
+                )
+            kwargs["failure_evidence"].append(f"Lean failed for {label}")
+            return None
+
+        def plan_defects(_ctx, labels, _code, _evidence):
+            return (
+                {plan_label: "plan-owned unknown name"}
+                if plan_label in labels
+                else {}
+            )
+
+        def revise(_ctx, labels, _evidence, **_kwargs):
+            if plan_label in labels:
+                correction_started.set()
+                return {plan_label}
+            return set()
+
+        with patch(
+            "formalize_blueprint._freeze_section_from_code",
+            side_effect=fail_compile,
+        ), patch(
+            "formalize_blueprint._phase1_compile_plan_defects",
+            side_effect=plan_defects,
+        ), patch(
+            "formalize_blueprint._revise_exhausted_phase1_contracts",
+            side_effect=revise,
+        ), patch(
+            "formalize_blueprint._store_generation_candidates"
+        ), patch(
+            "formalize_blueprint._store_generation_feedback"
+        ):
+            with self.assertRaises(RepairRequest) as raised:
+                _compile_semantic_phase1_candidates(
+                    ctx,
+                    candidates,
+                    [],
+                    _SectionNumberAllocator(1),
+                    layer_no=fixture["layer"],
+                )
+
+        self.assertTrue(correction_started.is_set())
+        self.assertEqual(sibling_observed_correction, [True])
+        self.assertIn(plan_label, raised.exception.labels)
+        self.assertIn(slow_label, raised.exception.labels)
+        self.assertTrue(raised.exception.plan_revision_required)
+        routed = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_compile_failure_routed"
+        ]
+        self.assertEqual(
+            {fields["classification"] for fields in routed},
+            {"plan_revision", "lean_generation"},
+        )
+
+    def test_plan_owned_unknown_name_skips_local_compiler_patch_calls(self) -> None:
+        label = "lem:claim"
+        signature = "theorem lem_claim : Nat.ceilLog 3 4 ≤ 2"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={label: node(label)},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "target_signature": signature,
+                    "helpers": [],
+                }
+            },
+            generation_candidates={},
+            unavailable_imports=set(),
+            lean_command=["lean"],
+            telemetry=FakeTelemetry(),
+            base_timeout=120,
+        )
+        evidence: list[str] = []
+        failed_code: list[str] = []
+        output = "error(lean.unknownIdentifier): Unknown constant `Nat.ceilLog`"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch(
+                "formalize_blueprint._section_module",
+                return_value=("Generated.Skeleton01", root / "Skeleton01.lean"),
+            ), patch(
+                "formalize_blueprint._discard_section_artifacts"
+            ), patch(
+                "formalize_blueprint._check_lean",
+                return_value=(False, output),
+            ) as check, patch(
+                "formalize_blueprint._targeted_patch_skeleton_decls"
+            ) as patch_decls:
+                result = _freeze_section_from_code(
+                    ctx,
+                    [label],
+                    [],
+                    _SectionNumberAllocator(1),
+                    [signature + " := sorry"],
+                    [],
+                    [],
+                    allow_patch=True,
+                    route_plan_defects=True,
+                    failure_evidence=evidence,
+                    failure_candidate_code=failed_code,
+                )
+
+        self.assertIsNone(result)
+        self.assertEqual(check.call_count, 2)
+        patch_decls.assert_not_called()
+        self.assertIn("plan-realizing interface", evidence[0])
+        self.assertIn("Nat.ceilLog", failed_code[0])
+
     def test_generation_failure_preserves_siblings_accepted_beside_audit_failure(self) -> None:
         generated = Phase1LayerCandidate(
             labels=["def:a", "def:c"],
@@ -6196,6 +8350,304 @@ def def_network : NetworkData := sorry
             ],
             ["def:a", "def:c"],
         )
+
+    def test_exact_plan_rejection_revises_before_generation_retry(self) -> None:
+        label = "def:a"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={label: node(label)},
+            stmt_fps={label: "fp-a"},
+            design_plan_entries={},
+            generation_feedback={},
+            retry_lifecycle={},
+            quarantined_labels=set(),
+            quarantine={},
+            workers=1,
+            lean_command=["lean"],
+            telemetry=FakeTelemetry(),
+        )
+        audit_result = AlignmentAuditResult(
+            kind="lean-generation",
+            reason="the plan omits a public blueprint condition",
+            rejected={label},
+            helpers=[],
+            kinds_by_label={label: "lean-generation"},
+            reasons_by_label={
+                label: "the plan omits a public blueprint condition"
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "Skeleton01.lean"
+            path.write_text("def def_a : Prop := sorry\n", encoding="utf-8")
+            candidate = Section(1, [label], path, "Generated.S1", [])
+            with patch("formalize_blueprint.SCRATCH_DIR", root), patch(
+                "formalize_blueprint._check_lean", return_value=(True, "")
+            ), patch(
+                "formalize_blueprint._model_alignment_audit",
+                return_value=audit_result,
+            ), patch(
+                "formalize_blueprint._plan_realized_semantic_rejections",
+                return_value={label},
+            ), patch(
+                "formalize_blueprint._revise_exhausted_phase1_contracts",
+                return_value={label},
+            ) as revise, patch(
+                "formalize_blueprint._record_retry_failure"
+            ) as retry_failure:
+                with self.assertRaises(RepairRequest) as raised:
+                    _audit_phase1_layer_candidates(ctx, 1, [candidate])
+
+        revise.assert_called_once_with(
+            ctx,
+            {label},
+            "Blueprint contract audit rejected:\n"
+            "- the plan omits a public blueprint condition",
+        )
+        retry_failure.assert_not_called()
+        self.assertEqual(raised.exception.labels, [label])
+        self.assertEqual(raised.exception.failure_route.action, "independent")
+        self.assertTrue(
+            any(
+                event == "phase1_plan_realized_semantic_rejection"
+                for event, _fields in ctx.telemetry.events
+            )
+        )
+
+    def test_reported_combined_defect_revises_plan_before_generation_retry(self) -> None:
+        label = "def:key-space"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={label: node(label)},
+            stmt_fps={label: "fp-key"},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "target_signature": "def def_key_space : Type",
+                    "helpers": [],
+                }
+            },
+            generation_candidates={},
+            generation_feedback={},
+            retry_lifecycle={},
+            quarantined_labels=set(),
+            quarantine={},
+            workers=1,
+            lean_command=["lean"],
+            telemetry=FakeTelemetry(),
+        )
+        audit_result = AlignmentAuditResult(
+            kind="lean-generation",
+            reason="the plan and Lean both abstract away concrete key pairs",
+            rejected={label},
+            helpers=[],
+            kinds_by_label={label: "lean-generation"},
+            reasons_by_label={
+                label: "the plan and Lean both abstract away concrete key pairs"
+            },
+            origins_by_label={label: "both"},
+            plan_requirements_by_label={
+                label: ["keys are exactly valid coordinate pairs"]
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "Skeleton01.lean"
+            path.write_text("def def_key_space : Type := Nat\n", encoding="utf-8")
+            candidate = Section(1, [label], path, "Generated.S1", [])
+            with patch("formalize_blueprint.SCRATCH_DIR", root), patch(
+                "formalize_blueprint._check_lean", return_value=(True, "")
+            ), patch(
+                "formalize_blueprint._model_alignment_audit",
+                return_value=audit_result,
+            ), patch(
+                "formalize_blueprint._revise_exhausted_phase1_contracts",
+                return_value={label},
+            ) as revise, patch(
+                "formalize_blueprint._plan_realized_semantic_rejections",
+                return_value=set(),
+            ), patch(
+                "formalize_blueprint._record_retry_failure"
+            ) as retry_failure:
+                with self.assertRaises(RepairRequest) as raised:
+                    _audit_phase1_layer_candidates(ctx, 2, [candidate])
+
+        revise.assert_called_once()
+        evidence = revise.call_args.args[2]
+        self.assertIn("keys are exactly valid coordinate pairs", evidence)
+        retry_failure.assert_not_called()
+        self.assertEqual(raised.exception.labels, [label])
+        self.assertEqual(raised.exception.failure_route.action, "independent")
+        self.assertTrue(
+            any(
+                event == "phase1_audit_origin_plan_revision"
+                for event, _fields in ctx.telemetry.events
+            )
+        )
+
+    def test_semantic_first_combined_defect_uses_same_plan_route(self) -> None:
+        label = "def:tensor-pauli-notation"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={label: node(label)},
+            telemetry=FakeTelemetry(),
+        )
+        candidate = Phase1LayerCandidate(
+            labels=[label],
+            parsed=_parse_module("def def_tensor_pauli_notation : Type := Nat\n"),
+            import_modules=[],
+            generation_tier="base",
+        )
+        audit = AlignmentAuditResult(
+            kind="lean-generation",
+            reason="the plan hides the tensor product behind an arbitrary type",
+            rejected={label},
+            helpers=[],
+            kinds_by_label={label: "lean-generation"},
+            reasons_by_label={
+                label: "the plan hides the tensor product behind an arbitrary type"
+            },
+            origins_by_label={label: "both"},
+            plan_requirements_by_label={
+                label: ["the indexed tensor-product formula"]
+            },
+        )
+        with patch(
+            "formalize_blueprint._revise_exhausted_phase1_contracts",
+            return_value={label},
+        ) as revise, patch(
+            "formalize_blueprint._record_retry_failure"
+        ) as retry_failure:
+            request = _semantic_first_failure_request(
+                ctx, 4, [candidate], audit, []
+            )
+
+        revise.assert_called_once()
+        retry_failure.assert_not_called()
+        self.assertEqual(request.labels, [label])
+        self.assertEqual(request.failure_route.action, "independent")
+        self.assertFalse(request.authorizes_blueprint_repair)
+
+    def test_compile_unknown_name_copied_from_plan_is_plan_defect(self) -> None:
+        label = "lem:ahm-lower-bound"
+        plan = "theorem lem_ahm_lower_bound (m : Nat) : Nat.ceilLog 3 m ≤ m"
+        code = plan + " := by sorry"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={label: node(label)},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "target_signature": plan,
+                    "helpers": [],
+                }
+            },
+            generation_candidates={},
+        )
+        output = (
+            "Skeleton.lean:1:44: error(lean.unknownIdentifier): "
+            "Unknown constant `Nat.ceilLog`\n"
+            "Skeleton.lean:1:1: error: unknown namespace `BigOperators`"
+        )
+
+        defects = _phase1_compile_plan_defects(ctx, [label], code, output)
+
+        self.assertEqual(set(defects), {label})
+        self.assertIn("Nat.ceilLog", defects[label])
+        self.assertNotIn("BigOperators", defects[label])
+
+    def test_generated_only_unknown_name_stays_generation_failure(self) -> None:
+        label = "lem:claim"
+        plan = "theorem lem_claim : True"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={label: node(label)},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "target_signature": plan,
+                    "helpers": [],
+                }
+            },
+            generation_candidates={},
+        )
+
+        self.assertEqual(
+            _phase1_compile_plan_defects(
+                ctx,
+                [label],
+                plan + " := by sorry",
+                "error: unknown namespace `BigOperators`",
+            ),
+            {},
+        )
+
+    def test_unknown_helper_type_requires_exact_helper_interface(self) -> None:
+        label = "def:claim"
+        plan = "def def_claim : Prop"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={label: node(label)},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "target_signature": plan,
+                    "helpers": [{
+                        "name": "ClaimData",
+                        "kind": "structure",
+                        "members": [{
+                            "name": "value",
+                            "type": "MissingLibrary.Type",
+                        }],
+                    }],
+                }
+            },
+            generation_candidates={},
+        )
+        code = (
+            "structure _autobp_f5a1bed77d1e_ClaimData where\n"
+            "  value : Nat\n\n"
+            "def def_claim : Prop := sorry"
+        )
+
+        self.assertEqual(
+            _phase1_compile_plan_defects(
+                ctx,
+                [label],
+                code,
+                "error: unknown constant `MissingLibrary.Type`",
+            ),
+            {},
+        )
+
+    def test_repeated_exact_plan_compile_failure_becomes_plan_defect(self) -> None:
+        label = "lem:claim"
+        plan = "theorem lem_claim (n : Nat) : n = n"
+        code = plan + " := by sorry"
+        output = "Skeleton01.lean:2:3: error: failed to synthesize Widget Nat"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={label: node(label)},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "semantic_revision_count": 2,
+                    "target_signature": plan,
+                    "helpers": [],
+                }
+            },
+            generation_candidates={},
+        )
+        ctx.generation_candidates[label] = {
+            "plan_fp": _candidate_plan_fingerprint(ctx, label),
+            "lean_status": "failed",
+            "lean_output": "Other.lean:99:8: error: failed to synthesize Widget Nat",
+        }
+
+        defects = _phase1_compile_plan_defects(ctx, [label], code, output)
+
+        self.assertEqual(set(defects), {label})
+        self.assertIn("repeated", defects[label])
 
     def test_recombined_singletons_keep_independent_escalation_state(self) -> None:
         labels = ["def:a", "def:b"]
@@ -6582,6 +9034,26 @@ def def_network : NetworkData := sorry
                 "lean_status": "unknown",
                 "semantic_status": "unknown",
             },
+            {
+                "event": "model_call",
+                "run_id": "run-1",
+                "blueprint": "paper",
+                "purpose": "post_repair_blueprint_audit",
+                "labels": ["def:b"],
+                "duration_s": 7.5,
+                "status": "ok",
+            },
+            {
+                "event": "post_repair_boundary_audit",
+                "run_id": "run-1",
+                "blueprint": "paper",
+                "labels": ["def:b"],
+                "status": "repair_required",
+                "issue_count": 1,
+                "repair_labels": [],
+                "required_dependencies": {"def:b": ["def:a"]},
+                "decomposition_helpers": [],
+            },
         ]
         rows = build_datasets(events)["fast_phase1_layer_examples"]
         self.assertEqual(len(rows), 1)
@@ -6603,6 +9075,14 @@ def def_network : NetworkData := sorry
         self.assertEqual(
             transitions[0]["regressed_obligations"], ["requires:b"]
         )
+        boundary = build_datasets(events)["post_repair_boundary_examples"]
+        self.assertEqual(len(boundary), 1)
+        self.assertEqual(boundary[0]["status"], "repair_required")
+        self.assertEqual(
+            boundary[0]["required_dependencies"], {"def:b": ["def:a"]}
+        )
+        self.assertEqual(boundary[0]["model_call_count"], 1)
+        self.assertEqual(boundary[0]["model_duration_total_s"], 7.5)
 
 
 if __name__ == "__main__":

@@ -74,6 +74,7 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
     adaptive_section_events: list[dict[str, Any]] = []
     skeleton_routing_events: list[dict[str, Any]] = []
     phase1_candidate_transition_events: list[dict[str, Any]] = []
+    post_repair_boundary_audits: list[dict[str, Any]] = []
     repair_scope_events: list[dict[str, Any]] = []
     deferred_recheck_events: list[dict[str, Any]] = []
     final_check_results: list[dict[str, Any]] = []
@@ -144,6 +145,7 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
             "phase1_design_plan_correction",
             "phase1_design_plan_closure",
             "phase1_design_plan_closure_deferred",
+            "phase1_design_plan_closure_attempt",
             "phase1_outline_plan_closure_correction",
             "phase1_design_plan_closure_wave",
             "phase1_design_plan_closure_outcome",
@@ -179,6 +181,8 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
             adaptive_section_events.append(event)
         elif etype == "phase1_candidate_transition":
             phase1_candidate_transition_events.append(event)
+        elif etype == "post_repair_boundary_audit":
+            post_repair_boundary_audits.append(event)
         elif etype in {
             "skeleton_refusal_isolated",
             "skeleton_refusal_rejected",
@@ -845,6 +849,28 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
         if is_fast_run(row)
     ]
 
+    post_repair_boundary_rows = [
+        {
+            "run_id": row.get("run_id"),
+            "blueprint": row.get("blueprint"),
+            "labels": row.get("labels"),
+            "label_count": len(row.get("labels") or []),
+            "status": row.get("status"),
+            "issue_count": row.get("issue_count", 0),
+            "repair_labels": row.get("repair_labels"),
+            "required_dependencies": row.get("required_dependencies"),
+            "decomposition_helpers": row.get("decomposition_helpers"),
+            "reason": row.get("reason"),
+            **related_model_stats(
+                str(row.get("run_id") or ""),
+                "post_repair_blueprint_audit",
+                row.get("labels"),
+            ),
+        }
+        for row in post_repair_boundary_audits
+        if is_fast_run(row)
+    ]
+
     repair_scope_rows = [
         {
             "run_id": row.get("run_id"),
@@ -907,6 +933,7 @@ def build_datasets(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
         "fast_phase1_candidate_transition_examples": (
             phase1_candidate_transition_rows
         ),
+        "post_repair_boundary_examples": post_repair_boundary_rows,
         "fast_repair_scope_examples": repair_scope_rows,
         "fast_deferred_recheck_examples": deferred_recheck_rows,
         "fast_final_check_examples": final_rows,

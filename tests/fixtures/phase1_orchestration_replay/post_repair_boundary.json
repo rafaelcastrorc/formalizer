@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "repair_source_run_id": "20260731-114400",
+      "continuation_run_id": "20260731-131011",
+      "source_logs": [
+        ".auto-blueprint/formalization/unconditional-unclonable-encryption/run-20260731-114400.log",
+        ".auto-blueprint/formalization/unconditional-unclonable-encryption/run-20260731-131011.log"
+      ],
+      "repair_target": "alg:key-generation",
+      "changed_contract_count": 5,
+      "affected_label": "lem:key-generation-support",
+      "missing_statement_dependency": "def:key-generation-free-coordinate-sampler",
+      "model_calls_before_missing_edge_was_discovered": 7,
+      "elapsed_before_missing_edge_was_discovered_s": 324,
+      "expected_first_post_repair_model_purpose": "post_repair_blueprint_audit",
+      "expected_lean_generation_calls_before_boundary": 0,
+      "expected_route": "dependency-edge-repair",
+      "ordinary_phase1_calls_added_without_blueprint_mutation": 0
+    }
+  ]
+}

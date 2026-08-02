@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "run_id": "20260731-052052",
+      "layer": 0,
+      "groups": [["lem:claim6"], ["def:decimal-affine-map"]],
+      "layer_started": "2026-07-31T09:34:32Z",
+      "fast_candidate": ["def:decimal-affine-map"],
+      "fast_candidate_generated": "2026-07-31T09:35:01Z",
+      "all_generation_settled": "2026-07-31T09:42:58Z",
+      "fast_candidate_compiled": "2026-07-31T09:43:44Z",
+      "final_audit_completed": "2026-07-31T09:44:20Z",
+      "final_audit_calls": 1
+    }
+  ]
+}

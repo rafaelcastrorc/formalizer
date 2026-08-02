@@ -1,8 +1,1032 @@
 # Latest Changes
 
+## 2026-08-01: Balance Initial Plan Repair Against Full Replanning
+
+### Confirmed regression
+
+Tournament 2 in `run-20260801-180629` produced a complete 52-contract candidate
+with only four closure findings in four isolated components. Only
+`def:finite-register-operators` blocked the three-node initial frontier. The
+strict admission rule discarded all 52 contracts and ran three more complete
+tournaments before selecting a clean plan at `+1572s`.
+
+### Implemented solution
+
+- A clean complete initial frontier retains the existing fast path and starts
+  immediately without waiting for the sibling lane.
+- After both lanes finish, a complete near-good candidate may be retained when
+  its deterministic bounded-repair estimate is strictly lower than another
+  two-lane full-plan tournament.
+- The estimate is provider-neutral contract work, not guessed model pricing:
+  `2 * blocked contracts + closure findings + repair components`, compared with
+  `2 * total contracts` for another tournament.
+- Retention does not bypass validation. The existing frontier closure gateway
+  repairs and revalidates affected contracts before statement generation.
+- Incomplete candidates remain ineligible, and the existing blueprint-repair
+  authorization rules are unchanged.
+
+### Historical replay
+
+- Added `repairable_tournament_admission.json` from `run-20260801-180629`; its
+  observed candidate scores `16` repair units versus `104` replan units and
+  must be retained for scoped repair.
+- The existing catastrophic `run-20260801-083320` fixture scores `231` repair
+  units versus `104` replan units and must still restart.
+
+### Verification
+
+- Added a unit regression that drives the actual tournament selection path and
+  requires `cheaper_scoped_repair` rather than a restart.
+- Added a regression proving selection uses repair cost rather than the older
+  lexicographic plan score when those order candidates differently.
+- Full repository suite, including committed historical plan, trajectory, and
+  orchestration replays: 266 tests passed.
+
+## 2026-08-01: Make Blueprint Dependencies Authoritative During Initial Planning
+
+### Problem
+
+The Phase-1 section writer already received the deterministic dependency table,
+but the earlier shared design-planner prompt did not. It showed informal
+statement/proof dependency lists while also referring to a dependency table
+that was absent. A planner could therefore infer a generated dependency from
+root context or place a proof-only dependency in a public target signature,
+creating avoidable closure repair before statement generation.
+
+### Implemented solution
+
+- The initial design planner now receives the existing deterministic direct
+  dependency-contract table; no new table or model call was added.
+- The table is explicitly the sole authority for generated dependency symbols.
+- Statement-interface dependencies may appear in `target_signature`.
+- Proof-only dependencies may guide Phase 2 but may not be added to the public
+  signature merely because the proof uses them.
+- Root context may shape interface semantics but cannot invent dependency edges
+  absent from the blueprint graph.
+
+### Verification
+
+- Added a focused prompt regression covering statement-interface and proof-only
+  dependencies, the authoritative-table rule, and the root-context boundary.
+- Full repository suite, including committed Phase-1 historical replay
+  fixtures: 261 tests passed.
+
+## 2026-08-01: Reject Catastrophic Initial Plans Before Phase 1
+
+### Confirmed regression
+
+In `run-20260801-083320`, candidate A returned all 52 requested contracts in
+282 seconds, but deterministic closure found 124 violations blocking all 52
+nodes, including every node in the three-node initial frontier. Candidate B
+timed out at the ordinary 300-second base-call limit, and the recovery returned
+16 characters with zero usable contracts. The tournament selected A merely
+because it was the least-bad available candidate. Full closure repair was
+correctly deferred to dependency-ready frontiers, but no admission threshold
+prevented a plan with `0/3` initially runnable contracts from entering that
+incremental path.
+
+### Implemented correction
+
+- The two full-context candidates use the configured hard timeout. Ordinary
+  Phase 1 and Phase 2 calls continue using the base timeout.
+- Each candidate is scored as soon as it finishes. Admission requires complete
+  contract coverage and a mechanically closed entire initial bottom-up
+  dependency frontier. This gate is deterministic and contains no blocked-ratio
+  or paper-specific threshold.
+- The first qualifying candidate may begin Phase 1 immediately. Selection does
+  not wait for a redundant sibling; cancellation is requested for unfinished
+  futures, whose isolated deterministic scoring can no longer swap temporary
+  plan state into the live run.
+- If neither candidate qualifies, component-safe merging gets one deterministic
+  chance. If the merged plan still blocks the initial frontier, every candidate
+  is discarded and a non-blueprint repair request restarts the complete
+  tournament through the existing bounded repair budget. A timeout or malformed
+  candidate can no longer authorize degraded planning guidance.
+- The next tournament receives the exact prior admission evidence. No planner
+  prompt expansion, global semantic audit, or serial global closure-correction
+  wave was added.
+
+### Regression coverage
+
+- A coordinator test proves an admissible lane returns without waiting for a
+  stalled sibling.
+- A routing test requires two catastrophic candidates to request a complete
+  tournament restart without authorizing a blueprint edit.
+- The committed `run-20260801-083320` fixture records the exact 52-node score,
+  three blocked initial providers, timeout, and malformed recovery response.
+- Historical replay remains the guard against over-strengthening admission:
+  the fastest recorded plan retains `5/5` initial-frontier eligibility even
+  though future consumers still receive their existing just-in-time checks.
+
+## 2026-08-01: Respect Planned Member Shadowing During Helper Canonicalization
+
+### Confirmed regression
+
+The July 31 unique bare-helper optimization fixed unresolved downstream helper
+names, but it treated every bare spelling as a global helper reference. In
+`run-20260801-074355`, `PositiveLoewnerDensityInterface` declared its own
+`DensityOperator : Register -> Type` field and later members referred to
+`DensityOperator R`. Canonicalization rewrote those local dependent references
+to the separate global `_autobp_..._DensityOperator`, which has additional
+parameters. Lean then rejected the same malformed type through at least four
+outer retries and repeated targeted patches.
+
+### Implemented correction
+
+Canonicalization now computes the member namespace of each planned
+`structure` or `class`. Bare global-helper aliases that are shadowed by those
+members are not rewritten anywhere in that declaration body. Qualified and
+unshadowed aliases still resolve to their canonical global declarations, so
+the original downstream `MaxNInterface` optimization remains active.
+
+### Regression coverage
+
+- The executable regression includes both a global `DensityOperator` helper
+  and an interface-local `DensityOperator` field used by a later dependent
+  member. It requires the global declaration and downstream target type to be
+  canonicalized while the local field references remain local.
+- The original unique downstream bare-helper and same-named field regressions
+  remain in the suite.
+- A committed historical fixture records the exact paper, node, repeated
+  interval, and required shadowing invariant from `run-20260801-074355`.
+
+## 2026-08-01: Validate Imports After Every Phase 1 Patch Merge
+
+### Confirmed regression
+
+In `run-20260801-070856`, a model patch imported the obsolete module
+`Mathlib.Data.Polynomial.Basic`; the installed module is
+`Mathlib.Algebra.Polynomial.Basic`. The existing detector identified the import
+as unavailable, but only after `_apply_skeleton_replacements` had already
+copied it into the merged skeleton. The later filter applied only to an
+additional append, so the bad import remained and Lean failed at `+979s`.
+
+### Implemented correction
+
+Import validation now runs inside the shared skeleton-replacement merge
+boundary. The final deduplicated import list is checked, unavailable imports
+are removed before the merged module is returned, and their names are recorded
+in run state so subsequent prompts do not repeat them. This applies to normal
+Phase 1 generation and every targeted patch caller, independent of model
+provider.
+
+### Regression coverage
+
+- A unit regression merges the exact obsolete import into a valid skeleton and
+  requires the declaration to survive while the import is removed and recorded.
+- A committed historical fixture records the failure from
+  `run-20260801-070856` and requires zero mathematical repair trials.
+
+## 2026-08-01: Bound Rejected-Plan Control With Blueprint-Direct Generation
+
+### Confirmed regression
+
+In `run-20260801-054159`, `def:finite-register-operators` received interface-plan
+corrections at `+457s`, `+614s`, and `+926s`, while the statement critic kept
+rejecting the same opaque placeholder interface. The untrusted planning
+artifact continued controlling generation after its evidence-driven correction
+had already failed.
+
+### Implemented correction
+
+The shared semantic-exhaustion router now has one statement-fingerprinted,
+monotonic lifecycle:
+
+1. Correct the interface plan once from exact rejection evidence.
+2. If the corrected plan exhausts, disable it for that statement and generate
+   directly from the blueprint, frozen dependency interfaces, and evidence.
+3. Route to blueprint decomposition only if the blueprint-direct lifecycle also
+   exhausts.
+
+Blueprint-direct generation does not bypass acceptance: deterministic checks,
+Lean compilation, and the independent statement-alignment audit remain
+mandatory. The lifecycle is persisted for `--continue` and resets when the
+blueprint statement fingerprint changes.
+
+### Regression coverage
+
+- A committed fixture records the exact three-correction trajectory from
+  `run-20260801-054159`.
+- The integration regression drives the real shared router through plan
+  correction, blueprint-direct generation, and final decomposition.
+- Persistence coverage verifies the new state survives save/load only for the
+  matching statement fingerprint.
+- The complete suite passes: 253 tests, including all historical Phase 1 replay
+  fixtures.
+
+## 2026-08-01: Overlap Failed-Tournament Recovery With the Surviving Lane
+
+### Confirmed regression
+
+In `run-20260801-051352`, tournament candidate A returned the explicit response
+`{"contracts":[]}` at 16 seconds and repeated it by `+35s`. Its worker then sat
+idle while candidate B ran to the 300-second timeout. The pipeline started the
+already-required full-context recovery only at `+309s`; that call and its
+two-contract tail finished at `+633s`. The bad-plan fallback therefore
+serialized two complete model-call windows before Phase 1 could start.
+
+### Implemented correction
+
+- The two healthy tournament lanes and their prompts remain unchanged.
+- When a lane finishes with zero usable contracts, the single existing
+  full-context recovery starts immediately in that freed worker slot while the
+  other candidate continues.
+- The recovery is still scored with the complete deterministic plan closure and
+  participates in the same component-safe selection and merge. It adds no call
+  to a healthy tournament and does not alter any Phase 1 acceptance gate.
+- Concurrent candidate scoring now makes its temporary plan-state swap atomic;
+  deterministic scoring is locked, while all model calls remain parallel.
+
+Using the recorded call durations, this moves complete-plan availability from
+`+633s` to approximately `+359s`, removing at least 274 seconds from this
+historical critical path without making the planner more elaborate.
+
+### Regression coverage
+
+- A threaded coordinator test proves recovery starts before the still-running
+  sibling finishes.
+- A committed historical fixture preserves the exact empty responses, timeout,
+  fallback durations, and required critical-path reduction.
+
+## 2026-08-01: Make Parallel Phase 1 Retry State Transactional
+
+### Observed issue
+
+Phase 1 generates and compiles independent contract groups concurrently, but
+its retained Lean candidates and rejection evidence were only partially
+protected. Candidate replacement used a lock while feedback accumulation,
+stale-entry pruning, prompt reads, accepted-entry clearing, and state-file
+snapshots accessed the same dictionaries without that lock. Overlapping workers
+could therefore lose one worker's evidence or compose a retry from candidate
+state and feedback belonging to different moments in the transaction.
+
+### Implemented correction
+
+- The shared Phase 1 state lock is reentrant so state readers can prune stale
+  entries and snapshot the result in one transaction.
+- Candidate and feedback reads now use immutable snapshots. Prompt construction,
+  compiler-plan classification, shared-helper scheduling, semantic repair, and
+  persisted continuation state cannot observe dictionaries while another
+  worker mutates them.
+- Feedback accumulation and accepted-entry clearing are atomic. A rejected
+  candidate transition stores its exact rejection evidence before another
+  worker can consume that candidate epoch.
+- Parsing, deterministic candidate evaluation, Lean compilation, and model
+  calls remain outside the state lock, so independent workers are not
+  serialized by this fix.
+
+### Regression coverage
+
+- Added a concurrent regression that forces six workers to update rejection
+  evidence for one statement simultaneously and requires every finding to
+  survive in the next prompt.
+- Existing Phase 1 routing and historical orchestration behavior remains
+  unchanged; the fix affects only consistency of shared run state.
+
+## 2026-08-01: Route Completed Phase 1 Compile Failures Without a Sibling Barrier
+
+### Observed issue
+
+In
+`.auto-blueprint/formalization/unconditional-unclonable-encryption/run-20260801-030727.log`,
+Lean identified at `+1265s` that `def:finite-register-operators` exactly copied
+a compiler-invalid plan. The existing deterministic classifier had already
+selected plan correction as the next action. That correction did not start
+until `+1631s`, after unrelated sibling compiler-patch calls completed or timed
+out. The batch barrier added 366 seconds after the required route was known.
+
+### Root cause
+
+The parallel compile coordinator collected all worker results first and routed
+failures only after every future completed. Candidate persistence and failure
+aggregation were correct, but the ordering forced fast failures to wait for the
+slowest independent worker. The committed historical plan replay exercised
+initial planner responses and frontier eligibility; it did not exercise this
+compile-worker completion boundary.
+
+### Implemented solution
+
+- Per-candidate compile-failure persistence and classification now live in one
+  shared routing function.
+- The coordinator invokes that function as each compile future completes, while
+  unrelated workers keep running.
+- Plan correction, ordinary Lean-generation retry, exact evidence persistence,
+  and telemetry retain their existing rules. This change does not add a model
+  call or change which artifact is authoritative.
+- The coordinator still waits for every sibling before returning and aggregates
+  all failures plus compiled siblings exactly as before.
+- `phase1_compile_failure_routed` records the completion-time classification
+  and route, allowing future replay data to measure this boundary directly.
+- A committed `20260801-030727` orchestration fixture reproduces the completion
+  ordering. Its test drives the real coordinator and requires plan correction
+  to begin before the slow sibling can finish, which the former batch barrier
+  could not satisfy.
+
+### Correctness effect
+
+There is none at the acceptance boundary. A contract still freezes only after
+deterministic checks, Lean compilation, integration, and statement alignment.
+The change overlaps already-required independent work; it neither weakens the
+blueprint contract nor accepts a failed candidate.
+
+## 2026-08-01: Route Mixed Contract-Plan Audit Findings Per Node
+
+### Confirmed live regression
+
+In `run-20260801-022052.log`, one batched Phase 1 contract-plan audit rejected
+`def:security-parameter-negligible` and `def:channel-povm`. Only the first issue
+identified mathematical information absent from the blueprint. The second
+reported no missing blueprint information and required plan/Lean correction.
+The router nevertheless applied the batch-level `blueprint_issue`
+classification to both nodes and widened the blueprint repair transaction.
+
+### Implemented correction
+
+- Contract-plan audit issues are authorized and routed independently. A
+  sibling's missing-blueprint evidence cannot authorize mutation of another
+  node.
+- Mixed audit results carry per-label classification, reason, and decomposition
+  helpers through the rejection cache and frontier gateway.
+- The gateway sends only independently authorized labels to blueprint repair.
+  Remaining rejected labels preserve their plan/Lean correction route for the
+  next transaction; no additional audit or classifier call was added.
+- Telemetry records the repair-now and deferred-plan-correction subsets so this
+  routing decision remains available for classifier training.
+
+### Regression coverage
+
+- Added `mixed_plan_audit_routing.json`, derived from the exact audit response
+  in run `20260801-022052`.
+- Added a focused test that drives the real audit parser and frontier gateway
+  and requires only `def:security-parameter-negligible` to authorize blueprint
+  repair.
+- Added a historical orchestration replay assertion preserving the observed
+  incorrect scope and the expected per-node routes.
+
+## 2026-08-01: Do Not Let Future Consumers Block the Ready Frontier
+
+### Confirmed live regression
+
+The first frontier-gateway implementation was wired after the old global
+closure-component scheduler. In
+`run-20260801-014205.log`, a selected 52-node plan had future consumers that
+invented members on lower providers. The scheduler connected those consumers
+to the ready providers, ran 10- and 16-node plan-correction waves, and consumed
+two generation retries. The first scoped gateway did not run until `+913s`, so
+the enhancement was active but could not improve startup latency.
+
+### Implemented correction
+
+- Global closure findings remain available for telemetry and future
+  scheduling, but they are no longer a generation barrier.
+- Only closure defects whose consumer belongs to the current dependency-ready
+  frontier can block that frontier. A defective future consumer cannot rewrite
+  or delay a ready lower provider.
+- Current-frontier correction edits only the affected current contracts. Direct
+  providers and future consumers are passed as read-only context. After the
+  correction, the complete closure table is recomputed and the current
+  frontier must be closed before its semantic gateway runs.
+- A provider that already froze remains stable. If a later consumer reveals a
+  real blueprint-level inconsistency, the existing semantic audit and
+  fingerprint invalidation path handles it from concrete evidence rather than
+  speculative global plan closure.
+- If both correction tiers are exhausted, the rejected frontier entries and
+  stale alternates are removed before returning to the bounded outer loop. The
+  next retry therefore performs fresh scoped planning instead of replaying a
+  cached rejection while consuming the entire repair budget.
+
+### Regression coverage
+
+- Added the `20260801-014205` multi-frontier trajectory using the real closure
+  checker. It reproduces the missing-provider-member shape and the historical
+  913-second pre-gateway stall.
+- The regression requires the provider to freeze first, correction of only the
+  consumer when it becomes ready, and complete progress across both frontiers.
+- Added a focused scheduler test proving that a future consumer cannot block an
+  independent ready-provider wave.
+- Added the later `def:finite-register-operators` exhaustion fixture from the
+  same run. It records 98 no-work retries in about two seconds and verifies the
+  new invalidate-and-replan transition.
+
+## 2026-08-01: Gate Each Ready Frontier With a Good-Enough Plan Audit
+
+### Confirmed problem
+
+Historical runs showed both sides of the planning tradeoff. A coherent initial
+plan let Phase 1 advance quickly, while an under-specified plan could serialize
+many statement-generation, compiler, and final-audit calls before the plan was
+eventually corrected. Making the complete initial planner more elaborate had
+already increased startup latency and timeout risk. The missing boundary was a
+bounded check of the contracts that were actually about to generate Lean.
+
+### Implemented correction
+
+- The initial plan remains lightweight, global, and untrusted. Mechanical
+  contract closure is still computed for the complete plan.
+- Immediately before a dependency-ready frontier enters statement generation,
+  a scoped semantic gateway audits only that frontier. Direct providers and
+  consumers are included as read-only context.
+- A rejection corrects only the rejected contract slice, reruns the existing
+  deterministic closure checker for the affected component, and re-audits only
+  changed contracts. Unrelated plan entries and graph branches are preserved.
+- Accepted audit fingerprints persist with the plan entry, so an unchanged
+  contract is not charged again. Audit transport failure cannot invent a plan
+  defect or trigger an arbitrary correction.
+- Generated Lean remains subject to every existing deterministic gate,
+  compilation, and the independent blueprint/statement alignment audit. The
+  new gateway decides only whether the untrusted plan is good enough to begin
+  generation.
+
+### Regression coverage
+
+- Added a committed multi-frontier trajectory corpus for `simplex` and
+  `unconditional-unclonable-encryption`.
+- The replay substitutes historical responses at the real model-call boundary
+  and drives the actual Phase 1 coordinator across several frontiers. It checks
+  audit order, scoped correction, frozen contracts, and complete response
+  consumption without a network or model account.
+- Added focused routing tests for correction scope and deterministic closure
+  rechecking after a semantic plan correction.
+
+## 2026-07-31: Route Plan-Owned Audit Failures Before Retrying Lean
+
+### Confirmed regression
+
+The mandatory statement audit previously saw the blueprint and compiling Lean,
+but not the Phase 1 design-plan entry that generated that Lean. When the plan
+and generated declaration omitted the same blueprint requirement, the critic
+could describe the semantic defect but the router treated it as Lean-only. In
+`run-20260731-151554.log`, this serialized 921 seconds around
+`def:finite-register` and 197 seconds around `def:key-space` before the existing
+plan-correction path was finally reached. The best comparable
+`def:finite-register` transaction in `run-20260731-133708.log` took 158 seconds.
+
+### Implemented correction
+
+- The existing statement-audit call now receives the blueprint node, current
+  design-plan entry, and compiling Lean declaration together. The blueprint
+  remains the source of truth; the plan is explicitly marked as untrusted.
+- Every rejection reports whether the missing content originates in Lean, the
+  plan, or both. A `plan`/`both` route is honored only when the critic names the
+  exact missing plan requirements; unsupported classifications fall back to the
+  ordinary Lean-generation lifecycle.
+- Evidence-backed plan defects enter the existing scoped plan-revision
+  transaction before another statement-generation call. Lean-only failures,
+  blueprint defects, decomposition, compiler correction, and Phase 2 routing
+  retain their existing behavior.
+- The audit cache now includes the design-plan entry, so a corrected plan cannot
+  reuse an origin classification produced for an older plan.
+- This adds no model call: it enriches the mandatory audit and changes only the
+  route taken after a rejection.
+
+### Historical validation
+
+- Added `semantic_origin_serialization.json` with the two delayed current-run
+  cases and the best comparable historical transaction.
+- Added regressions for plan-only, combined plan/Lean, missing-evidence fallback,
+  audit-cache invalidation, and both active Phase 1 transaction paths.
+
+## 2026-07-31: Apply Certified Statement Dependencies Before Retrying Lean
+
+### Confirmed regression
+
+In `run-20260731-133708.log`, the statement audit for
+`def:local-basis-unitary` identified a required existing dependency while
+classifying the remaining defect as Lean translation. The request preserved
+the edge, but the outer loop checked model blueprint-repair authorization
+first and entered the generation retry path. It spent eleven additional model
+calls and 275 model-seconds before applying an edge already present in the
+first audit result.
+
+### Implemented correction
+
+- Existing-label dependency evidence independently enters the deterministic,
+  cycle-checked blueprint transaction before any generation retry.
+- The edge does not authorize a model blueprint rewrite. Any residual Lean
+  translation issue returns through the existing Phase 1 gates after the graph
+  and statement fingerprint have been updated.
+- Dependency-only requests do not advance the rejected candidate's escalation
+  lifecycle before the graph correction is attempted.
+- Added `statement_dependency_edge_routed` telemetry and a committed replay
+  fixture containing the exact current-run classification, edge, eleven calls,
+  and 275 model-seconds of avoidable work.
+
+## 2026-07-31: Audit Model Repairs Before Regenerating Lean
+
+### Confirmed regression
+
+In `run-20260731-114400.log`, blueprint repair 20 changed five key-generation
+contracts. The repaired `lem:key-generation-support` statement semantically
+used `def:key-generation-free-coordinate-sampler` but omitted that direct
+statement dependency. In the continuation `run-20260731-131011.log`, the old
+pipeline spent seven generation, compiler-patch, and statement-audit model
+calls and 324 seconds before the final auditor identified the missing edge.
+The complete node did not freeze until 518 seconds.
+
+### Implemented correction
+
+- Every model repair that changes a public statement or statement-scoped
+  dependency queues one scoped blueprint-only semantic audit before Lean
+  generation.
+- The audit sees only the changed statements, their previous versions, their
+  immediate dependency/consumer boundary, a bounded paper excerpt, and the
+  label inventory. It runs once as a batch, not once per node.
+- Missing existing public-statement dependencies enter the existing
+  deterministic, cycle-safe edge transaction. Concrete statement defects and
+  required decomposition enter the existing bounded blueprint-repair loop with
+  the exact audit evidence.
+- Proof-prose-only repairs and ordinary Phase 1 work add no call. Auditor
+  transport/JSON failure falls through once to the mandatory later Lean
+  statement-alignment audit and cannot stop the run.
+- Pending audit or corrective-repair state is stored in
+  `skeleton_state.json`; fresh and continued runs therefore use the same
+  boundary and interruption cannot silently skip it.
+- Audit outcomes and their associated model-call timing are exported to
+  `post_repair_boundary_examples.jsonl`, including the observed routing label,
+  required dependency edges, repair labels, and requested decomposition
+  helpers for future classifier training.
+
+### Historical validation
+
+- Added `post_repair_boundary.json`, a committed fixture preserving the exact
+  five-contract repair, seven avoidable calls, and 324-second discovery delay.
+- Added regressions for early dependency-edge routing, accepted healthy
+  repairs, one-shot unavailable-auditor fallback, and persisted boundary state.
+
+## 2026-07-31: Let Semantic Revisions Replace a Compiling Rejected Candidate
+
+### Confirmed regression
+
+In `run-20260731-114400.log`, the retained candidate for
+`def:security-parameter-negligible` compiled but failed statement alignment.
+Later deterministic-clean revisions were generated and some compiled, but the
+monotonic candidate selector rejected every different revision as
+`no_measurable_progress`: the old candidate's successful Lean status dominated
+the revisions even though that old candidate was already known to be
+semantically unacceptable. This kept Phase 1 at 1/52 contracts while repeatedly
+regenerating the same node.
+
+### Implemented correction
+
+- A semantically rejected candidate is no longer considered a valid rollback
+  winner solely because it compiles.
+- A different candidate with no deterministic contract violations may replace
+  it and continue through the existing Lean and statement-alignment gates.
+- Deterministic regressions remain rejected, and the revision is not frozen
+  until all normal Phase 1 checks pass.
+- Added a regression covering the complete rejected-compiling candidate to
+  deterministic-clean revision to successful compilation transition.
+
+## 2026-07-31: Stop Zero-Call Recompilation After Lean Rejects a Candidate
+
+### Confirmed regression
+
+In `run-20260731-095949.log`, `def:uniform-finite-sampling` passed the
+deterministic Phase 1 generation gate and was stored as a reusable uncompiled
+candidate. Lean then rejected the exact bytes with `unknown namespace
+BigOperators` and `expected token`. Recording that compiler result retained the
+reuse bit, so retries 10 through 100 recompiled the same candidate without a
+single model call. The loop consumed 91 repair trials and about 20 minutes
+without any possibility of changing the code.
+
+### Implemented correction
+
+- A candidate whose exact stored bytes have `lean_status=failed` is never
+  eligible for zero-call uncompiled reuse, including migrated sibling state.
+- Recording failed Lean evidence for the same candidate explicitly revokes its
+  reuse bit.
+- The failed code, compiler output, statement fingerprint, plan fingerprint,
+  and deterministic obligations remain stored. The next statement-generation
+  call receives them as exact revision context instead of starting over.
+- Healthy deterministically valid candidates retain the existing first-compile
+  reuse path; no extra call is added before their first Lean check.
+
+### Historical validation
+
+- Added a committed orchestration fixture for the exact July 31 loop: 91
+  identical retries, zero model calls, and 91 incorrectly consumed trials.
+- Added regressions proving that Lean rejection disables zero-call reuse while
+  preserving revision context, healthy candidate reuse still works, and
+  historical migrated siblings cannot bypass a recorded Lean failure.
+
+## 2026-07-31: Keep Provider Transport Failures Out of Mathematical Repair
+
+### Confirmed regression
+
+In `run-20260731-061030.log`, 19 Codex calls exited while reconnecting to the
+responses websocket. The shared transient classifier did not recognize that
+provider-specific wording. Phase 1 therefore treated seven outage waves as
+failed Lean generation, reran unchanged `.dim`/`.layer` compiler errors, and
+consumed repair trials 9 through 15 despite receiving no model output.
+
+### Implemented correction
+
+- The shared runner now recognizes websocket/reconnect failures, dropped or
+  refused connections, temporary overloads, rate limits, and HTTP
+  429/502/503/504 failures as transient transport errors for every CLI and API
+  backend.
+- Transient calls retry internally with `30/60/90` second backoff. Attempt
+  reporting now counts those calls accurately.
+- If transport remains unavailable, the model boundary records
+  `transport_exhausted` and propagates the outage. It cannot return an ordinary
+  generation error to Phase 1 or Phase 2, consume a repair trial, trigger
+  decomposition, or edit the blueprint.
+
+### Historical validation
+
+- Added a committed replay fixture for the exact July 31 outage signature and
+  its seven incorrectly consumed trials; the corrected repair-budget delta is
+  zero.
+- Added shared-runner tests for transient recovery, exhausted transport,
+  permanent model-output failure, and the formalization boundary.
+- All 219 tests pass, including the existing historical plan and orchestration
+  replay suites.
+
+## 2026-07-31: Make Optional Lean-Library Readiness Repairable
+
+### Confirmed gap
+
+The library resolver treated matching checkout revisions as fully up to date.
+CSLib and PhysLib source trees could therefore be present and searchable while
+their selected `lean_lib` targets had no compiled `.olean` artifacts. The
+`apply` command then returned early because the pins matched, so the existing UI
+button could not repair the state. Refinement could offer a declaration found
+in source even though Lean could not import its module.
+
+### Implemented correction
+
+- Library status now distinguishes source/pin readiness from compile readiness.
+- Optional libraries are ready only when a representative compiled artifact
+  exists and a successful import probe is recorded for the exact checkout and
+  active toolchain.
+- Matching pins no longer bypass a missing build. The repair path builds only
+  missing optional `lean_lib` targets and verifies an import; it skips
+  `lake update`, the Mathlib cache fetch, and the Auto-Blueprint package build.
+- The Lean status panel and **Lean libraries** tab show **build required** and a
+  **Build / repair libraries** action.
+- Refinement excludes unready optional source checkouts from deterministic
+  candidate search. Mathlib-only behavior and per-blueprint opt-in priorities
+  remain unchanged.
+
+### Validation
+
+- Added portable regressions for a matching-but-unbuilt checkout, a verified
+  artifact/stamp pair, repair routing with current pins, candidate-search
+  filtering, and the Web UI status payload.
+- The complete automated suite passes (`213` tests).
+
+## 2026-07-31: Route Plan-Owned Lean Compiler Failures to Plan Correction
+
+### Confirmed wasted work
+
+In `run-20260731-041307.log`, the accepted contract for
+`lem:ahm-lower-bound` required `Nat.ceilLog`, but the local Mathlib API exposes
+the ceiling logarithm as `Nat.clog`. Statement generation faithfully copied the
+invalid planned name. Lean rejected it at `+657s`, `+894s`, `+1086s`,
+`+1312s`, `+1717s`, and later retries, while ordinary compiler correction kept
+the unchanged plan in force. Generated-only errors in the same candidates,
+including the `BigOperators` namespace and a missing `Nonempty (Fin m)`
+instance, are separate translation problems and are not evidence against the
+plan.
+
+### Implemented correction
+
+- Parallel Phase 1 compiler failures now pass through one conservative,
+  deterministic plan-defect check before ordinary retry routing.
+- An unknown Lean identifier routes directly to plan correction only when the
+  emitted target header exactly copies a target signature containing that
+  identifier. An identifier found only in a planned helper type requires the
+  complete target/helper public interface to match the plan exactly.
+- Ambiguous compiler failures still receive one ordinary correction. They
+  become plan defects only if the same normalized compiler error recurs under
+  the same plan fingerprint and the complete emitted interface exactly
+  realizes that plan.
+- Generated-only names are never routed merely because Lean reports them as
+  unknown. In a mixed parallel failure, only proven plan-defect labels leave
+  ordinary retry routing; unrelated labels retain their existing compiler
+  correction and scheduling behavior.
+- Plan correction reuses the existing evidence-driven correction call and
+  retained candidate seed. The blueprint remains unchanged, and the corrected
+  contract must still compile and pass the mandatory statement-alignment audit.
+
+### Validation
+
+- The exact saved current-run candidate classifies
+  `lem:ahm-lower-bound -> Nat.ceilLog` as a plan defect while excluding
+  `BigOperators`.
+- The complete automated suite passes (`202` tests), including mixed-wave,
+  generated-only, repeated-error, and already-revised-plan cases.
+- Deterministic planning replay passes for the fastest prior run
+  `20260730-204628`, the prior slow run `20260731-032040`, and the current run
+  `20260731-041307`; every selected complete plan retains runnable initial
+  frontier work.
+
+## 2026-07-31: Route Exact-Plan Semantic Omissions Directly to Plan Revision
+
+### Confirmed wasted work
+
+In `run-20260731-032040.log`, the accepted plan for
+`def:polyhedral-cell` explicitly excluded the blueprint's public
+full-dimensionality notion. Statement generation copied that plan exactly and
+Lean compiled it. The semantic audit correctly rejected the omission, but the
+pipeline classified it as a generation problem and retried under the unchanged
+plan. It spent roughly another two minutes on an escalated statement patch,
+two compiler-feedback patches, and an identical second audit before finally
+revising the plan. The same pattern then recurred for
+`def:minkowski-join`, whose generated helper included exactly the unrelated
+fields required by its faulty plan.
+
+### Implemented correction
+
+- After Lean compilation and the mandatory independent semantic audit, the
+  pipeline mechanically compares each rejected declaration with its accepted
+  plan.
+- The direct plan route is allowed only when the target header and every
+  plan-owned helper kind, member set, and typed member declaration match
+  exactly, modulo formatting and deterministic helper namespacing.
+- On that proof of plan realization, the existing plan-correction call runs
+  immediately with the audit evidence. No additional model call is introduced;
+  it replaces the unchanged-plan generation retry that could not satisfy the
+  audit without violating the plan.
+- Ambiguous, incomplete, or differently typed candidates keep the existing
+  generation-retry route. A plan already revised once cannot take this shortcut
+  again, preserving the existing bounded decomposition fallback.
+
+### Historical validation
+
+- Accepted semantic audits do not execute the new comparison or change route.
+- The current `def:polyhedral-cell` artifact matches the conservative trigger;
+  its first rejection would skip the four intervening model calls and repeated
+  compilation work before the observed plan correction.
+- Candidates that change a target type or a helper member type do not trigger.
+- Regression coverage checks the exact current failure shape, an exact typed
+  helper interface, type mismatch, one-revision bound, and that retry accounting
+  is bypassed on this route.
+
+## 2026-07-31: Preserve Same-Named Fields During Helper Namespacing
+
+### Confirmed regression
+
+`run-20260731-025106.log` repeatedly rejected `lem:ahm-lower-bound` because
+its plan-owned class and field were both named `weightOf`. Canonical helper
+namespacing correctly renamed the global class, but the bare-helper alias pass
+also renamed the field. The deterministic audit then searched for the planned
+field name, reported it missing, and repeated the same singleton generation and
+patch cycle 18 times without freezing another contract.
+
+The historical plan replay did not catch this because it ended after plan
+closure and frontier selection. It did not send generated declarations through
+helper canonicalization and the deterministic skeleton audit.
+
+### Implemented correction
+
+- Global helper declarations and consumer references still receive stable,
+  collision-safe `_autobp_...` names.
+- Planned structure, class, and inductive member declarations retain their
+  contract names even when a member has the same spelling as its helper.
+- A regression test reproduces the exact `class weightOf where weightOf : ...`
+  shape and runs canonicalization followed by deterministic skeleton auditing.
+- Replaying the saved `lem:ahm-lower-bound` plan and candidate now produces the
+  canonical class `_autobp_8865fe72d5d6_weightOf` with field `weightOf` and zero
+  deterministic findings.
+
+## 2026-07-31: Stop Treating Every Dependency Edge as a Public Type Obligation
+
+### Confirmed regression
+
+At roughly 15 minutes, `run-20260731-020506.log` had frozen 3 of 62 Phase 1
+contracts. The comparable best run, `run-20260730-204628.log`, had frozen 32.
+Replaying the exact stored response selected by that best run through the new
+closure code changed its score from 6 findings at runtime to 43 findings. The
+same Lean-ish plan had not become worse; a later deterministic rule had
+reclassified dependency edges as missing public-signature names.
+
+That rule was not sound for this blueprint format. A `\uses` edge may identify
+a theorem used by the proof, and such a theorem normally must not appear in the
+public proposition being proved. Name absence alone cannot distinguish that
+case from a definition omitted from a defining equation. Blocking both cases
+manufactured dozens of plan-correction calls before statement generation.
+
+### Implemented correction
+
+- Required, represented, and missing dependency names remain recorded in
+  closure telemetry, but absence alone no longer blocks a plan contract.
+- Generated references outside the authorized dependency closure, authorized
+  missing provider members, invalid declaration surfaces, and helper cycles
+  remain blocking mechanical findings.
+- An unauthorized consumer reference no longer produces a second
+  missing-member finding against its provider, so it cannot drag a healthy
+  provider into the repair component.
+- Exact generated aliases for `\mathlibok` nodes are rewritten to their
+  authoritative `\lean` names during plan ingestion, including typed helper
+  member types. The defensive alias rejection remains for stale or manually
+  constructed entries.
+- Tournament component substitution must improve the global mechanical score
+  without reducing the currently runnable dependency frontier. A globally
+  cleaner alternate can no longer delay a contract that was already ready.
+- Every declaration still must compile and pass the independent semantic
+  statement-alignment audit before its Phase 1 contract freezes. That audit,
+  not dependency-name presence, checks whether the contract preserves the
+  blueprint statement and defining equations.
+
+### Deterministic replay
+
+- The best run's selected response now exposes all `5/5` initial frontier
+  contracts instead of `2/5` under the regressed rules.
+- For the current slow run's exact responses, the selected and safely merged
+  plan exposes `4/5` initial contracts; the regressed code exposed only one
+  before paying for closure corrections.
+- The full test suite passes: 190 tests.
+
+## 2026-07-31: Keep Consumer Omissions From Blocking Healthy Providers
+
+### Observed regression
+
+Historical replay exposed a deterministic scheduling regression. Under the
+current closure code, the exact planner response from the fastest recent run,
+`run-20260730-204628.log`, changed from five blocked contracts at runtime to 51
+blocked contracts when replayed. `run-20260731-013144.log` then spent 746
+seconds to freeze one contract. The closure component builder joined every
+provider named by a consumer's missing-dependency finding, despite its own
+docstring and correction stage treating that provider as read-only context.
+This connected distant consumers through healthy dependency leaves and could
+block the complete initial frontier.
+
+### Implemented solution
+
+- Missing-dependency observations no longer block either contract; they remain
+  telemetry for semantic auditing and future classifier work.
+- A true missing-member finding still joins provider and consumer into one
+  atomic repair component, because that defect may require changing both
+  surfaces coherently.
+- `scripts/replay_phase1_plans.py` replays content-addressed planner responses
+  through the current parser, closure scorer, and initial frontier scheduler
+  without making model calls or changing generated state. Ten historical
+  tournaments and their exact response bytes now live under
+  `tests/fixtures/phase1_plan_replay/`, so this regression runs from a clean
+  clone without local telemetry or R2 access. Local telemetry remains a
+  fallback for investigating runs not yet promoted to fixtures.
+  `--require-progress` makes a complete historical candidate that blocks the
+  whole initial frontier a regression failure.
+
+Every contract still passes canonical ingestion, deterministic mechanical
+closure, Lean compilation, and semantic statement alignment before freezing.
+
+### Verification
+
+- The full test suite passes: 204 tests, including two hermetic historical
+  replay tests over the committed fixture corpus.
+- Historical replay covered ten recent fresh planning tournaments from
+  `run-20260730-152056` through `run-20260731-013144`, using their exact stored
+  model responses. Every selected candidate retained at least one runnable
+  initial dependency-frontier contract.
+- The pathological selected candidate from `run-20260731-013144` changed from
+  three broadly connected repair components, including one roughly 50-label
+  component, to 29 local components with a largest component of ten labels.
+- The fastest selected candidate from `run-20260730-204628` retains all five
+  immediately runnable initial contracts under the current closure rules.
+
+This replay validates deterministic routing, not model latency. A fresh run is
+still required to measure end-to-end wall time, but the known graph-wide stall
+cannot recur through this ownership path.
+
+## 2026-07-31: Resolve Unique Bare Plan Helpers Before Lean Compilation
+
+### Observed regression
+
+In `run-20260731-010545.log`, `def:maxn` froze its planned helper under the
+canonical global name `_autobp_..._MaxNInterface`. The next eight planned
+consumer contracts used the model-facing name `MaxNInterface`. Canonical
+ingestion recognized qualified aliases such as `def_maxn.MaxNInterface` but
+left this unambiguous bare name unchanged. Lean then reported the same unknown
+identifier throughout the batch, and Phase 1 paid for repeated singleton patch
+calls.
+
+### Implemented solution
+
+- Canonical ingestion now builds the complete plan's bare-helper ownership
+  table once per response.
+- A bare helper spelling with exactly one canonical owner is rewritten before
+  deterministic checks, persistence, or Lean compilation.
+- A spelling owned by multiple plan contracts remains untouched and is rejected
+  normally; the pipeline never guesses between ambiguous interfaces.
+- Qualified aliases, helper ownership, namespacing, and every existing Phase 1
+  acceptance gate remain unchanged.
+
+This is deterministic and backend-independent. It adds no model call and would
+have converted the observed `MaxNInterface` batch directly to the already
+frozen provider interface instead of entering compiler-repair retries.
+
+## 2026-07-31: Bound Bad-Plan Closure Repair to One Paid Call
+
+### Observed regression
+
+`run-20260730-204628.log`, the fastest recent fresh run, selected a plan with
+five blocked contracts and froze 20 contracts by 397 seconds, 28 by 573
+seconds, and 32 by 927 seconds. `run-20260731-003655.log` selected a plan with
+49 blocked contracts, then spent from 222 to 575 seconds in contract-closure
+repair. It had frozen zero contracts at 927 seconds and only two at 1,055
+seconds.
+
+### Root cause
+
+The monotonic closure-correction transaction had reintroduced up to two base
+calls plus one escalation call for each blocked component. That contradicted
+the existing tournament policy below, which intentionally removed automatic
+pre-generation escalation. A partially improving response could therefore keep
+an unusable initial plan on Phase 1's critical path for several serial model
+calls before any statement was generated. In the observed run, one escalation
+call alone consumed 254 seconds.
+
+### Implemented solution
+
+- Retained alternate components remain the zero-call first choice.
+- Each unresolved disjoint component now gets at most one paid base-model
+  correction with its complete deterministic evidence and read-only provider
+  context.
+- The response is still rescored globally. A fully closed component merges;
+  a strict partial improvement is retained as an alternate.
+- Any component still open after that call is selectively replanned by the
+  existing bounded outer transaction. Initial-plan closure never invokes the
+  escalation runner.
+- Disjoint components remain parallel, and successful siblings cannot be
+  rolled back by a failed component.
+
+This change removes model calls only from the bad-plan path. Closed plans and
+zero-call alternate repairs behave exactly as before, and every generated Lean
+declaration still passes deterministic checks, compilation, and independent
+statement alignment before a Phase 1 contract freezes.
+
+## 2026-07-31: Preserve Semantic Retry Progress Across Plan Corrections
+
+### Observed issue
+
+In `run-20260731-000449.log`, `def:cpwl` repeatedly compiled and then received
+the same semantic rejection: its generated `CPWLInterface` abstracted away the
+concrete finite-polyhedral-subdivision definition. The run consumed seven
+global repairs without freezing a contract.
+
+### Root cause
+
+The Phase 1 lifecycle already bounds this case correctly: after both model
+tiers fail, it revises the untrusted interface plan once; if both tiers reject
+the revised plan too, it routes the node to blueprint decomposition. However,
+contract-closure correction and retained-alternate replacement replace the
+entire plan-entry dictionary. That replacement discarded
+`semantic_revision_count`, resetting the unchanged blueprint statement to its
+first semantic revision and allowing the same contract strategy to repeat.
+
+### Implemented solution
+
+- Plan replacements now preserve statement-lifecycle progress metadata.
+- Both model-produced plan correction and retained-alternate replacement use
+  the same preservation boundary.
+- Mathematical plan content is still replaced normally; rejection and
+  correction fingerprints remain tied to the exact candidate and are not
+  carried onto changed contracts.
+- A genuinely changed blueprint statement still resets the lifecycle through
+  the existing statement-fingerprint invalidation path.
+
+This is an orchestration fix only. It does not add a model call, change the
+planner prompt, weaken semantic auditing, or add paper-specific behavior.
+
 This file records the most recent behavioral changes to Auto-Blueprint. Each
 entry states the observed problem, its root cause, the implemented solution,
 and the verification performed. New changes should be added above older ones.
+
+## 2026-07-30: Preserve Progress Inside Contract-Closure Corrections
+
+### Observed issue
+
+The first complete-closure run executed correction waves concurrently, but
+every returned component retained at least one deterministic finding. The
+transaction returned an empty result for `still_rejected`, discarded all
+improvements, invalidated 12 and later 31 connected entries, and then paid for
+generic planning calls. It reached ten frozen contracts at 1095 seconds,
+compared with 570 seconds in the preceding run.
+
+### Implemented solution
+
+- Closure correction distinguishes editable owners from read-only context.
+  Rejected consumers are editable; providers are edited only for missing-member
+  findings, not merely because a consumer omitted their dependency.
+- Every response is deterministically rescored against the exact component.
+  Strictly improving candidates remain inside the isolated transaction and the
+  next call receives only residual findings.
+- An unchanged base result skips a redundant second base attempt and advances
+  to the configured escalation runner. Healthy closed plans add no call.
+- Fully closed components still merge atomically. If bounded correction cannot
+  close an improving component, its best candidate is retained as an alternate
+  before only the unresolved closure component is invalidated.
+- Telemetry records editable labels, read-only context, model tier, pre/post
+  score, and residual findings for every correction attempt.
+
+### Verification
+
+- Regression coverage proves that a two-step correction retains the first
+  fixed provider member and sends only the remaining member to the second call.
+- Existing concurrency, failed-sibling isolation, deferred-frontier, alias,
+  dependency-coverage, and cycle tests remain active.
 
 ## 2026-07-30: Complete Contract Closure Before Statement Generation
 
@@ -405,8 +1429,9 @@ contained an ordinary Lean encoding error.
   justified blueprint/decomposition labels to repair.
 - Both Phase 1 audit consumers now share one exhaustion transition. The first
   exhaustion revises the saved interface plan from the exact critic evidence.
-  If the same statement exhausts both model tiers again under that revised
-  plan, only that node enters the existing blueprint-decomposition transaction.
+  The later 2026-08-01 circuit-breaker change extends this transition: a second
+  exhaustion first tries blueprint-direct generation, and only exhaustion of
+  that direct lifecycle enters the blueprint-decomposition transaction.
 - Decomposition covers missing named mathematical objects, operations,
   relations, and substantial intermediate statements, including contracts
   otherwise expressible only by duplicating a large executable term or using

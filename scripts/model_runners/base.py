@@ -30,6 +30,10 @@ class RunnerError(RuntimeError):
     """Backend failure: auth, CLI missing, network, timeout, or malformed reply."""
 
 
+class TransientRunnerError(RunnerError):
+    """Temporary provider/transport outage exhausted infrastructure retries."""
+
+
 # Server-side/transient failure signatures: retried automatically even when the
 # caller asked for retries=0, because refinement runs are autonomous and must
 # not die to a blip. Quota/spend/session limits are deliberately NOT here —
@@ -37,11 +41,24 @@ class RunnerError(RuntimeError):
 TRANSIENT_ERROR_MARKERS = (
     "529",
     "overloaded",
+    "reconnecting",
+    "websocket",
     "connection closed",
     "connection error",
+    "connection refused",
     "connection reset",
+    "failed to connect",
+    "broken pipe",
+    "remote disconnected",
     "network error",
     "internal server error",
+    "temporarily unavailable",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "too many requests",
+    "rate limit",
+    "429",
     "502",
     "503",
     "504",
@@ -149,12 +166,14 @@ class ModelRunner(abc.ABC):
         full_system = self.build_system(system)
         cwd_path = Path(cwd) if cwd else None
         last_exc: Exception | None = None
-        attempt = 0
+        attempts = 0
+        ordinary_retries_remaining = retries
         transient_budget = 3  # extra retries for server-side blips, even at retries=0
         while True:
             # monotonic: wall-clock (time.time) counts machine sleep, which made
             # reported durations disagree with the run log's monotonic stamps.
             start = time.monotonic()
+            attempts += 1
             try:
                 result = self._run_impl(prompt, full_system, cwd_path)
                 result.backend = self.backend_name
@@ -164,24 +183,32 @@ class ModelRunner(abc.ABC):
                 return result
             except RunnerError as exc:
                 last_exc = exc
-                if attempt < retries:
-                    attempt += 1
-                    wait = 5 * (2 ** (attempt - 1))
+                if ordinary_retries_remaining > 0:
+                    ordinary_retry = retries - ordinary_retries_remaining + 1
+                    ordinary_retries_remaining -= 1
+                    wait = 5 * (2 ** (ordinary_retry - 1))
                     print(f"  ! {self.backend_name} failed ({exc}); retrying in {wait}s")
                     time.sleep(wait)
                     continue
-                if transient_budget > 0 and is_transient_error(exc):
-                    transient_budget -= 1
-                    wait = 30 * (4 - transient_budget)
-                    print(
-                        f"  ! {self.backend_name} transient failure ({str(exc)[:200]}); "
-                        f"retrying in {wait}s ({transient_budget} transient retries left)",
-                        flush=True,
-                    )
-                    time.sleep(wait)
-                    continue
+                if is_transient_error(exc):
+                    if transient_budget > 0:
+                        transient_budget -= 1
+                        wait = 30 * (3 - transient_budget)
+                        print(
+                            f"  ! {self.backend_name} transient failure ({str(exc)[:200]}); "
+                            f"retrying in {wait}s ({transient_budget} transient retries left)",
+                            flush=True,
+                        )
+                        time.sleep(wait)
+                        continue
+                    raise TransientRunnerError(
+                        f"{self.backend_name} transport failed after {attempts} "
+                        f"attempts: {last_exc}"
+                    ) from exc
                 break
-        raise RunnerError(f"{self.backend_name} failed after {attempt + 1} attempts: {last_exc}")
+        raise RunnerError(
+            f"{self.backend_name} failed after {attempts} attempts: {last_exc}"
+        )
 
     @abc.abstractmethod
     def _run_impl(self, prompt: str, system: str, cwd: Path | None) -> RunResult:
