@@ -371,6 +371,11 @@ one correction lifecycle: a compiler or statement-audit patch that changes the
 declaration refreshes the contract from the same replacement candidate. There
 is no second typed-planning call and no independently generated contract that
 can keep a valid correction trapped under stale guidance.
+If the statement critic rejects a fresh candidate, the next transaction revises
+that exact candidate from the critic evidence. Exhausting that candidate-owned
+lifecycle switches once to blueprint-direct generation; it never invokes the
+former typed-plan correction/audit loop. Only resumed legacy contracts without
+candidate provenance use that compatibility path.
 
 The candidate then crosses the existing deterministic contract gate. It must
 cover exactly one canonical target per blueprint node, use only authorized

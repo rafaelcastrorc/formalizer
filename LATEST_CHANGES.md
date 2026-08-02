@@ -1,5 +1,33 @@
 # Latest Changes
 
+## 2026-08-02: Keep Fresh Phase 1 Candidates Out of the Legacy Plan Loop
+
+### Confirmed failure
+
+In `unconditional-unclonable-encryption/run-20260802-043131`, fresh
+candidate-derived contracts for `def:finite-register-operators` and
+`def:local-basis-unitary` entered repeated `phase1_design_plan_correction` and
+`phase1_design_plan_audit` calls. The correction parser omitted the immutable
+`phase1_candidate` origin marker, and the shared semantic-exhaustion router
+treated every unmarked contract as legacy typed-plan state.
+
+### Implemented correction
+
+- Contract replacement now preserves immutable origin provenance when a model
+  response omits it.
+- Candidate-derived contracts are excluded from both semantic and decomposition
+  plan-correction entry points.
+- After the existing exact-evidence candidate correction is exhausted, a fresh
+  contract moves directly to one blueprint-direct lifecycle. Only exhaustion of
+  that lifecycle routes to blueprint decomposition.
+- Resumed legacy typed-plan contracts retain their historical
+  plan-revision/blueprint-direct/decomposition compatibility path.
+- A committed UUE replay fixture covers both affected nodes and requires zero
+  legacy plan-correction calls.
+- Complete verification passed: 281 repository tests, Python compilation,
+  `git diff --check`, and the standalone committed Simplex historical replay
+  with `--require-progress`.
+
 ## 2026-08-02: Make Phase 1 Dependency Context Limits Non-Fatal
 
 ### Confirmed failure

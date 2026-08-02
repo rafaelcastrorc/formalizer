@@ -1,0 +1,19 @@
+{
+  "blueprint": "unconditional-unclonable-encryption",
+  "source_log": "run-20260802-043131.log",
+  "labels": [
+    "def:finite-register-operators",
+    "def:local-basis-unitary"
+  ],
+  "statement_fingerprints": {
+    "def:finite-register-operators": "finite-register-v1",
+    "def:local-basis-unitary": "local-basis-v1"
+  },
+  "semantic_rejection": "The compiling candidate omits concrete blueprint semantics.",
+  "expected_first_exhaustion": "blueprint-direct",
+  "expected_second_exhaustion": "decomposition",
+  "forbidden_model_calls": [
+    "phase1_design_plan_correction",
+    "phase1_design_plan_audit"
+  ]
+}

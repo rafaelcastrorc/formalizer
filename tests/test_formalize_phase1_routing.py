@@ -90,6 +90,7 @@ from formalize_blueprint import (  # noqa: E402
     _planned_helper_owner_by_name,
     _plan_owned_declaration_cycle_findings,
     _plan_realized_semantic_rejections,
+    _preserve_plan_entry_progress,
     _phase1_compile_plan_defects,
     _candidate_is_reusable_uncompiled,
     _candidate_exactly_realizes_plan,
@@ -118,6 +119,7 @@ from formalize_blueprint import (  # noqa: E402
     _route_exhausted_phase1_semantics,
     _revise_semantic_candidates,
     _revise_exhausted_phase1_contracts,
+    _revise_decomposition_plans_once,
     _run_validated_contract_phase1_layer,
     _repair_graph_distances,
     _save_state,
@@ -6752,6 +6754,138 @@ def def_network : NetworkData := sorry
         self.assertEqual(
             ctx.design_plan_entries[label]["semantic_revision_count"], 1
         )
+
+    def test_plan_replacement_preserves_candidate_contract_origin(self) -> None:
+        replacement = _preserve_plan_entry_progress(
+            {
+                "origin": "phase1_candidate",
+                "semantic_revision_count": 1,
+            },
+            {
+                "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                "target_signature": "def def_test : Prop",
+            },
+        )
+
+        self.assertEqual(replacement["origin"], "phase1_candidate")
+        self.assertEqual(replacement["semantic_revision_count"], 1)
+
+    def test_candidate_owned_semantic_exhaustion_skips_legacy_plan_loop(
+        self,
+    ) -> None:
+        fixture = json.loads(
+            (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "phase1_orchestration_replay"
+                / "uue_candidate_owned_semantic_exhaustion.json"
+            ).read_text(encoding="utf-8")
+        )
+        labels = fixture["labels"]
+        ctx = SimpleNamespace(
+            name=fixture["blueprint"],
+            nodes={label: node(label) for label in labels},
+            stmt_fps=fixture["statement_fingerprints"],
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "statement_fp": fixture["statement_fingerprints"][label],
+                    "target_signature": f"def {_lean_name(label)} : Prop",
+                    "origin": "phase1_candidate",
+                    "semantic_revision_count": 0,
+                }
+                for label in labels
+            },
+            design_plan_alternates={},
+            blueprint_direct_generation={},
+            generation_feedback={},
+            generation_candidates={},
+            retry_lifecycle={},
+            quarantined_labels=set(),
+            quarantine={},
+            telemetry=FakeTelemetry(),
+        )
+        evidence = fixture["semantic_rejection"]
+
+        with patch(
+            "formalize_blueprint._correct_phase1_design_plan"
+        ) as legacy_correction:
+            self.assertTrue(
+                all(
+                    _semantic_exhaustion_policy(ctx, label)
+                    == fixture["expected_first_exhaustion"]
+                    for label in labels
+                )
+            )
+            decomposition, revised, unresolved = (
+                _route_exhausted_phase1_semantics(
+                    ctx,
+                    labels,
+                    evidence,
+                    layer_no=0,
+                    source="historical-replay",
+                )
+            )
+            self.assertEqual(decomposition, set())
+            self.assertEqual(revised, set(labels))
+            self.assertEqual(unresolved, set())
+            self.assertTrue(
+                all(
+                    _semantic_exhaustion_policy(ctx, label)
+                    == fixture["expected_second_exhaustion"]
+                    for label in labels
+                )
+            )
+
+            decomposition, revised, unresolved = (
+                _route_exhausted_phase1_semantics(
+                    ctx,
+                    labels,
+                    evidence,
+                    layer_no=0,
+                    source="historical-replay",
+                )
+            )
+            self.assertEqual(decomposition, set(labels))
+            self.assertEqual(revised, set())
+            self.assertEqual(unresolved, set())
+            legacy_correction.assert_not_called()
+
+        activation_events = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_blueprint_direct_generation_activated"
+        ]
+        self.assertEqual(activation_events[-1]["source"], "candidate_semantic_exhaustion")
+
+    def test_candidate_owned_decomposition_does_not_revise_legacy_plan(
+        self,
+    ) -> None:
+        label = "def:local-basis-unitary"
+        ctx = SimpleNamespace(
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "origin": "phase1_candidate",
+                    "semantic_revision_count": 0,
+                }
+            },
+            telemetry=FakeTelemetry(),
+        )
+        with patch(
+            "formalize_blueprint._revise_exhausted_phase1_contracts"
+        ) as revise:
+            revised = _revise_decomposition_plans_once(
+                ctx,
+                [label],
+                "the blueprint needs an explicit tensor-product helper",
+                layer_no=0,
+                source="historical-replay",
+            )
+
+        self.assertEqual(revised, set())
+        revise.assert_not_called()
 
     def test_blueprint_direct_exhaustion_routes_only_that_node_to_decomposition(
         self,

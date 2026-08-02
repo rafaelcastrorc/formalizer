@@ -7946,6 +7946,13 @@ def _preserve_plan_entry_progress(
     retry loop under the global repair budget.
     """
     previous = previous or {}
+    # ``origin`` is provenance, not model-owned plan payload.  In particular,
+    # a correction response does not echo ``phase1_candidate``.  Losing that
+    # marker would make a fresh candidate-derived contract look like resumed
+    # legacy typed-plan state and route later failures through the obsolete
+    # independent plan-correction loop.
+    if previous.get("origin") and not replacement.get("origin"):
+        replacement["origin"] = previous["origin"]
     for key in _PLAN_ENTRY_PROGRESS_KEYS:
         prior = int(previous.get(key) or 0)
         current = int(replacement.get(key) or 0)
@@ -16483,6 +16490,7 @@ def _revise_exhausted_phase1_contracts(
         label
         for label in set(labels)
         if label in entries
+        and (entries.get(label) or {}).get("origin") != "phase1_candidate"
         and int((entries.get(label) or {}).get("schema_version") or 0)
         == DESIGN_PLAN_SCHEMA_VERSION
     )
@@ -16607,6 +16615,7 @@ def _revise_decomposition_plans_once(
         label
         for label in labels
         if label in entries
+        and (entries.get(label) or {}).get("origin") != "phase1_candidate"
         and int((entries.get(label) or {}).get("schema_version") or 0)
         == DESIGN_PLAN_SCHEMA_VERSION
         and int((entries.get(label) or {}).get("semantic_revision_count") or 0)
@@ -16640,6 +16649,11 @@ def _semantic_exhaustion_policy(ctx: Ctx, label: str) -> str:
     if _uses_blueprint_direct_generation(ctx, label):
         return "decomposition"
     entry = (getattr(ctx, "design_plan_entries", {}) or {}).get(label) or {}
+    # Fresh Phase-1 contracts are derived from the exact Lean candidate and
+    # have already received an evidence-driven candidate correction before
+    # this exhaustion point.  There is no independent typed plan to repair.
+    if entry.get("origin") == "phase1_candidate":
+        return "blueprint-direct"
     if int(entry.get("semantic_revision_count") or 0) >= 1:
         return "blueprint-direct"
     return "plan-revision"
@@ -16695,12 +16709,36 @@ def _route_exhausted_phase1_semantics(
         for label, action in actions.items()
         if action == "blueprint-direct"
     }
-    direct = _activate_blueprint_direct_generation(
-        ctx,
-        direct_requested,
-        evidence,
-        source="post_semantic_rejection_after_plan_revision",
-    )
+    candidate_direct = {
+        label
+        for label in direct_requested
+        if (
+            (getattr(ctx, "design_plan_entries", {}).get(label) or {}).get(
+                "origin"
+            )
+            == "phase1_candidate"
+        )
+    }
+    legacy_direct = direct_requested - candidate_direct
+    direct = set()
+    if candidate_direct:
+        direct.update(
+            _activate_blueprint_direct_generation(
+                ctx,
+                candidate_direct,
+                evidence,
+                source="candidate_semantic_exhaustion",
+            )
+        )
+    if legacy_direct:
+        direct.update(
+            _activate_blueprint_direct_generation(
+                ctx,
+                legacy_direct,
+                evidence,
+                source="post_semantic_rejection_after_plan_revision",
+            )
+        )
     exhausted.difference_update(direct)
     revised = direct | _revise_exhausted_phase1_contracts(
         ctx, exhausted, evidence
