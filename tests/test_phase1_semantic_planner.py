@@ -16,6 +16,13 @@ FIXTURE_PATH = (
     / "phase1_semantic_plan_replay"
     / "historical_cases.json"
 )
+INVALID_TEX_ESCAPE_FIXTURE = (
+    REPO_ROOT
+    / "tests"
+    / "fixtures"
+    / "phase1_semantic_plan_replay"
+    / "invalid_tex_escape.txt"
+)
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from formalize_blueprint import (  # noqa: E402
@@ -71,6 +78,49 @@ def context(nodes: dict[str, Node]) -> SimpleNamespace:
 
 
 class CompactSemanticPlannerTests(unittest.TestCase):
+    def test_parser_recovers_outer_plan_with_unescaped_tex_commands(self) -> None:
+        label = "def:local-basis-unitary"
+        ctx = context({label: node(label)})
+        response = INVALID_TEX_ESCAPE_FIXTURE.read_text(encoding="utf-8")
+
+        parsed, findings = _parse_semantic_plan_entries(ctx, [label], response)
+
+        self.assertEqual(set(parsed), {label})
+        self.assertIn(r"\dagger", parsed[label]["representation"])
+        self.assertTrue(
+            any(
+                "malformed JSON string backslash" in finding
+                for finding in findings["<response>"]
+            )
+        )
+
+    def test_parser_never_substitutes_nested_object_for_malformed_outer_plan(self) -> None:
+        label = "def:widget"
+        ctx = context({label: node(label)})
+        truncated = (
+            '{"contracts":[{"label":"def:widget","representation":"broken '
+            r'\dagger","vocabulary":[],"obligations":[],"provider_requirements":[]}'
+        )
+
+        parsed, findings = _parse_semantic_plan_entries(ctx, [label], truncated)
+
+        self.assertEqual(parsed, {})
+        self.assertIn("top-level contracts array", findings["<response>"][0])
+
+    def test_parser_preserves_tex_command_that_looks_like_json_control_escape(self) -> None:
+        label = "def:parameter"
+        ctx = context({label: node(label)})
+        response = (
+            '{"contracts":[{"label":"def:parameter","representation":"the '
+            r'\beta parameter","vocabulary":[],"obligations":[],'
+            '"provider_requirements":[]}]}'
+        )
+
+        parsed, findings = _parse_semantic_plan_entries(ctx, [label], response)
+
+        self.assertEqual(parsed[label]["representation"], r"the \beta parameter")
+        self.assertIn("malformed JSON string backslash", findings["<response>"][0])
+
     def test_transient_planner_failure_uses_complete_blueprint_fallback(self) -> None:
         nodes = {
             "def:provider": node("def:provider"),

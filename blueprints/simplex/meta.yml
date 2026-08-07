@@ -6,3 +6,6 @@ description: "A leanblueprint-style dependency graph for the construction showin
 build_pdf: false        # if true, also build + link a PDF (requires TeX in CI)
 home: "https://arxiv.org/abs/2505.14338"                # optional URL shown as a "home" link on the landing card
 github: ""              # optional repo URL shown as a "GitHub" link on the landing card
+# Lean libraries searched for candidate declarations, highest priority
+# first. Managed by the web UI's Lean libraries tab.
+libraries: [mathlib]

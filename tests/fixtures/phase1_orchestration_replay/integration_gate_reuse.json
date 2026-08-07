@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "source": "simplex run-20260802-115840 snapshot",
+  "phase1_last_contract_s": 8603,
+  "phase2_start_s": 9302,
+  "observed_integration_gap_s": 699,
+  "module_count": 39,
+  "expected_reused_modules": 39,
+  "expected_rebuilt_modules": 0,
+  "expected_aggregate_checks": 1
+}

@@ -10,7 +10,28 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from model_runners.base import RunResult  # noqa: E402
-from model_runners.cli import ClaudeCodeRunner, CodexRunner  # noqa: E402
+from model_runners.cli import (  # noqa: E402
+    ClaudeCodeRunner,
+    CodexRunner,
+    _which_or_app,
+)
+
+
+class RunnerExecutableDiscoveryTests(unittest.TestCase):
+    def test_gui_path_falls_back_to_chatgpt_bundled_codex(self) -> None:
+        chatgpt_cli = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
+        old_codex_cli = Path("/Applications/Codex.app/Contents/Resources/codex")
+
+        with patch("model_runners.cli.shutil.which", return_value=None), patch.object(
+            Path,
+            "is_file",
+            autospec=True,
+            side_effect=lambda path: path == chatgpt_cli,
+        ):
+            self.assertEqual(
+                _which_or_app("codex", chatgpt_cli, old_codex_cli),
+                str(chatgpt_cli),
+            )
 
 
 class CodexReadonlyTests(unittest.TestCase):

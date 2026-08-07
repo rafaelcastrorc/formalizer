@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import io
 import sys
 import json
 import re
@@ -9,6 +10,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,10 +25,12 @@ from formalize_blueprint import (  # noqa: E402
     DesignPlanCandidate,
     PHASE1_STATEMENT_ORDER,
     PHASE2_PROOF_ORDER,
+    OPEN_CONJECTURE_TARGET_KIND,
     _add_phase1_boilerplate_names,
     _bottom_up_proof_layers,
     _bottom_up_statement_layers,
     _bottom_up_ready_frontier,
+    _begin_phase2,
     _apply_proof_batch,
     _apply_phase1_retry_scheduling,
     _apply_required_dependency_edges,
@@ -66,6 +70,7 @@ from formalize_blueprint import (  # noqa: E402
     _model_alignment_audit,
     _audit_post_repair_boundary,
     _mark_repair_boundary_pending,
+    _post_repair_boundary_prompt,
     _pending_repair_boundary_request,
     _minimal_dependency_interface,
     _partition_phase1_groups_by_dependency_context,
@@ -75,10 +80,13 @@ from formalize_blueprint import (  # noqa: E402
     _parts_around_labels,
     _parse_design_plan_entries,
     _prepare_blueprint_draft,
+    _proof_base_round_limit,
+    _prove_section,
     _promote_blueprint_draft,
     _prune_stale_generated,
     _prune_stale_generation_feedback,
     _prune_stale_generation_candidates,
+    _prune_stale_phase1_exchange_history,
     _prune_stale_local_group_partitions,
     _prune_stale_quarantine,
     _prune_stale_retry_lifecycle,
@@ -103,11 +111,17 @@ from formalize_blueprint import (  # noqa: E402
     _retry_statement_patch_compile_once,
     _run_initial_declaration_pass,
     _run_phase1,
+    _run_pending_declaration_work,
+    _run_phase2_whole_node_repairs,
+    _run_phase2_whole_node_transaction,
     _refine_statement_group,
     _phase1_repair_scope_violations,
+    _phase1_recompile_environment,
+    _phase1_target_kinds,
     _generate_uncompiled_phase1_candidate,
     _compile_semantic_phase1_candidates,
     _compile_and_finalize_semantic_candidates,
+    _contract_work_stage,
     _correct_phase1_design_plan,
     _repair_phase1_design_plan_closure,
     _reusable_uncompiled_candidate,
@@ -116,6 +130,7 @@ from formalize_blueprint import (  # noqa: E402
     _semantic_repair_candidate,
     _semantic_first_failure_request,
     _semantic_exhaustion_policy,
+    _route_phase1_compile_failure,
     _route_exhausted_phase1_semantics,
     _revise_semantic_candidates,
     _revise_exhausted_phase1_contracts,
@@ -123,7 +138,10 @@ from formalize_blueprint import (  # noqa: E402
     _run_validated_contract_phase1_layer,
     _repair_graph_distances,
     _save_state,
+    _phase1_exchange_finish,
+    _phase1_exchange_start,
     _store_generation_feedback,
+    _targeted_skeleton_patch_prompt,
     _store_generation_candidates,
     _statement_audit_prompt,
     _stuck_state_for,
@@ -134,6 +152,9 @@ from formalize_blueprint import (  # noqa: E402
     _freeze_section_from_code,
     _frozen_labels,
     _phase2_body_progress,
+    _print_pipeline_progress,
+    _recorded_conjecture_labels,
+    _verified_node_labels,
     _generate_phase1_statement_group,
     _proved_labels,
     _reserved_labels,
@@ -205,6 +226,332 @@ class PhaseOneRoutingTests(unittest.TestCase):
         }
         self.ctx = SimpleNamespace(nodes=self.nodes)
 
+    def test_phase2_is_a_one_way_milestone_for_contract_repairs(self) -> None:
+        telemetry = FakeTelemetry()
+        ctx = SimpleNamespace(
+            nodes={"def:a": node("def:a"), "lem:b": node("lem:b")},
+            telemetry=telemetry,
+            phase2_started=False,
+            phase1_baseline_labels=set(),
+        )
+        section = Section(
+            1,
+            ["def:a", "lem:b"],
+            Path("Skeleton01.lean"),
+            "AutoBlueprint.Generated.Paper.Skeleton01",
+            [],
+        )
+
+        self.assertTrue(_begin_phase2(ctx, [section]))
+        self.assertEqual(ctx.phase1_baseline_labels, {"def:a", "lem:b"})
+        self.assertEqual(_contract_work_stage(ctx), "Phase 2 whole-node repair")
+
+        ctx.nodes["lem:helper"] = node("lem:helper")
+        self.assertFalse(_begin_phase2(ctx, [section]))
+        self.assertEqual(ctx.phase1_baseline_labels, {"def:a", "lem:b"})
+        self.assertEqual(
+            [name for name, _fields in telemetry.events], ["phase2_started"]
+        )
+
+    def test_phase2_whole_node_repair_does_not_regress_phase1_progress(self) -> None:
+        telemetry = FakeTelemetry()
+        ctx = SimpleNamespace(
+            nodes={
+                "def:a": node("def:a"),
+                "lem:b": node("lem:b"),
+                "lem:new-helper": node("lem:new-helper"),
+            },
+            telemetry=telemetry,
+            phase2_started=True,
+            phase1_baseline_labels={"def:a", "lem:b"},
+        )
+        with patch(
+            "formalize_blueprint._frozen_labels", return_value={"def:a", "lem:b"}
+        ), patch(
+            "formalize_blueprint._phase2_body_progress", return_value=(set(), {"lem:b"})
+        ), patch(
+            "formalize_blueprint._verified_node_labels", return_value={"def:a"}
+        ), patch(
+            "formalize_blueprint._recorded_conjecture_labels", return_value=set()
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                _print_pipeline_progress(ctx, [], 4, 100)
+
+        self.assertIn("Phase 1 contracts 2/2 frozen", output.getvalue())
+        event, fields = telemetry.events[-1]
+        self.assertEqual(event, "pipeline_progress")
+        self.assertEqual(fields["workflow_phase"], "phase2")
+        self.assertEqual(
+            fields["phase2_whole_node_pending_labels"], ["lem:new-helper"]
+        )
+
+    def test_phase2_pending_work_cannot_reopen_phase1(self) -> None:
+        fixture = json.loads(
+            (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "phase2_orchestration_replay"
+                / "uue_static_layer_barrier.json"
+            ).read_text(encoding="utf-8")
+        )["whole_node_repair_regression"]
+        ctx = SimpleNamespace(phase2_started=fixture["phase2_started"])
+        sections: list[Section] = []
+        pending = set(fixture["pending_labels"])
+        with patch(
+            "formalize_blueprint._run_phase2_whole_node_repairs",
+            return_value=sections,
+        ) as whole_node, patch(
+            "formalize_blueprint._run_phase1"
+        ) as phase1:
+            result = _run_pending_declaration_work(
+                ctx, sections, pending
+            )
+
+        self.assertIs(result, sections)
+        whole_node.assert_called_once_with(
+            ctx, sections, pending
+        )
+        phase1.assert_not_called()
+
+        with self.assertRaisesRegex(RuntimeError, "cannot run after Phase 2"):
+            _run_phase1(ctx, sections, pending, PHASE1_STATEMENT_ORDER)
+
+    def test_phase2_whole_node_transaction_keeps_complete_body(self) -> None:
+        label = "lem:changed"
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "statement"},
+            contract_fps={label: "contract"},
+            base_timeout=120,
+            hard_timeout=300,
+            base_effort=None,
+            escalation_effort=None,
+            telemetry=FakeTelemetry(),
+        )
+        completed = Section(
+            2,
+            [label],
+            Path("Skeleton02.lean"),
+            "AutoBlueprint.Generated.Paper.Skeleton02",
+            [],
+        )
+        response = "```lean\ntheorem lem_changed : True := by trivial\n```"
+        with patch(
+            "formalize_blueprint._sections_for_deps", return_value=[]
+        ), patch(
+            "formalize_blueprint._generation_feedback_for", return_value=""
+        ), patch(
+            "formalize_blueprint._phase2_whole_node_prompt", return_value="prompt"
+        ), patch(
+            "formalize_blueprint._call_model",
+            return_value=CallResult(status="ok", text=response),
+        ), patch(
+            "formalize_blueprint._freeze_section_from_code",
+            return_value=[completed],
+        ) as freeze:
+            result = _run_phase2_whole_node_transaction(
+                ctx, label, [], _SectionNumberAllocator(2)
+            )
+
+        self.assertEqual(result, [completed])
+        self.assertTrue(freeze.call_args.kwargs["complete_bodies"])
+        self.assertFalse(freeze.call_args.kwargs["allow_patch"])
+
+    def test_phase2_whole_node_decomposition_routes_without_escalated_generation(
+        self,
+    ) -> None:
+        fixture = json.loads(
+            (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "phase2_orchestration_replay"
+                / "uue_static_layer_barrier.json"
+            ).read_text(encoding="utf-8")
+        )["whole_node_decomposition_signal_regression"]
+        label = fixture["label"]
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "statement"},
+            contract_fps={label: "contract"},
+            base_timeout=300,
+            hard_timeout=600,
+            base_effort="medium",
+            escalation_effort="high",
+            telemetry=FakeTelemetry(),
+        )
+        refusal = (
+            "NEEDS-DECOMPOSITION: "
+            + json.dumps(
+                {
+                    "label": label,
+                    "missing_helpers": fixture["missing_helpers"],
+                    "reason": "the canonical package interface is absent",
+                }
+            )
+        )
+        with patch(
+            "formalize_blueprint._sections_for_deps", return_value=[]
+        ), patch(
+            "formalize_blueprint._generation_feedback_for", return_value=""
+        ), patch(
+            "formalize_blueprint._phase2_whole_node_prompt", return_value="prompt"
+        ), patch(
+            "formalize_blueprint._call_model",
+            return_value=CallResult(status="ok", text=refusal),
+        ) as call_model:
+            with self.assertRaises(RepairRequest) as raised:
+                _run_phase2_whole_node_transaction(
+                    ctx, label, [], _SectionNumberAllocator(2)
+                )
+
+        self.assertTrue(raised.exception.authorizes_blueprint_repair)
+        self.assertEqual(raised.exception.labels, [label])
+        self.assertEqual(
+            raised.exception.decomposition_helpers,
+            fixture["missing_helpers"],
+        )
+        self.assertEqual(call_model.call_count, 1)
+        event, fields = ctx.telemetry.events[-1]
+        self.assertEqual(event, "phase2_whole_node_decomposition")
+        self.assertTrue(fields["routed_immediately"])
+
+    def test_phase2_parallel_whole_node_repair_routes_authorized_failure(self) -> None:
+        fixture = json.loads(
+            (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "phase2_orchestration_replay"
+                / "uue_static_layer_barrier.json"
+            ).read_text(encoding="utf-8")
+        )["authorized_parallel_repair_regression"]
+        accepted_labels = fixture["accepted_labels"]
+        repair_label = fixture["repair_label"]
+        accepted_sections = {
+            label: Section(
+                index,
+                [label],
+                Path(f"Skeleton{index:02d}.lean"),
+                f"AutoBlueprint.Generated.Paper.Skeleton{index:02d}",
+                [],
+            )
+            for index, label in enumerate(accepted_labels, 2)
+        }
+        ctx = SimpleNamespace(
+            nodes={
+                **{label: node(label) for label in accepted_labels},
+                repair_label: node(repair_label),
+            },
+            workers=3,
+        )
+        sections: list[Section] = []
+
+        def complete_or_repair(_ctx, label, _sections, _alloc):
+            if label in accepted_sections:
+                return [accepted_sections[label]]
+            raise RepairRequest(
+                "the blueprint proof needs an additional helper",
+                [repair_label],
+                section_labels=[repair_label],
+                authorizes_blueprint_repair=True,
+            )
+
+        with patch(
+            "formalize_blueprint._run_phase2_whole_node_transaction",
+            side_effect=complete_or_repair,
+        ), patch("formalize_blueprint._save_ctx_state"):
+            with self.assertRaises(RepairRequest) as raised:
+                _run_phase2_whole_node_repairs(
+                    ctx,
+                    sections,
+                    {*accepted_labels, repair_label},
+                )
+
+        self.assertTrue(raised.exception.authorizes_blueprint_repair)
+        self.assertEqual(raised.exception.labels, [repair_label])
+        self.assertEqual(
+            {label for section in sections for label in section.labels},
+            set(accepted_labels),
+        )
+
+    def test_complete_node_gate_rejects_sorry_but_allows_completed_definition(self) -> None:
+        target_kinds = {"def_changed": "definition"}
+        labels = {"def_changed": "def:changed"}
+        complete = "def def_changed : Nat := 1"
+        deferred = "def def_changed : Nat := sorry"
+
+        complete_findings = _skeleton_code_findings(
+            complete,
+            target_kinds,
+            labels,
+            allow_deferred_bodies=False,
+        )
+        deferred_findings = _skeleton_code_findings(
+            deferred,
+            target_kinds,
+            labels,
+            allow_deferred_bodies=False,
+        )
+
+        self.assertEqual(complete_findings, [])
+        self.assertTrue(
+            any("whole-node transaction" in item.message for item in deferred_findings)
+        )
+
+    def test_complete_body_freezer_does_not_normalize_definition_back_to_sorry(self) -> None:
+        label = "def:changed"
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "Skeleton01.lean"
+            ctx = SimpleNamespace(
+                name="paper",
+                nodes={label: node(label)},
+                lean_command=["lean"],
+                telemetry=FakeTelemetry(),
+                unavailable_imports=set(),
+                defer_phase1_alignment=False,
+                design_plan_entries={},
+                semantic_plan_entries={},
+                stmt_fps={label: "statement"},
+                contract_fps={label: "contract"},
+                retry_lifecycle={},
+            )
+            compiled = SimpleNamespace(ok=True, output="")
+            with patch(
+                "formalize_blueprint._section_module",
+                return_value=("Generated.Skeleton01", path),
+            ), patch(
+                "formalize_blueprint._sections_for_deps", return_value=[]
+            ), patch(
+                "formalize_blueprint._skeleton_deterministic_findings",
+                return_value=[],
+            ), patch(
+                "formalize_blueprint._model_alignment_audit", return_value=None
+            ), patch(
+                "formalize_blueprint._check_lean", return_value=(True, "")
+            ), patch(
+                "formalize_blueprint._compile_module_olean", return_value=compiled
+            ), patch(
+                "formalize_blueprint._mark_section_compiled"
+            ):
+                frozen = _freeze_section_from_code(
+                    ctx,
+                    [label],
+                    [],
+                    _SectionNumberAllocator(1),
+                    ["def def_changed : Nat := 1"],
+                    [],
+                    [],
+                    complete_bodies=True,
+                )
+
+            self.assertIsNotNone(frozen)
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("def def_changed : Nat := 1", text)
+            self.assertNotIn("sorry", text)
+
     def test_generation_feedback_is_bound_to_statement_fingerprint(self) -> None:
         telemetry = FakeTelemetry()
         ctx = SimpleNamespace(
@@ -268,6 +615,131 @@ class PhaseOneRoutingTests(unittest.TestCase):
         combined = _generation_feedback_for(ctx, [label])
         for index in range(worker_count):
             self.assertIn(f"worker-{index}-finding", combined)
+
+    def test_generation_feedback_keeps_sibling_audit_findings_separate(self) -> None:
+        labels = ["lem:a", "lem:b"]
+        ctx = SimpleNamespace(
+            nodes={label: node(label) for label in labels},
+            stmt_fps={label: f"{label}-v1" for label in labels},
+            generation_feedback={},
+            telemetry=FakeTelemetry(),
+        )
+        evidence = (
+            "Blueprint contract audit rejected:\n"
+            "- lem:a [reject]: missing the concrete probability equation\n"
+            "- lem:b [reject]: dropped the finite-key hypothesis"
+        )
+        _store_generation_feedback(
+            ctx, labels, evidence, source="statement_alignment"
+        )
+
+        feedback_a = _generation_feedback_for(ctx, ["lem:a"])
+        feedback_b = _generation_feedback_for(ctx, ["lem:b"])
+        self.assertIn("probability equation", feedback_a)
+        self.assertNotIn("finite-key hypothesis", feedback_a)
+        self.assertIn("finite-key hypothesis", feedback_b)
+        self.assertNotIn("probability equation", feedback_b)
+
+    def test_phase1_exchange_history_survives_outer_retry_context(self) -> None:
+        label = "lem:a"
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "statement-v1"},
+            design_plan_entries={},
+            blueprint_direct_generation={},
+            phase1_exchange_history={},
+        )
+        kwargs = {
+            "prompt": "fix the exact declaration",
+            "candidate_code": "theorem lem_a : True := by sorry",
+            "purpose": "skeleton_declaration_patch",
+            "tier": "base",
+        }
+        first = _phase1_exchange_start(ctx, [label], **kwargs)
+        self.assertFalse(
+            _phase1_exchange_finish(
+                ctx, first, status="ok", response_text="theorem lem_a : True := by trivial"
+            )
+        )
+
+        second = _phase1_exchange_start(ctx, [label], **kwargs)
+        self.assertEqual(first, second)
+        self.assertTrue(
+            _phase1_exchange_finish(
+                ctx, second, status="ok", response_text="theorem lem_a : True := by trivial"
+            )
+        )
+        self.assertFalse(
+            _phase1_exchange_finish(
+                ctx, second, status="ok", response_text="theorem lem_a : True := by simp"
+            )
+        )
+
+        ctx.stmt_fps[label] = "statement-v2"
+        self.assertEqual(
+            _prune_stale_phase1_exchange_history(ctx), {first}
+        )
+
+    def test_targeted_compiler_patch_keeps_unresolved_semantic_feedback(self) -> None:
+        """Compiler-only retries must not forget an earlier audit rejection."""
+        fixture = json.loads(
+            (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "phase1_orchestration_replay"
+                / "semantic_compiler_feedback_handoff.json"
+            ).read_text(encoding="utf-8")
+        )
+        case = fixture["cases"][0]
+        label = case["label"]
+        semantic_evidence = case["semantic_evidence"]
+        compiler_evidence = case["compiler_evidence"]
+        ctx = SimpleNamespace(
+            name=fixture["blueprint"],
+            nodes={label: node(label)},
+            stmt_blocks={label: "Concrete finite-register operator contract."},
+            stmt_fps={label: case["statement_fingerprint"]},
+            generation_feedback={},
+            telemetry=FakeTelemetry(),
+        )
+        _store_generation_feedback(
+            ctx,
+            [label],
+            semantic_evidence,
+            source="statement_audit",
+        )
+        findings = [
+            SkeletonFinding(
+                compiler_evidence,
+                label=label,
+                lean_name=_lean_name(label),
+                category="lean_compile",
+            )
+        ]
+
+        with patch(
+            "formalize_blueprint._minimal_dependency_interface",
+            return_value="-- dependency interface",
+        ), patch(
+            "formalize_blueprint._planned_helper_specs", return_value=[]
+        ), patch(
+            "formalize_blueprint._common_rules", return_value="COMMON RULES"
+        ), patch(
+            "formalize_blueprint._design_plan_block", return_value="DESIGN PLAN"
+        ):
+            prompt = _targeted_skeleton_patch_prompt(
+                ctx,
+                [label],
+                [],
+                [],
+                "def def_finite_register_operators : RegisterOperator := sorry",
+                findings,
+                timeout_s=300,
+            )
+
+        self.assertIn(compiler_evidence, prompt)
+        self.assertIn(semantic_evidence, prompt)
 
     def test_candidate_transition_requires_monotonic_deterministic_progress(self) -> None:
         previous = {
@@ -1530,7 +2002,82 @@ theorem lem_c : Nat = Nat := by sorry
         assert request is not None
         self.assertEqual(request.required_dependencies, {target: {dependency}})
         self.assertEqual(request.model_repair_labels, [])
+        self.assertEqual(request.labels, [target])
         self.assertEqual(ctx.repair_boundary_pending["mode"], "repair")
+
+    def test_post_repair_boundary_consumes_an_already_applied_edge(self) -> None:
+        target = "def:reduced-operator"
+        dependency = "def:density-operator-interface"
+        sibling = "def:finite-register-interface"
+        ctx = SimpleNamespace(
+            nodes={
+                target: node(target, uses={dependency}),
+                dependency: node(dependency),
+                sibling: node(sibling),
+            },
+            stmt_fps={
+                target: "target-after-edge",
+                dependency: "dependency-v1",
+                sibling: "sibling-v1",
+            },
+            telemetry=FakeTelemetry(),
+            repair_boundary_pending={
+                "mode": "repair",
+                "labels": [target, dependency, sibling],
+                "statement_fps": {
+                    target: "target-before-edge",
+                    dependency: "dependency-v1",
+                    sibling: "sibling-v1",
+                },
+                "previous_statements": {},
+                "evidence": "The reduced operator requires its density interface.",
+                "repair_labels": [],
+                "required_dependencies": {target: {dependency}},
+                "decomposition_helpers": [],
+            },
+        )
+
+        request = _pending_repair_boundary_request(ctx)
+
+        self.assertIsNone(request)
+        self.assertEqual(ctx.repair_boundary_pending, {})
+        self.assertEqual(
+            ctx.telemetry.events[-1][0], "post_repair_boundary_completed"
+        )
+
+    def test_post_repair_boundary_preserves_model_action_after_edge(self) -> None:
+        target = "def:reduced-operator"
+        dependency = "def:density-operator-interface"
+        ctx = SimpleNamespace(
+            nodes={
+                target: node(target, uses={dependency}),
+                dependency: node(dependency),
+            },
+            stmt_fps={
+                target: "target-after-edge",
+                dependency: "dependency-v1",
+            },
+            telemetry=FakeTelemetry(),
+            repair_boundary_pending={
+                "mode": "repair",
+                "labels": [target],
+                "statement_fps": {target: "target-before-edge"},
+                "previous_statements": {},
+                "evidence": "The edge and the target statement both need correction.",
+                "repair_labels": [target],
+                "required_dependencies": {target: {dependency}},
+                "decomposition_helpers": ["a normalized reduced-state helper"],
+            },
+        )
+
+        request = _pending_repair_boundary_request(ctx)
+
+        self.assertIsNotNone(request)
+        assert request is not None
+        self.assertEqual(request.labels, [target])
+        self.assertEqual(request.model_repair_labels, [target])
+        self.assertEqual(request.required_dependencies, {})
+        self.assertTrue(request.authorizes_blueprint_repair)
 
     def test_post_repair_boundary_acceptance_adds_no_repair(self) -> None:
         label = "lem:repaired"
@@ -1612,6 +2159,128 @@ theorem lem_c : Nat = Nat := by sorry
         self.assertEqual(queued, set())
         self.assertIsNone(request)
         call.assert_not_called()
+
+    def test_phase2_repair_boundary_keeps_root_and_complete_helper_component(self) -> None:
+        fixture = json.loads(
+            (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "phase2_orchestration_replay"
+                / "uue_static_layer_barrier.json"
+            ).read_text(encoding="utf-8")
+        )["serial_helper_discovery_regression"]
+        root = fixture["original_root"]
+        helpers = fixture["observed_helper_chain"]
+        before = {root: node(root)}
+        current_nodes = {
+            root: node(root, uses={helpers[0]}),
+            helpers[0]: node(helpers[0], uses={helpers[1]}),
+            helpers[1]: node(helpers[1]),
+        }
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes=current_nodes,
+            phase2_started=True,
+            stmt_fps={label: f"{label}-v2" for label in current_nodes},
+            stmt_blocks={label: f"Statement for {label}." for label in current_nodes},
+            tex_blocks={
+                label: f"Statement and complete proof for {label}."
+                for label in current_nodes
+            },
+            paper_text="",
+            telemetry=FakeTelemetry(),
+            repair_boundary_pending={},
+        )
+        with patch(
+            "formalize_blueprint._statement_blocks",
+            return_value={root: f"Statement for {root}."},
+        ), patch(
+            "formalize_blueprint._statement_fingerprints",
+            return_value={root: f"{root}-v2"},
+        ):
+            queued = _mark_repair_boundary_pending(
+                ctx,
+                set(current_nodes),
+                before,
+                repair_roots=[root],
+                failure_evidence=fixture["original_evidence"],
+            )
+
+        self.assertEqual(queued, set(current_nodes))
+        pending = ctx.repair_boundary_pending
+        self.assertEqual(pending["repair_roots"], [root])
+        self.assertEqual(pending["component_changed_labels"], sorted(current_nodes))
+        self.assertTrue(pending["require_component_closure"])
+        prompt = _post_repair_boundary_prompt(ctx, pending["labels"])
+        self.assertIn(fixture["original_evidence"], prompt)
+        self.assertIn(root, prompt)
+        for helper in helpers:
+            self.assertIn(helper, prompt)
+        self.assertIn("dependency-closed", prompt)
+        self.assertIn("all foreseeable missing", prompt)
+
+    def test_phase2_component_rejection_preserves_root_evidence_and_all_helpers(self) -> None:
+        root = "lem:security-winning-probability-transport"
+        helper = "lem:security-concrete-package-final-bound"
+        ctx = SimpleNamespace(
+            name="paper",
+            nodes={root: node(root, uses={helper}), helper: node(helper)},
+            stmt_fps={root: "root-v2", helper: "helper-v1"},
+            stmt_blocks={root: "Root statement.", helper: "Helper statement."},
+            tex_blocks={root: "Root proof.", helper: "Helper proof."},
+            paper_text="",
+            telemetry=FakeTelemetry(),
+            base_timeout=30,
+            base_effort="medium",
+            repair_boundary_pending={
+                "mode": "audit",
+                "labels": [root, helper],
+                "statement_fps": {root: "root-v2", helper: "helper-v1"},
+                "previous_statements": {root: "Root statement.", helper: ""},
+                "evidence": "original alignment rejection",
+                "repair_roots": [root],
+                "component_changed_labels": [root, helper],
+                "require_component_closure": True,
+            },
+        )
+        response = CallResult(
+            status="ok",
+            text=json.dumps(
+                {
+                    "accepted": False,
+                    "issues": [
+                        {
+                            "node": root,
+                            "severity": "reject",
+                            "classification": "needs_decomposition",
+                            "reason": "the helper still postpones two obligations",
+                            "required_dependencies": [],
+                            "missing_helpers": [
+                                "unpack the final-reduction package",
+                                "transport the concrete probability bound",
+                            ],
+                        }
+                    ],
+                }
+            ),
+        )
+        with patch("formalize_blueprint._call_model", return_value=response):
+            request = _pending_repair_boundary_request(ctx)
+
+        self.assertIsNotNone(request)
+        assert request is not None
+        self.assertTrue(request.authorizes_blueprint_repair)
+        self.assertEqual(request.model_repair_labels, [root])
+        self.assertEqual(
+            request.decomposition_helpers,
+            [
+                "unpack the final-reduction package",
+                "transport the concrete probability bound",
+            ],
+        )
+        self.assertIn("original alignment rejection", request.evidence)
+        self.assertIn("still postpones two obligations", request.evidence)
 
     def test_dependency_edge_insertion_preserves_node_prose(self) -> None:
         source = (
@@ -4260,6 +4929,53 @@ end ModelOutput
         )
         self.assertEqual(violations, {"unrelated"})
 
+    def test_compound_repair_scope_excludes_separately_validated_edge(self) -> None:
+        before_transaction = {
+            "finite-register": node("finite-register"),
+            "single-qubit": node("single-qubit"),
+            "local-basis": node("local-basis"),
+        }
+        before_model = {
+            "finite-register": node("finite-register"),
+            "single-qubit": node("single-qubit"),
+            "local-basis": node("local-basis", uses={"single-qubit"}),
+        }
+        after_model = {
+            "finite-register": node(
+                "finite-register",
+                uses={"operator-space", "density", "partial-trace"},
+            ),
+            "operator-space": node("operator-space"),
+            "density": node("density", uses={"operator-space"}),
+            "partial-trace": node("partial-trace", uses={"operator-space"}),
+            "single-qubit": node("single-qubit"),
+            "local-basis": node("local-basis", uses={"single-qubit"}),
+        }
+        model_changed = {
+            "finite-register",
+            "operator-space",
+            "density",
+            "partial-trace",
+        }
+        deterministic_changed = {"local-basis"}
+
+        old_merged_violations = _phase1_repair_scope_violations(
+            before_transaction,
+            after_model,
+            ["finite-register"],
+            model_changed | deterministic_changed,
+        )
+
+        violations = _phase1_repair_scope_violations(
+            before_model,
+            after_model,
+            ["finite-register"],
+            model_changed,
+        )
+
+        self.assertEqual(old_merged_violations, {"local-basis"})
+        self.assertEqual(violations, set())
+
     def test_unchanged_descendant_is_recompiled_instead_of_regenerated(self) -> None:
         telemetry = FakeTelemetry()
         with tempfile.TemporaryDirectory() as tmp:
@@ -4581,6 +5297,20 @@ end ModelOutput
                             },
                         }
                     },
+                    phase1_exchange_history={
+                        "exchange-v1": {
+                            "labels": ["peer"],
+                            "statement_fps": {"peer": "peer-v1"},
+                            "plan_fps": {"peer": ""},
+                            "candidate_sha256": "candidate-hash",
+                            "purpose": "skeleton_declaration_patch",
+                            "tier": "base",
+                            "prompt_sha256": "prompt-hash",
+                            "launches": 2,
+                            "response_sha256s": ["response-hash"],
+                            "statuses": ["ok", "ok"],
+                        }
+                    },
                     retry_lifecycle={
                         "phase1_statement:hard": {
                             "label": "hard",
@@ -4652,14 +5382,21 @@ end ModelOutput
                         "statement_fps": {"hard": "hard-v1"},
                         "previous_statements": {"hard": "old hard statement"},
                         "evidence": "missing dependency",
+                        "repair_roots": ["hard"],
+                        "component_changed_labels": ["hard", "peer"],
+                        "component_added_labels": ["peer"],
+                        "require_component_closure": True,
                         "repair_labels": ["hard"],
                         "required_dependencies": {"hard": ["peer"]},
                     },
+                    phase2_started=True,
+                    phase1_baseline_labels={"cached", "hard", "peer"},
                     effective_section_size=6,
                     refinement_order="top-down",
                 )
             payload = json.loads(state.read_text(encoding="utf-8"))
-            self.assertEqual(payload["version"], 20)
+            self.assertEqual(payload["version"], 24)
+            self.assertEqual(payload["conjecture_policy"], "attempt")
             self.assertEqual(payload["refinement_order"], "top-down")
             self.assertEqual(
                 payload["scheduler"]["quarantine"],
@@ -4671,10 +5408,28 @@ end ModelOutput
                 },
             )
             self.assertEqual(payload["scheduler"]["effective_section_size"], 6)
+            self.assertTrue(payload["scheduler"]["workflow"]["phase2_started"])
+            self.assertEqual(
+                payload["scheduler"]["workflow"]["phase1_baseline_labels"],
+                ["cached", "hard", "peer"],
+            )
             self.assertEqual(
                 payload["scheduler"]["repair_boundary_pending"]
                 ["required_dependencies"],
                 {"hard": ["peer"]},
+            )
+            self.assertEqual(
+                payload["scheduler"]["repair_boundary_pending"]["repair_roots"],
+                ["hard"],
+            )
+            self.assertEqual(
+                payload["scheduler"]["repair_boundary_pending"]
+                ["component_changed_labels"],
+                ["hard", "peer"],
+            )
+            self.assertTrue(
+                payload["scheduler"]["repair_boundary_pending"]
+                ["require_component_closure"]
             )
             self.assertEqual(
                 payload["scheduler"]["local_group_partitions"]["hard"]["group"],
@@ -4697,6 +5452,11 @@ end ModelOutput
                 payload["scheduler"]["generation_candidates"]["hard"]
                 ["working_candidate"]["code"],
                 "theorem hard : True := by sorry",
+            )
+            self.assertEqual(
+                payload["scheduler"]["phase1_exchange_history"]
+                ["exchange-v1"]["launches"],
+                2,
             )
             self.assertEqual(
                 payload["scheduler"]["retry_lifecycle"][
@@ -4762,12 +5522,15 @@ end ModelOutput
                 local_group_partitions={},
                 generation_feedback={},
                 generation_candidates={},
+                phase1_exchange_history={},
                 retry_lifecycle={},
                 design_plan="",
                 design_plan_entries={},
                 semantic_plan_entries={},
                 design_plan_alternates={},
                 blueprint_direct_generation={},
+                phase2_started=False,
+                phase1_baseline_labels=set(),
                 effective_section_size=0,
                 section_size=12,
                 refinement_order="top-down",
@@ -4784,6 +5547,10 @@ end ModelOutput
                 ctx.quarantine["hard"]["failure_class"], "unspecified"
             )
             self.assertEqual(ctx.effective_section_size, 6)
+            self.assertTrue(ctx.phase2_started)
+            self.assertEqual(
+                ctx.phase1_baseline_labels, {"cached", "hard", "peer"}
+            )
             self.assertEqual(
                 ctx.local_group_partitions["peer"]["group"], ["hard", "peer"]
             )
@@ -4802,6 +5569,11 @@ end ModelOutput
             self.assertEqual(
                 ctx.generation_candidates["hard"]["working_candidate"]["code"],
                 "theorem hard : True := by sorry",
+            )
+            self.assertEqual(
+                ctx.phase1_exchange_history["exchange-v1"]
+                ["response_sha256s"],
+                ["response-hash"],
             )
             self.assertEqual(
                 ctx.retry_lifecycle["phase1_statement:hard"]["state"],
@@ -4842,6 +5614,16 @@ end ModelOutput
             self.assertEqual(
                 ctx.repair_boundary_pending["required_dependencies"],
                 {"hard": {"peer"}},
+            )
+            self.assertEqual(
+                ctx.repair_boundary_pending["repair_roots"], ["hard"]
+            )
+            self.assertEqual(
+                ctx.repair_boundary_pending["component_changed_labels"],
+                ["hard", "peer"],
+            )
+            self.assertTrue(
+                ctx.repair_boundary_pending["require_component_closure"]
             )
             compile_mock.assert_not_called()
 
@@ -5070,6 +5852,121 @@ end ModelOutput
             (0, ["thm:root"], ["thm:root"]),
         )
 
+    def test_top_down_frontier_does_not_block_independent_lower_branch(self) -> None:
+        fixture = json.loads(
+            (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "phase2_orchestration_replay"
+                / "uue_static_layer_barrier.json"
+            ).read_text(encoding="utf-8")
+        )
+        nodes = {
+            label: node(label, uses=set(dependencies))
+            for label, dependencies in fixture["nodes"].items()
+        }
+
+        # The correctness-field consumer has already completed, so its three
+        # dependencies can occupy idle workers while the independent root and
+        # security branch continue in root-first order.
+        self.assertEqual(
+            _next_implementation_frontier(
+                nodes,
+                set(fixture["unresolved"]),
+                "top-down",
+            ),
+            (
+                0,
+                fixture["expected_dynamic_ready"],
+                ["thm:main-construction"],
+            ),
+        )
+
+    def test_singleton_proof_rounds_do_not_inherit_configured_batch_capacity(
+        self,
+    ) -> None:
+        fixture = json.loads(
+            (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "phase2_orchestration_replay"
+                / "uue_static_layer_barrier.json"
+            ).read_text(encoding="utf-8")
+        )["singleton_retry_regression"]
+
+        self.assertEqual(fixture["observed_base_attempts"], 5)
+        self.assertEqual(
+            _proof_base_round_limit(
+                fixture["configured_batch_size"],
+                fixture["actual_label_count"],
+            ),
+            fixture["expected_base_attempts"],
+        )
+        # Genuine large units retain the original bisection allowance.
+        self.assertEqual(_proof_base_round_limit(12, 12), 5)
+
+    def test_singleton_section_escalates_after_two_base_calls(self) -> None:
+        label = "lem:singleton"
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "Skeleton01.lean"
+            path.write_text(
+                "theorem lem_singleton : True := by\n  sorry\n",
+                encoding="utf-8",
+            )
+            section = Section(1, [label], path, "Generated.Skeleton01", [])
+            ctx = SimpleNamespace(
+                nodes={label: node(label)},
+                use_ladder=False,
+                proof_batch=12,
+                base_timeout=300,
+                hard_timeout=600,
+                base_effort="medium",
+                escalation_effort="high",
+                telemetry=FakeTelemetry(),
+            )
+            purposes: list[str] = []
+
+            def call_model(*_args, **kwargs):
+                purposes.append(kwargs["purpose"])
+                return CallResult(status="ok", text="candidate")
+
+            with patch(
+                "formalize_blueprint._sections_for_deps", return_value=[]
+            ), patch(
+                "formalize_blueprint._proof_prompt", return_value="prompt"
+            ), patch(
+                "formalize_blueprint._call_model", side_effect=call_model
+            ), patch(
+                "formalize_blueprint._apply_proof_batch",
+                return_value=([], {label: "Lean rejected candidate"}, {}),
+            ), patch(
+                "formalize_blueprint._parse_decomposition_refusal",
+                side_effect=[
+                    None,
+                    None,
+                    {
+                        "label": label,
+                        "reason": "missing helper",
+                        "missing_helpers": ["helper lemma"],
+                    },
+                ],
+            ), patch(
+                "formalize_blueprint._retry_next_tier", return_value="base"
+            ), patch(
+                "formalize_blueprint._record_retry_failure", return_value=False
+            ), patch(
+                "formalize_blueprint._save_ctx_state"
+            ):
+                outcome = _prove_section(ctx, section, [section], [label])
+
+        self.assertEqual(
+            purposes,
+            ["proof_batch", "proof_batch", "proof_singleton"],
+        )
+        self.assertEqual(outcome.decomposition[label], ["helper lemma"])
+
     def test_webui_does_not_emit_a_configurable_proof_order(self) -> None:
         command = build_webui_command(
             "refine",
@@ -5087,10 +5984,222 @@ end ModelOutput
                 "max_trials": "100",
                 "continue_run": True,
                 "proof_order": "top-down",
+                "conjecture_policy": "record",
             },
         )
 
         self.assertNotIn("--proof-order", command)
+        self.assertIn("--conjecture-policy", command)
+        self.assertEqual(
+            command[command.index("--conjecture-policy") + 1], "record"
+        )
+
+    def test_conjecture_policy_changes_phase1_contract_and_proof_obligation(self) -> None:
+        conjecture = Node(
+            label="conj:open",
+            kind="conjecture",
+            file=Path("content.tex"),
+            line=1,
+        )
+        ctx = SimpleNamespace(
+            nodes={"conj:open": conjecture},
+            conjecture_policy="record",
+        )
+        target_kinds = _phase1_target_kinds(ctx, ["conj:open"])
+        self.assertEqual(
+            target_kinds,
+            {"conj_open": OPEN_CONJECTURE_TARGET_KIND},
+        )
+        self.assertEqual(
+            _skeleton_code_findings(
+                "def conj_open : Prop := 1 = 1\n",
+                target_kinds,
+                {"conj_open": "conj:open"},
+            ),
+            [],
+        )
+        rejected = _skeleton_code_findings(
+            "theorem conj_open : 1 = 1 := sorry\n",
+            target_kinds,
+            {"conj_open": "conj:open"},
+        )
+        self.assertTrue(rejected)
+
+        ctx.conjecture_policy = "attempt"
+        self.assertEqual(
+            _phase1_target_kinds(ctx, ["conj:open"]),
+            {"conj_open": "conjecture"},
+        )
+
+    def test_recorded_conjecture_is_complete_but_not_verified_or_phase2_work(self) -> None:
+        conjecture = Node(
+            label="conj:open",
+            kind="conjecture",
+            file=Path("content.tex"),
+            line=1,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "Skeleton01.lean"
+            path.write_text("def conj_open : Prop := 1 = 1\n", encoding="utf-8")
+            section = Section(1, ["conj:open"], path, "Generated.S1", [])
+            ctx = SimpleNamespace(
+                nodes={"conj:open": conjecture},
+                conjecture_policy="record",
+            )
+            self.assertEqual(
+                _recorded_conjecture_labels(ctx, [section]), {"conj:open"}
+            )
+            self.assertEqual(_verified_node_labels(ctx, [section]), set())
+            self.assertEqual(_phase2_body_progress(ctx, [section]), (set(), set()))
+
+    def test_phase1_integration_reuses_matching_objects_and_checks_aggregate(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "Skeleton01.lean"
+            path.write_text("theorem statement : True := by trivial\n", encoding="utf-8")
+            section = Section(
+                1,
+                ["lem:statement"],
+                path,
+                "Generated.S1",
+                [],
+                compile_fingerprint="clean",
+            )
+            ctx = SimpleNamespace(
+                name="fixture",
+                lean_command=["lean"],
+                telemetry=FakeTelemetry(),
+            )
+            gate = root / "gate.lean"
+            with patch(
+                "formalize_blueprint._section_compile_fingerprint",
+                return_value="clean",
+            ), patch(
+                "formalize_blueprint._section_objects_exist", return_value=True
+            ), patch(
+                "formalize_blueprint._compile_module_olean"
+            ) as compile_mock, patch(
+                "formalize_blueprint._phase1_integration_gate_path",
+                return_value=gate,
+            ), patch(
+                "formalize_blueprint._check_lean", return_value=(True, "")
+            ):
+                self.assertEqual(
+                    _phase1_recompile_environment(ctx, [section]), set()
+                )
+            compile_mock.assert_not_called()
+            self.assertIn("import Generated.S1", gate.read_text(encoding="utf-8"))
+
+    def test_phase1_integration_rebuilds_only_dirty_section(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "Skeleton01.lean"
+            path.write_text("theorem statement : True := by trivial\n", encoding="utf-8")
+            section = Section(
+                1,
+                ["lem:statement"],
+                path,
+                "Generated.S1",
+                [],
+                compile_fingerprint="old",
+            )
+            ctx = SimpleNamespace(
+                name="fixture",
+                lean_command=["lean"],
+                telemetry=FakeTelemetry(),
+            )
+            with patch(
+                "formalize_blueprint._section_compile_fingerprint",
+                return_value="new",
+            ), patch(
+                "formalize_blueprint._section_objects_exist", return_value=True
+            ), patch(
+                "formalize_blueprint._compile_module_olean",
+                return_value=SimpleNamespace(ok=True, output=""),
+            ) as compile_mock, patch(
+                "formalize_blueprint._phase1_integration_gate_path",
+                return_value=root / "gate.lean",
+            ), patch(
+                "formalize_blueprint._check_lean", return_value=(True, "")
+            ):
+                self.assertEqual(
+                    _phase1_recompile_environment(ctx, [section]), set()
+                )
+            compile_mock.assert_called_once_with(path, ["lean"])
+            self.assertEqual(section.compile_fingerprint, "new")
+
+    def test_historical_phase1_integration_reuses_all_frozen_modules(self) -> None:
+        fixture_path = (
+            REPO_ROOT
+            / "tests"
+            / "fixtures"
+            / "phase1_orchestration_replay"
+            / "integration_gate_reuse.json"
+        )
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            fixture["phase2_start_s"] - fixture["phase1_last_contract_s"],
+            fixture["observed_integration_gap_s"],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            sections: list[Section] = []
+            for number in range(1, fixture["module_count"] + 1):
+                path = root / f"Skeleton{number:02d}.lean"
+                path.write_text(
+                    f"theorem statement_{number} : True := by trivial\n",
+                    encoding="utf-8",
+                )
+                sections.append(
+                    Section(
+                        number,
+                        [f"lem:statement-{number}"],
+                        path,
+                        f"Generated.S{number}",
+                        [],
+                        compile_fingerprint=f"clean-{number}",
+                    )
+                )
+            telemetry = FakeTelemetry()
+            ctx = SimpleNamespace(
+                name="historical-integration-fixture",
+                lean_command=["lean"],
+                telemetry=telemetry,
+            )
+            fingerprint_by_path = {
+                section.path: section.compile_fingerprint for section in sections
+            }
+            with patch(
+                "formalize_blueprint._section_compile_fingerprint",
+                side_effect=lambda section, *_args: fingerprint_by_path[section.path],
+            ), patch(
+                "formalize_blueprint._section_objects_exist", return_value=True
+            ), patch(
+                "formalize_blueprint._compile_module_olean"
+            ) as compile_mock, patch(
+                "formalize_blueprint._phase1_integration_gate_path",
+                return_value=root / "gate.lean",
+            ), patch(
+                "formalize_blueprint._check_lean", return_value=(True, "")
+            ) as aggregate_mock:
+                self.assertEqual(
+                    _phase1_recompile_environment(ctx, sections), set()
+                )
+            compile_mock.assert_not_called()
+            self.assertEqual(
+                aggregate_mock.call_count, fixture["expected_aggregate_checks"]
+            )
+            event = next(
+                fields
+                for name, fields in telemetry.events
+                if name == "phase1_integration_gate"
+            )
+            self.assertEqual(
+                event["reused_modules"], fixture["expected_reused_modules"]
+            )
+            self.assertEqual(
+                event["rebuilt_modules"], fixture["expected_rebuilt_modules"]
+            )
 
     def test_bottom_up_ready_frontier_does_not_wait_for_unrelated_leaf(self) -> None:
         nodes = {
@@ -6939,6 +8048,133 @@ def def_network : NetworkData := sorry
         self.assertEqual(events[-1]["labels"], [repeated])
         self.assertEqual(events[-1]["source"], "test")
 
+    def test_compile_failures_share_bounded_semantic_retry_lifecycle(self) -> None:
+        fixture = json.loads(
+            (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "phase1_orchestration_replay"
+                / "uue_repeated_compile_failure_lifecycle.json"
+            ).read_text(encoding="utf-8")
+        )
+        label = fixture["label"]
+        ctx = SimpleNamespace(
+            name=fixture["blueprint"],
+            nodes={label: node(label)},
+            stmt_fps={label: fixture["statement_fp"]},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "statement_fp": fixture["statement_fp"],
+                    "target_signature": f"theorem {_lean_name(label)} : Prop",
+                    "origin": "phase1_candidate",
+                    "semantic_revision_count": 0,
+                }
+            },
+            design_plan_alternates={},
+            blueprint_direct_generation={},
+            generation_feedback={},
+            generation_candidates={},
+            retry_lifecycle={},
+            quarantined_labels=set(),
+            quarantine={},
+            telemetry=FakeTelemetry(),
+        )
+        evidence = fixture["compiler_error"]
+
+        def candidate(tier: str) -> Phase1LayerCandidate:
+            return Phase1LayerCandidate(
+                labels=[label],
+                parsed=_parse_module(
+                    f"theorem {_lean_name(label)} : Prop := by\n  exact\n"
+                ),
+                import_modules=[],
+                generation_tier=tier,
+            )
+
+        patches = (
+            patch(
+                "formalize_blueprint._phase1_compile_plan_defects",
+                return_value={},
+            ),
+            patch(
+                "formalize_blueprint._compiler_generation_evidence_by_label",
+                return_value={label: evidence},
+            ),
+            patch("formalize_blueprint._store_generation_candidates"),
+            patch("formalize_blueprint._store_generation_feedback"),
+            patch("formalize_blueprint._sync_design_plan"),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            self.assertFalse(
+                _record_retry_failure(
+                    ctx,
+                    [label],
+                    stage="phase1_statement",
+                    attempted_tier="base",
+                    evidence=fixture["prior_semantic_rejection"],
+                    source=f"phase1_layer_{fixture['layer']}_alignment",
+                )
+            )
+            self.assertEqual(
+                _retry_next_tier(ctx, label, "phase1_statement"),
+                "escalation",
+            )
+
+            first = _route_phase1_compile_failure(
+                ctx,
+                candidate("escalation"),
+                evidence,
+                fixture["candidate"],
+                layer_no=fixture["layer"],
+            )
+            self.assertFalse(first.authorizes_blueprint_repair)
+            self.assertTrue(first.plan_revision_required)
+            self.assertIn(label, ctx.blueprint_direct_generation)
+
+            direct_base = _route_phase1_compile_failure(
+                ctx,
+                candidate("base"),
+                evidence,
+                fixture["candidate"],
+                layer_no=fixture["layer"],
+            )
+            self.assertFalse(direct_base.authorizes_blueprint_repair)
+            self.assertEqual(direct_base.failure_route.action, "singleton")
+            self.assertEqual(
+                _retry_next_tier(ctx, label, "phase1_statement"),
+                "escalation",
+            )
+
+            direct_escalated = _route_phase1_compile_failure(
+                ctx,
+                candidate("escalation"),
+                evidence,
+                fixture["candidate"],
+                layer_no=fixture["layer"],
+            )
+            self.assertTrue(direct_escalated.authorizes_blueprint_repair)
+            self.assertEqual(direct_escalated.labels, [label])
+            self.assertTrue(direct_escalated.decomposition_helpers)
+
+        compile_lifecycle = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "node_retry_lifecycle"
+            and fields["source"].endswith("_compile")
+        ]
+        self.assertEqual(
+            [fields["next_state"] for fields in compile_lifecycle],
+            fixture["expected_compile_lifecycle_states"],
+        )
+        decompositions = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_compile_exhaustion_decomposition"
+        ]
+        self.assertEqual(decompositions[-1]["labels"], [label])
+
     def test_real_repeated_plan_rejection_uses_bounded_three_stage_lifecycle(
         self,
     ) -> None:
@@ -8230,6 +9466,50 @@ def def_network : NetworkData := sorry
         self.assertEqual(feedback.call_count, 2)
         self.assertIn("Lean failed for def:a", raised.exception.evidence)
         self.assertIn("Lean failed for def:b", raised.exception.evidence)
+
+    def test_parallel_compile_aggregates_authorized_exhaustion_route(self) -> None:
+        label = "thm:security"
+        candidate = Phase1LayerCandidate(
+            labels=[label],
+            parsed=_parse_module(f"theorem {_lean_name(label)} : True := by trivial\n"),
+            import_modules=[],
+            generation_tier="escalation",
+        )
+        ctx = SimpleNamespace(workers=1, telemetry=FakeTelemetry())
+
+        def fail_compile(_ctx, _labels, *_args, **kwargs):
+            kwargs["failure_evidence"].append("unexpected token ':'")
+            return None
+
+        authorized = RepairRequest(
+            "compiler lifecycle exhausted",
+            [label],
+            decomposition_helpers=["introduce an explicit helper lemma"],
+            section_labels=[label],
+            authorizes_blueprint_repair=True,
+        )
+        with patch(
+            "formalize_blueprint._freeze_section_from_code",
+            side_effect=fail_compile,
+        ), patch(
+            "formalize_blueprint._route_phase1_compile_failure",
+            return_value=authorized,
+        ):
+            with self.assertRaises(RepairRequest) as raised:
+                _compile_semantic_phase1_candidates(
+                    ctx,
+                    [candidate],
+                    [],
+                    _SectionNumberAllocator(1),
+                    layer_no=3,
+                )
+
+        self.assertTrue(raised.exception.authorizes_blueprint_repair)
+        self.assertEqual(raised.exception.labels, [label])
+        self.assertEqual(
+            raised.exception.decomposition_helpers,
+            ["introduce an explicit helper lemma"],
+        )
 
     def test_parallel_compile_revises_only_plan_defect_in_mixed_failure(self) -> None:
         labels = ["lem:plan-defect", "lem:generated-defect"]

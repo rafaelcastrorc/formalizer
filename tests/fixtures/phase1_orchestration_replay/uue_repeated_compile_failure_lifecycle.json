@@ -1,0 +1,17 @@
+{
+  "blueprint": "unconditional-unclonable-encryption",
+  "run": "run-20260803-031013",
+  "layer": 4,
+  "label": "thm:security",
+  "statement_fp": "historical-thm-security-v1",
+  "prior_semantic_rejection": "the generated statement does not express the blueprint security game",
+  "compiler_error": "unexpected token ':'; expected ')'",
+  "candidate": "theorem thm_security : Prop := by exact",
+  "observed_retries": [51, 52, 53, 54, 55],
+  "expected_compile_lifecycle_states": [
+    "exhausted",
+    "escalation",
+    "exhausted"
+  ],
+  "expected_terminal_route": "decomposition"
+}

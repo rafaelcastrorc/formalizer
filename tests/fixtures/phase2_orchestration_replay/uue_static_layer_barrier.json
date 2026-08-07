@@ -1,0 +1,92 @@
+{
+  "source_run": "unconditional-unclonable-encryption/run-20260803-205950",
+  "observed_problem": "one unresolved root occupied a three-worker pool while independent lower branches waited behind the static layer barrier",
+  "nodes": {
+    "thm:main-construction": [
+      "lem:main-construction-correctness-field",
+      "lem:main-construction-security-field"
+    ],
+    "lem:main-construction-correctness-field": [
+      "lem:main-construction-correctness-supported-parameters",
+      "lem:main-construction-dec-enc-average",
+      "lem:main-construction-supported-ciphertext-decrypts"
+    ],
+    "lem:main-construction-security-field": [
+      "thm:security"
+    ],
+    "lem:main-construction-correctness-supported-parameters": [],
+    "lem:main-construction-dec-enc-average": [],
+    "lem:main-construction-supported-ciphertext-decrypts": [],
+    "thm:security": []
+  },
+  "unresolved": [
+    "thm:main-construction",
+    "lem:main-construction-security-field",
+    "lem:main-construction-correctness-supported-parameters",
+    "lem:main-construction-dec-enc-average",
+    "lem:main-construction-supported-ciphertext-decrypts",
+    "thm:security"
+  ],
+  "expected_static_first": [
+    "thm:main-construction"
+  ],
+  "expected_dynamic_ready": [
+    "thm:main-construction",
+    "lem:main-construction-correctness-supported-parameters",
+    "lem:main-construction-dec-enc-average",
+    "lem:main-construction-supported-ciphertext-decrypts"
+  ],
+  "singleton_retry_regression": {
+    "label": "lem:main-construction-security-field",
+    "configured_batch_size": 12,
+    "actual_label_count": 1,
+    "observed_base_attempts": 5,
+    "expected_base_attempts": 2
+  },
+  "whole_node_repair_regression": {
+    "source_run": "unconditional-unclonable-encryption/run-20260803-214911",
+    "observed_problem": "Phase 2 blueprint repairs were routed through Phase 1 statement freezing and then through a separate Phase 2 body call",
+    "phase2_started": true,
+    "pending_labels": [
+      "lem:security-operator-data-package",
+      "lem:security-final-reduction",
+      "thm:security"
+    ],
+    "expected_route": "phase2_whole_node",
+    "forbidden_route": "phase1_statement_then_phase2_body"
+  },
+  "authorized_parallel_repair_regression": {
+    "source_run": "unconditional-unclonable-encryption/run-20260803-223132",
+    "observed_problem": "two complete Phase 2 nodes were accepted, but a sibling blueprint-authorized repair was sent to the non-blueprint failure aggregator and stopped the run",
+    "accepted_labels": [
+      "lem:main-construction-security-negligible-field",
+      "lem:main-construction-security-channel-povm-field"
+    ],
+    "repair_label": "lem:security-final-reduction-main-construction-hypotheses",
+    "expected_route": "authorized_phase2_blueprint_repair",
+    "must_retain_accepted_siblings": true
+  },
+  "serial_helper_discovery_regression": {
+    "source_run": "unconditional-unclonable-encryption/run-20260803-224713",
+    "observed_problem": "the post-repair audit accepted each new helper in isolation, so expensive Lean generation discovered the next helper in a serial chain",
+    "original_root": "lem:security-winning-probability-transport",
+    "observed_helper_chain": [
+      "lem:security-concrete-package-final-bound",
+      "lem:security-final-reduction-unpacked-main-construction"
+    ],
+    "original_evidence": "alignment rejection for the winning-probability transport proof",
+    "expected_boundary_scope": "root_plus_complete_changed_component",
+    "must_run_before_lean_generation": true
+  },
+  "whole_node_decomposition_signal_regression": {
+    "source_run": "unconditional-unclonable-encryption/run-20260803-232002",
+    "observed_problem": "the base Phase 2 whole-node call returned a concrete NEEDS-DECOMPOSITION diagnosis after 17 seconds, but the scheduler discarded it and paid 204 seconds for an escalated generator that emitted a weakened substitute",
+    "label": "lem:security-main-construction-canonical-final-reduction-instance",
+    "missing_helpers": [
+      "canonical security-analysis package interface",
+      "canonical package unpacking lemma"
+    ],
+    "expected_route": "immediate_authorized_blueprint_repair",
+    "forbidden_route": "escalated_whole_node_generation"
+  }
+}

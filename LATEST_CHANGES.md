@@ -1,5 +1,397 @@
 # Latest Changes
 
+## 2026-08-03: Close Phase 2 Helper Components Before Lean Regeneration
+
+### Confirmed failure
+
+In UUE `run-20260803-224713`, Phase 2 repaired
+`lem:security-winning-probability-transport` by adding
+`lem:security-concrete-package-final-bound`. The existing post-repair boundary
+audit examined that helper in isolation and accepted it. A costly complete Lean
+attempt then exposed another missing helper,
+`lem:security-final-reduction-unpacked-main-construction`. After roughly 18
+minutes the run had completed only two net nodes because it was discovering one
+helper per Lean/repair cycle.
+
+### Implemented correction
+
+- Every Phase 2 blueprint-repair prompt now requires the complete finite helper
+  component needed by the original failing root in the same edit. A helper may
+  not merely rename or postpone an unresolved obligation.
+- The existing post-repair boundary transaction persists the original root,
+  exact failure evidence, and every changed or added component node. Proof-only
+  helper edits are included during Phase 2; Phase 1 behavior is unchanged.
+- That same existing boundary-audit call now examines the complete root/helper
+  blueprint proofs and rejects an incomplete decomposition before another Lean
+  generation call. It requests all foreseeable missing helpers together and
+  carries the original evidence and boundary findings into the next repair.
+- Component state is persisted in state schema version 24. Telemetry records
+  roots, changed component labels, closure requirements, and verdicts for future
+  repair/decomposition classifiers.
+
+### Regression coverage
+
+- Added the exact serial UUE helper chain to the committed Phase 2 orchestration
+  replay fixture.
+- Added coverage for Phase 1 proof-only behavior, Phase 2 root/component prompt
+  construction, multi-helper routing, evidence preservation, and save/load
+  continuity.
+
+## 2026-08-03: Repair Complete Nodes Inside Phase 2
+
+### Confirmed failure
+
+After Phase 2 repaired or decomposed a blueprint node, the main loop computed
+the resulting missing declaration and called `_run_phase1(...)`. That produced
+and froze a statement-only contract with `:= sorry`; a later Phase 2 model call
+then implemented its body. This reopened Phase 1 machinery semantically even
+though the UI called it “Phase 2 contract repair,” duplicated model work, and
+violated the intended boundary: Phase 1 is the one-time initial skeleton, while
+Phase 2 owns complete repaired nodes.
+
+The historical UUE run `run-20260803-214911` exercised this path for
+`lem:security-operator-data-package`, `lem:security-final-reduction`, and
+`thm:security`.
+
+### Implemented correction
+
+- Pending declarations dispatch through an explicit one-way boundary. Before
+  `phase2_started`, they use Phase 1 statement freezing. Afterward, `_run_phase1`
+  is unreachable and they use Phase 2 whole-node transactions.
+- Each Phase 2 transaction receives the complete current blueprint node,
+  dependency contracts, frozen Lean interfaces, and exact retry evidence. It
+  returns one complete Lean declaration containing both the current statement
+  and its proof or definition body.
+- The shared freezer has an explicit complete-body mode. It preserves real
+  bodies instead of normalizing them to `:= sorry`, rejects every remaining
+  `sorry`, and applies the existing deterministic, Lean, semantic-alignment,
+  object-compilation, and integration gates to the complete declaration.
+- Independent dependency-ready repaired nodes run across the configured worker
+  pool. Successful Lean nodes are accepted against the unpublished draft
+  immediately; failed nodes retain exact evidence
+  and retry once through the escalation tier before ordinary evidence-driven
+  Phase 2 repair/decomposition.
+- Unaffected frozen declarations and accepted proofs remain reusable. Phase 1
+  progress remains the immutable baseline and repaired nodes already count as
+  completed Phase 2 work when committed.
+- Web UI stages and telemetry now say “Phase 2 whole-node repair”; the obsolete
+  repaired-contract stages and event names were removed.
+
+### Regression coverage
+
+- Added a committed UUE historical replay case proving pending work after the
+  Phase 2 boundary cannot call `_run_phase1`.
+- Added focused coverage proving a Phase 2 whole-node call enables complete-body
+  mode and proving that mode accepts a real definition body but rejects `sorry`.
+- Added the follow-up UUE replay from `run-20260803-223132`: two parallel
+  whole-node repairs completed, while a third produced a valid
+  blueprint-authorized request. The coordinator now retains the accepted
+  siblings and propagates that request through the authorized Phase 2 repair
+  aggregator instead of stopping in the non-blueprint aggregator.
+
+## 2026-08-03: Bound Repeated Phase 1 Compiler Failures
+
+### Confirmed failure
+
+In `unconditional-unclonable-encryption/run-20260803-031013`,
+`thm:security` repeatedly emitted malformed Lean during retries 51-55. The
+semantic-audit routes advanced the persisted per-node retry lifecycle, but the
+ordinary Phase 1 compile-failure route bypassed it and returned directly to
+statement generation. The same statement version could therefore consume the
+global repair budget without reaching the existing strategy changes.
+
+### Implemented correction
+
+- Every ordinary Phase 1 compile failure now advances the same
+  statement-fingerprinted `base -> escalation -> exhausted` lifecycle used by
+  statement-audit failures. Compiler and audit evidence remain separately
+  scoped to their owning node.
+- Exhausted compiler correction uses the existing bounded sequence: revise an
+  eligible legacy interface plan once, switch candidate-owned or repeatedly
+  rejected contracts to blueprint-direct generation, and route only a contract
+  that exhausts that direct lifecycle to decomposition.
+- Parallel compilation now aggregates an authorized decomposition route from
+  one failed worker while retaining independently compiled siblings. It no
+  longer assumes every compiler failure is a non-authorized generation retry.
+- Exhaustion bookkeeping cannot terminate the whole run with an internal
+  impossible-state exception; any unresolved label remains in the bounded
+  retry route.
+
+### Regression coverage
+
+- Added a committed replay fixture for the repeated `thm:security` compiler
+  failure and verified that prior statement-audit state carries into compiler
+  exhaustion, blueprint-direct generation, and eventual decomposition.
+- Added coordinator coverage for authorized exhaustion returned by a parallel
+  compiler worker.
+- Phase 1 routing suite: 244 tests passed.
+- Historical orchestration, trajectory, and planner replay suites: 25 tests
+  passed.
+- Full repository suite: 308 tests passed.
+
+## 2026-08-03: Keep Blueprint Corrections Owned by Phase 2
+
+### Confirmed failure
+
+The main loop inferred the active phase only from `current blueprint nodes -
+frozen Lean declarations`. When Phase 2 decomposition added helper nodes or
+changed a contract, that set became nonempty and the workflow visibly reopened
+Phase 1. The scoped regeneration was necessary, but its ownership was wrong:
+Phase 1 is the one-time initial skeleton stage, while corrections discovered
+during proof implementation belong to Phase 2.
+
+### Implemented correction
+
+- The workflow now persists a one-way `phase2_started` milestone and the exact
+  Phase 1 baseline labels in `skeleton_state.json`.
+- Once the initial skeleton and integration gate complete, Phase 1 remains
+  complete. This change originally labeled later scoped regeneration as a
+  “Phase 2 contract repair.” The subsequent whole-node correction documented
+  above removed that two-step implementation: Phase 2 now generates the
+  repaired statement and body together.
+- Unaffected frozen contracts and accepted proofs remain reusable. Complete
+  repaired nodes return directly to top-down Phase 2 proof scheduling.
+- Progress keeps the historical Phase 1 skeleton complete instead of dropping
+  its numerator when Phase 2 adds helpers. Telemetry separately records Phase 2
+  whole-node repair start/completion and the pending node labels.
+- The Web UI labels these operations as Phase 2 whole-node work rather than
+  displaying a second Phase 1.
+
+### Regression coverage
+
+- Added a one-way phase-transition regression proving that adding a node after
+  Phase 2 begins does not reopen Phase 1 or change its baseline.
+- Extended persisted-state coverage for the Phase 2 milestone and Phase 1
+  baseline so `--continue` preserves the same ownership.
+
+## 2026-08-03: Scope Retry Evidence and Persist Exact Phase 1 Exchanges
+
+### Confirmed failure
+
+Phase 1 retained compiler and semantic feedback across retries, but an
+aggregated multi-node failure could copy the complete combined evidence into
+every sibling's next prompt. A node could therefore be asked to repair another
+node's compiler or audit failure. Separately, exact prompt/response detection
+was local to one section attempt. Crossing the outer repair loop or restarting
+with `--continue` reset that memory and allowed an identical response to be
+compiled and audited again.
+
+### Implemented correction
+
+- Retry requests now carry an explicit `evidence_by_label` map. Deterministic
+  findings, Lean diagnostics, and semantic-audit findings are assigned only to
+  their owning node before requests are aggregated.
+- Unattributed evidence is retained automatically only for a singleton. A
+  multi-node failure without deterministic ownership is routed without copying
+  the blob into every node's prompt.
+- Phase 1 now fingerprints each exact model exchange from its labels, statement
+  and plan epochs, candidate input, purpose, tier, and prompt. Response hashes
+  are persisted in `skeleton_state.json`, so the same byte-identical result is
+  recognized across outer retries and `--continue`.
+- A distinct response to the same prompt remains a valid stochastic sample.
+  The existing bounded multi-sample policy is unchanged because historical
+  replay fixtures contain cases where sample two or three is the first result
+  that compiles.
+- Blueprint statement or plan changes prune the corresponding exchange history,
+  allowing the corrected contract to start a fresh retry epoch.
+
+### Regression coverage
+
+- Added a regression proving two sibling audit failures produce separate stored
+  evidence and separate correction prompts.
+- Added a regression proving exact duplicate responses are recognized after an
+  outer retry while a different response remains admissible.
+- Extended state persistence coverage through save/load and statement-epoch
+  invalidation.
+- Phase 1 routing suite: 240 tests passed.
+- Historical orchestration and trajectory replay suites: 23 tests passed.
+- Full repository suite: 304 tests passed.
+
+## 2026-08-03: Preserve Both Sides of a Compound Repair Transaction
+
+### Confirmed failure
+
+In `unconditional-unclonable-encryption/run-20260803-003136`, one Phase 1
+frontier authorized two independent changes: the deterministic dependency edge
+for `def:local-basis-unitary` and model decomposition of
+`def:finite-register-operators` into three concrete provider interfaces. Both
+operations succeeded. The final scope guard nevertheless checked their merged
+five-label delta only against the model target, misclassified the separately
+authorized deterministic edit as a downstream model edit, and rolled back the
+entire transaction. Phase 1 then regenerated the original monolithic contract
+and later attempted a cyclic dependency repair.
+
+### Implemented correction
+
+- Compound transactions now retain a snapshot immediately after validated
+  deterministic dependency insertion.
+- Only the model-authored delta is checked against the model repair scope.
+- If that delta exceeds its scope, it is rolled back to the post-edge snapshot;
+  already validated deterministic changes remain committed.
+- Successful compound transactions still invalidate and recheck the union of
+  deterministic and model-authored statement changes.
+- Telemetry records the complete committed delta, the separately checked model
+  delta, and the retained deterministic labels.
+
+### Regression coverage
+
+- Added the exact five-label UUE transaction to the committed historical replay
+  fixture.
+- Added focused graph-scope coverage for an upstream decomposition beside an
+  independently validated dependency edge.
+- Existing downstream-consumer and disconnected-change protections remain in
+  place.
+
+## 2026-08-03: Consume Certified Boundary Repairs Exactly Once
+
+### Confirmed failure
+
+In `unconditional-unclonable-encryption/run-20260802-233439`, the scoped
+post-repair audit authorized only the deterministic statement dependency
+`def:reduced-operator -> def:density-operator-interface`. The edge was applied,
+but the persisted request retained its old statement fingerprints. On the next
+iteration the target disappeared from the request while unchanged siblings
+remained, an explicitly empty model-repair scope was replaced by those sibling
+labels, and the already-satisfied edge was treated as failed insertion. The
+pipeline spent six unnecessary blueprint-repair calls and about 520 model
+seconds before repeatedly rolling the edits back as out of scope.
+
+### Implemented correction
+
+- Pending boundary repair state now distinguishes an explicitly empty model
+  scope from legacy state that did not store a scope.
+- Certified dependency obligations are reconciled against the current
+  statement graph. Already-present edges complete idempotently, including
+  after interruption between the TeX edit and state persistence.
+- A no-op edge authorizes model repair only when the required edge remains
+  absent after the deterministic transaction. An already-satisfied edge cannot
+  fall through to a model call.
+- Dependency-only edits invalidate affected Lean normally but do not trigger a
+  redundant second boundary audit. Actual model-authored statement changes
+  still queue the existing scoped audit.
+- Mixed transactions retain explicit model/decomposition work when their
+  certified dependency edge completes; cycle rejection and scoped rollback are
+  unchanged.
+
+### Regression coverage
+
+- Added the exact UUE historical case to the committed post-repair boundary
+  fixture, including the six calls and 519.7 seconds of avoidable work.
+- Added focused lifecycle tests for edge-only completion and interruption of a
+  mixed edge/model transaction.
+
+## 2026-08-02: Preserve Semantic Constraints Through Compiler Patches
+
+### Confirmed failure
+
+In `unconditional-unclonable-encryption/run-20260802-224805`, statement audits
+rejected `def:finite-register-operators` and `def:key-space` for erasing
+blueprint semantics. The semantic correction call received that evidence, but
+later targeted Lean compiler patches received only the newest compiler error.
+Those patches could therefore restore the same weakening, causing another
+semantic rejection after several otherwise useful compiler corrections.
+
+### Implemented correction
+
+- Every targeted Phase 1 declaration patch now receives the unresolved,
+  statement-fingerprint-scoped semantic/compiler history for exactly the
+  declarations it edits.
+- The current compiler error supplements that history instead of replacing it.
+- Prompt evidence is bounded and preserves both ends of each history: the
+  original semantic requirement and the latest compiler diagnostics.
+- The behavior is implemented in the shared prompt path, so it applies equally
+  to Codex, Claude, and API runners.
+- A committed historical replay fixture reproduces the audit rejection followed
+  by three compiler-only patches and requires the semantic constraint to remain
+  present throughout the correction transaction.
+- Verification passed: 297 repository tests, Python compilation, focused Phase
+  1 orchestration and trajectory replays, the standalone committed historical
+  plan replay with `--require-progress`, and `git diff --check`.
+
+## 2026-08-02: Preserve Complete Blueprint Nodes with Nested LaTeX
+
+### Confirmed failure
+
+The source-contract extractor ended a blueprint node at the first
+`\\end{...}` after its label. In
+`unconditional-unclonable-encryption/run-20260802-213402`, the 531-character
+`def:single-qubit-paulis-cliffords` definition was reduced to 200 characters
+because `\\end{pmatrix}` was mistaken for `\\end{definition}`. Phase 1 model
+calls and alignment audits could therefore receive an incomplete blueprint
+contract.
+
+### Implemented correction
+
+- Node extraction now finds the environment that encloses the label and
+  balances that exact environment's begin/end tokens.
+- Nested matrices, aligned equations, and nested same-name environments no
+  longer truncate the node.
+- Commented-out environment tokens are ignored without changing source offsets.
+- An immediately following proof remains part of the extracted full-node
+  contract, as before.
+- Verification passed: 292 repository tests, Python compilation, the complete
+  committed historical Phase 1 plan replay, and `git diff --check`.
+
+## 2026-08-02: Preserve Semantic Plans Containing TeX Backslashes
+
+### Confirmed failure
+
+In `unconditional-unclonable-encryption/run-20260802-210758`, the compact
+semantic planner returned all 52 requested contracts, but mathematical prose
+contained a single JSON-invalid TeX escape such as `\dagger`. Strict decoding
+failed, after which the loose shared extractor selected one valid nested
+contract object. The semantic-plan parser therefore reported that the response
+omitted `contracts` and replaced all 52 entries with blueprint-only fallbacks,
+wasting the 220-second planning call.
+
+### Implemented correction
+
+- Semantic-plan ingestion now requires the intended top-level `contracts` key;
+  it can never substitute a nested object for a malformed outer response.
+- A schema-local recovery pass escapes malformed TeX backslashes only inside
+  JSON strings. Existing JSON escapes and all structural text remain unchanged.
+- Recovery is recorded in semantic-plan findings for telemetry.
+- The historical malformed response shape is committed as a regression fixture.
+
+## 2026-08-02: Conjecture Policy and Incremental Phase 1 Integration
+
+### Confirmed problems
+
+- The pipeline treated every theorem-like environment identically. A paper
+  conjecture therefore became a Phase 2 proof obligation even when the desired
+  publication was an honest formal record of an open claim. There was also no
+  safe opt-in path for asking the model to prove a conjecture while preserving
+  the blueprint as the source of truth.
+- In the Simplex snapshot `run-20260802-115840`, Phase 1 froze its last contract
+  at `+8603s` but Phase 2 did not begin until `+9302s`. The 699-second gap was a
+  serial recompilation of 39 generated modules that had already compiled when
+  they froze.
+
+### Implemented correction
+
+- Added `--conjecture-policy record|attempt` and a matching Web UI selector.
+  `record` is the default: each conjecture is encoded as its exact
+  proposition-valued Lean `def`, contains no `sorry`, is skipped by Phase 2,
+  and is reported as recorded rather than proved.
+- `attempt` cannot let Lean invent an independent proof. If the blueprint has
+  no proof for a conjecture, the ordinary transactional author repair must add
+  that proof to the unpublished blueprint draft first. Phase 2 then formalizes
+  the blueprint proof under the existing compiler and alignment gates.
+- Progress, telemetry, reports, and final publication distinguish verified
+  nodes from recorded open conjectures. Changing policy invalidates incompatible
+  resumed skeleton state.
+- Each generated section now persists a compile fingerprint covering its Lean
+  source, checker command, toolchain/manifest, and imported generated-interface
+  fingerprints. The final Phase 1 gate reuses matching `.olean` files, rebuilds
+  only dirty or missing modules in dependency order, and then compiles one
+  aggregate file importing every active section.
+- The optimization removes duplicate compilation only. It does not weaken the
+  final assembled from-scratch Lean check or any deterministic/model alignment
+  audit, and it does not introduce node-owned declarations outside the
+  blueprint graph.
+- Verification passed: 289 repository tests, Python compilation, and the
+  complete committed Simplex historical-plan replay with `--require-progress`.
+
 ## 2026-08-02: Keep Fresh Phase 1 Candidates Out of the Legacy Plan Loop
 
 ### Confirmed failure
@@ -1972,3 +2364,212 @@ classifier training.
   and semantic failures to be aggregated.
 - `tests.test_formalize_phase1_routing`: 123 tests passed.
 - Full repository suite: 133 tests passed.
+
+## 2026-08-02: Repair Missing Lean Universe Binders Without a Model Call
+
+### Problem
+
+In `run-20260802-221127`, independently generated Phase 1 candidates repeatedly
+used types such as `Type u` without emitting the mechanical top-level binder
+`universe u`. Lean reported the exact same `unknown universe level` diagnostic
+at 279s, 394s, and 538s. The general failure router then paid for fresh model
+corrections even though the mathematical interface was not in question.
+
+### Implemented solution
+
+Every shared Lean compile boundary now recognizes only Lean's exact
+`unknown universe level` diagnostic for the file being compiled. It inserts a
+top-level `universe` declaration containing exactly the missing identifiers and
+retries the same compiler command once. Existing declarations are respected,
+diagnostics from other files are ignored, and unrelated Lean errors are left to
+the normal routing logic. This deterministic correction consumes neither a
+model call nor a blueprint-repair trial and does not alter any target statement
+or proof.
+
+### Regression coverage
+
+The committed historical fixture `unknown_universe_retry.json` reproduces the
+UUE failure without requiring telemetry or a model account. Unit coverage also
+checks multiple levels, idempotence, cross-file diagnostics, and unrelated Lean
+errors. The behavior is shared by the statements-first compiler, legacy/final
+Lean verification, and generated `.olean` compilation.
+
+- A production-path smoke test repaired and compiled an actual Lean file with
+  `Type u` and no original binder.
+- Full repository suite: 296 tests passed.
+- Focused orchestration and trajectory replay suite: 25 tests passed.
+- Complete committed Simplex planner replay passed with `--require-progress`.
+- `git diff --check` passed.
+
+## 2026-08-03: Route Repeated Phase 1 Compile Failures Through the Node Lifecycle
+
+### Observed issue
+
+In
+`.auto-blueprint/formalization/unconditional-unclonable-encryption/run-20260803-031013.log`,
+`thm:security` repeatedly produced compiler-invalid Lean during Phase 1. The
+node had already received a statement-alignment rejection, but compile failures
+from retries 51 through 55 bypassed the persisted per-node retry lifecycle.
+Each outer iteration therefore treated the compiler failure as fresh work,
+repeated local correction calls, and consumed the global repair budget without
+reaching the existing exhausted strategy.
+
+### Root cause
+
+Statement-audit failures advanced `phase1_statement:<label>` through the
+existing base, escalation, and exhausted states. The parallel compilation path
+stored its candidate and compiler output, but returned an ordinary Lean
+generation failure without advancing that same lifecycle. In addition, the
+parallel coordinator aggregated ordinary retry requests but did not preserve
+an authorized blueprint-decomposition request produced by an exhausted compile
+failure.
+
+### Implemented solution
+
+- Every completed Phase 1 compile failure now stores candidate code and
+  node-scoped compiler evidence, then advances the same persisted
+  `phase1_statement` lifecycle used by semantic rejections.
+- Exhaustion first invokes the existing strategy change: revise an invalid
+  plan when justified or switch once to blueprint-direct generation.
+- If compiler-invalid output survives the blueprint-direct base and escalation
+  lifecycle, the existing scoped decomposition route is authorized for only
+  the exhausted node. It no longer regenerates indefinitely under the same
+  strategy.
+- Parallel compilation still preserves independently compiled siblings. When
+  one worker reaches an authorized exhaustion route, the coordinator now
+  propagates that authorization instead of flattening it into an ordinary
+  retry request.
+- The routing uses the runner-independent model tier recorded on the candidate;
+  it does not depend on Codex-specific output or reasoning controls.
+
+### Correctness invariants preserved
+
+- A compiler failure alone does not edit the blueprint. Blueprint repair is
+  authorized only after the existing plan-revision and blueprint-direct
+  strategies are exhausted.
+- Candidate statements still pass deterministic checks, Lean compilation,
+  integration, and statement alignment before freezing.
+- Accepted sibling declarations remain preserved during a scoped failure.
+- Phase 2 behavior and the Phase 1/Phase 2 boundary are unchanged.
+
+### Regression coverage
+
+The committed fixture
+`tests/fixtures/phase1_orchestration_replay/uue_repeated_compile_failure_lifecycle.json`
+captures the real `thm:security` retries and compiler error. Its executable
+regression verifies the complete transition from the prior semantic rejection,
+through compiler escalation and blueprint-direct generation, to scoped
+decomposition. A second regression verifies that the parallel coordinator
+preserves an authorized exhaustion request and its helper evidence.
+
+- Full repository suite: `308` tests passed.
+- Python compilation and `git diff --check` passed.
+
+## 2026-08-03: Discover Codex Models From the ChatGPT App Bundle
+
+### Observed issue
+
+The Web UI's model fields became empty even though `codex debug models` worked
+in an interactive terminal. The running `/api/state` response confirmed that
+the server returned an empty Codex catalog.
+
+### Root cause and fix
+
+The Web UI had been launched with a GUI-style `PATH` that did not contain the
+`codex` executable. The runner fallback still pointed only to the obsolete
+standalone path `/Applications/Codex.app/Contents/Resources/codex`, while the
+installed executable now lives at
+`/Applications/ChatGPT.app/Contents/Resources/codex`.
+
+Runner discovery now checks `PATH` first, then the current ChatGPT app bundle,
+then the older standalone Codex app bundle. This is shared by model discovery
+and actual Codex runner execution, so the Web UI and terminal resolve the same
+installation.
+
+### Verification
+
+- A regression simulates a GUI process with no `codex` entry on `PATH` and
+  verifies selection of the ChatGPT-bundled executable.
+- An integration check with `PATH=/usr/bin:/bin` discovered all seven visible
+  models from the local Codex catalog.
+- The restarted Web UI returned the populated catalog from `/api/state`.
+- Full repository suite: `309` tests passed.
+
+## 2026-08-03: Keep Independent Phase 2 Branches Running
+
+### Observed issue
+
+Phase 2 selected only the first incomplete static top-down graph layer. In the
+unconditional-unclonable-encryption run, that layer contained one unresolved
+node even though three additional nodes in independent branches were already
+safe to implement. The three-worker pool therefore had only one task while the
+other branches waited behind an unrelated static-layer barrier.
+
+### Implemented solution
+
+- Phase 2 now recomputes a branch-local ready frontier after every proof wave.
+- In top-down mode, a node is ready when none of its generated consumers remain
+  unresolved. In bottom-up mode, the symmetric dependency-ready rule applies.
+- Static layers still prioritize public roots and provide the diagnostic layer
+  number, but they no longer synchronize independent graph branches.
+- Frontier telemetry records `dynamic_branch_ready_frontier`, and the Web UI
+  identifies the dynamically ready root-first wave.
+- A regression proves that an unresolved root in one component does not block
+  a lower node whose own consumer has already completed in another component.
+
+### Correctness boundary
+
+This changes scheduling only. A dependency cannot run before an unresolved
+consumer in its own branch, and all existing compilation, semantic audit,
+repair, fingerprint invalidation, and final no-`sorry` checks remain unchanged.
+
+### Verification
+
+- The committed UUE replay exposes four safe nodes where the former static
+  scheduler exposed only the single root.
+- The newer saved UUE state exposes six safe nodes to the patched scheduler,
+  enough to occupy all three configured proof workers.
+- Full repository suite: `310` tests passed.
+
+## 2026-08-03: Bound Phase 2 Base Retries by Actual Unit Size
+
+### Observed issue
+
+In `unconditional-unclonable-encryption/run-20260803-205950`, the singleton
+`lem:main-construction-security-field` made five sequential base-tier proof
+calls before escalation. The retry allowance was derived from the configured
+proof-batch capacity of 12 even though the section contained only one target.
+Those extra bisection rounds could not split any work and consumed roughly
+three and a half minutes in that one section.
+
+### Implemented solution
+
+- The base-round allowance now uses `min(configured capacity, actual labels)`.
+- A singleton receives two base calls: an initial attempt and one retry with
+  exact compiler/audit feedback.
+- A genuine 12-node batch still receives five rounds, preserving the existing
+  deterministic bisection path before singleton escalation.
+- The committed UUE Phase 2 replay fixture records the observed five-attempt
+  singleton and verifies the corrected two-attempt policy.
+
+### Correctness boundary
+
+This changes only how many impossible singleton bisection rounds are attempted.
+The same model prompts, feedback, local Lean checks, escalation retries,
+decomposition routing, blueprint repairs, and final audits remain mandatory.
+
+### Verification
+
+- The complete Phase 2 worker regression observes exactly two base calls and
+  then the unchanged singleton escalation route.
+- The 12-node case still receives five base rounds for deterministic bisection.
+- Full repository suite: `312` tests passed.
+# 2026-08-03: Preserve Phase 2 decomposition diagnoses
+
+`run-20260803-232002` returned a precise `NEEDS-DECOMPOSITION` diagnosis from
+the base Phase 2 whole-node call in 17 seconds. The transaction discarded it,
+paid 204 seconds for escalated generation, and then spent multiple repair loops
+rediscovering the same missing package interface. Phase 2 whole-node responses
+now route a valid decomposition diagnosis immediately to the authorized,
+bounded blueprint-repair transaction with the exact helper list. This does not
+change Phase 1's stricter policy for statement-only refusals.

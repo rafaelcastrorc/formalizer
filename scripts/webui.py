@@ -778,6 +778,12 @@ def build_command(action: str, p: dict) -> list[str]:
                 if not section_size.isdigit() or int(section_size) < 1:
                     raise ValueError("section size must be a positive number")
                 cmd += ["--section-size", section_size]
+            conjecture_policy = str(
+                p.get("conjecture_policy") or "record"
+            ).strip()
+            if conjecture_policy not in {"record", "attempt"}:
+                raise ValueError("conjecture policy must be record or attempt")
+            cmd += ["--conjecture-policy", conjecture_policy]
             escalation_runner = runner_spec_from(
                 p,
                 "escalation_runner_backend",
@@ -1352,6 +1358,12 @@ PAGE = r"""<!doctype html>
                    font-weight: 650; font-variant-numeric: tabular-nums; }
   .metric .sub { color: var(--muted); font-size: 11.5px; min-height: 16px;
                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .metric .completion-breakdown { display: flex; flex-wrap: wrap; gap: 3px 16px;
+                                  margin-top: 5px; color: var(--muted);
+                                  font-size: 11.5px; line-height: 1.35; }
+  .metric .completion-breakdown span { white-space: nowrap; }
+  .metric .completion-breakdown strong { color: var(--text); font-weight: 650;
+                                         font-variant-numeric: tabular-nums; }
   #log { background: var(--log-bg); color: var(--log-text); border-radius: 10px;
          padding: 14px; height: 430px; overflow: auto; white-space: pre-wrap;
          word-break: break-word; font: 12px/1.55 ui-monospace, "SF Mono", Menlo, monospace; }
@@ -1452,6 +1464,18 @@ function metric(label, value, sub=''){
   </div>`;
 }
 
+function completionMetric(value, verified, open, fallbackSub=''){
+  if (verified == null || open == null) return metric('Overall nodes completed', value, fallbackSub);
+  return `<div class="metric">
+    <div class="label">Overall nodes completed</div>
+    <div class="value">${esc(value)}</div>
+    <div class="completion-breakdown">
+      <span><strong>${esc(verified)}</strong> verified nodes</span>
+      <span><strong>${esc(open)}</strong> open conjectures</span>
+    </div>
+  </div>`;
+}
+
 function renderProgress(){
   const box = el('progress');
   if (!box) return;
@@ -1470,6 +1494,8 @@ function renderProgress(){
   const trialsMax = Number.isFinite(progress.repairTrialsMax) ? progress.repairTrialsMax : null;
   const trialsLeft = trialsUsed != null && trialsMax != null ? Math.max(trialsMax - trialsUsed, 0) : null;
   const provenSub = total != null && proven != null ? `${Math.round((proven / Math.max(total, 1)) * 100)}%` : '';
+  const verifiedCount = Number.isFinite(progress.verifiedNodes) ? progress.verifiedNodes : null;
+  const recordedCount = Number.isFinite(progress.recordedConjectures) ? progress.recordedConjectures : null;
   const phase1Frozen = Number.isFinite(progress.phase1Frozen) ? progress.phase1Frozen : null;
   const phase1Required = Number.isFinite(progress.phase1Required) ? progress.phase1Required : null;
   if (active === 'refine' && !progress.legacyPipeline) {
@@ -1478,7 +1504,11 @@ function renderProgress(){
       metric('Phase 1 contracts frozen', phase1Frozen == null || phase1Required == null ? '—' :
         `${phase1Frozen}/${phase1Required}`,
         phase1Frozen == null || phase1Required == null ? '' : pct(phase1Frozen, phase1Required)),
-      metric('Overall nodes completed', proven == null || total == null ? '—' : `${proven}/${total}`, provenSub),
+      completionMetric(
+        proven == null || total == null ? '—' : `${proven}/${total}`,
+        verifiedCount,
+        recordedCount,
+        provenSub),
       metric('Repair trials left', trialsLeft == null ? '—' : String(trialsLeft),
         trialsUsed == null || trialsMax == null ? '' : `${trialsUsed}/${trialsMax} used`),
     ].join('');
@@ -1515,6 +1545,21 @@ function ingestProgressLines(lines){
       progress.repairTrialsMax = Number(m[4]);
       changed = true;
     }
+    if ((m = line.match(/==> Progress: Phase 1 contracts (\d+)\/(\d+) frozen; Phase 2 Lean implementations (\d+)\/(\d+) complete; overall (\d+)\/(\d+) complete \((\d+) verified, (\d+) open conjectures recorded\); repairs (\d+)\/(\d+)/))){
+      progress.legacyPipeline = false;
+      progress.phase1Frozen = Number(m[1]);
+      progress.phase1Required = Number(m[2]);
+      progress.phase2Implemented = Number(m[3]);
+      progress.phase2Required = Number(m[4]);
+      progress.acceptedNodes = Number(m[5]);
+      progress.totalNodes = Number(m[6]);
+      progress.verifiedNodes = Number(m[7]);
+      progress.recordedConjectures = Number(m[8]);
+      progress.remainingNodes = Math.max(progress.totalNodes - progress.acceptedNodes, 0);
+      progress.repairTrialsUsed = Number(m[9]);
+      progress.repairTrialsMax = Number(m[10]);
+      changed = true;
+    }
     if ((m = line.match(/==> Progress: Phase 1 contracts (\d+)\/(\d+) frozen; Phase 2 Lean implementations (\d+)\/(\d+) complete; overall (\d+)\/(\d+) verified; repairs (\d+)\/(\d+)/))){
       progress.legacyPipeline = false;
       progress.phase1Frozen = Number(m[1]);
@@ -1523,6 +1568,8 @@ function ingestProgressLines(lines){
       progress.phase2Required = Number(m[4]);
       progress.acceptedNodes = Number(m[5]);
       progress.totalNodes = Number(m[6]);
+      progress.verifiedNodes = Number(m[5]);
+      progress.recordedConjectures = 0;
       progress.remainingNodes = Math.max(progress.totalNodes - progress.acceptedNodes, 0);
       progress.repairTrialsUsed = Number(m[7]);
       progress.repairTrialsMax = Number(m[8]);
@@ -1593,8 +1640,32 @@ function stageFromLine(line){
   if (line.includes('Initial Lean skeleton complete')) {
     return 'Initial pass · boilerplate complete';
   }
+  if ((m = line.match(/==> Phase 2 whole-node repair: completing (\d+) new\/changed blueprint node/))) {
+    return `Phase 2 · complete repaired nodes (${m[1]})`;
+  }
+  if ((m = line.match(/==> Phase 2 whole-node repair: completing (\d+) dependency-ready node/))) {
+    return `Phase 2 · complete repaired frontier (${m[1]} nodes)`;
+  }
+  if ((m = line.match(/==> Phase 2 repaired node (\d+): (\d+) node/))) {
+    return `Phase 2 · verify complete repaired node (${m[2]})`;
+  }
+  if (line.includes('Phase 2 whole-node repair integration gate')) {
+    return 'Phase 2 · integrate complete repaired nodes';
+  }
+  if (line.includes('Phase 2 whole-node repair complete')) {
+    return 'Phase 2 · repaired nodes complete';
+  }
+  if (line.includes('Phase 2 whole-node repair')) {
+    return 'Phase 2 · repair complete nodes';
+  }
   if ((m = line.match(/==> Phase 1: added (\d+) provisional name\(s\) introduced by blueprint repair/))) {
     return `Phase 1 · add repaired helper names (${m[1]})`;
+  }
+  if ((m = line.match(/==> Phase 1: freezing (\d+) new\/changed statement contract/))) {
+    return `Phase 1 · freeze initial skeleton (${m[1]} contracts)`;
+  }
+  if ((m = line.match(/==> Phase 1: refining bottom-up ready frontier (\d+) \((\d+) node/))) {
+    return `Phase 1 · dependency frontier ${m[1]} (${m[2]} nodes)`;
   }
   if ((m = line.match(/==> Phase 1: refining statements (top-down|bottom-up) for (\d+) node\(s\) \((\d+) already frozen\)/))) {
     return `Phase 1 · ${m[1]} statements (${m[3]}/${Number(m[2]) + Number(m[3])} frozen)`;
@@ -1639,6 +1710,7 @@ function stageFromLine(line){
       statement_audit: 'statement audit',
       proof_batch: 'proof batch',
       proof_singleton: 'singleton proof',
+      phase2_whole_node_repair: 'complete repaired node',
       blueprint_repair: 'blueprint repair',
       section_normalization: 'section normalization',
     }[m[1]] || m[1].replace(/_/g, ' ');
@@ -1667,6 +1739,9 @@ function stageFromLine(line){
   if ((m = line.match(/section (\d+) provisioned/))) return `Initial pass · section ${m[1]} provisioned`;
   if (line.includes('Phase 1 froze')) return 'Phase 1 · statement contracts frozen';
   if (line.includes('Phase 1 integration recheck') || line.includes('Phase 1 integration gate')) return 'Phase 1 · integration recheck';
+  if ((m = line.match(/==> Phase 2: implementing deferred bodies for top-down ready frontier (\d+) \((\d+) node\(s\)\) with (\d+) worker\(s\)/))) {
+    return `Phase 2 · root-first ready frontier ${m[1]} (${m[2]} nodes, ${m[3]} workers)`;
+  }
   if ((m = line.match(/==> Phase 2: implementing deferred bodies for top-down frontier (\d+) \((\d+) node\(s\)\) with (\d+) worker\(s\)/))) {
     return `Phase 2 · root-first frontier ${m[1]} (${m[2]} nodes, ${m[3]} workers)`;
   }
@@ -1852,6 +1927,12 @@ const FORMS = {
     <input type="number" id="f_section_size" value="12" min="1">
     <label>Max blueprint-repair trials</label>
     <input type="number" id="f_trials" value="100" min="1">
+    <label>Conjectures</label>
+    <select id="f_conjecture_policy">
+      <option value="record" selected>Record as open propositions (recommended)</option>
+      <option value="attempt">Attempt model-generated proofs</option>
+    </select>
+    <div class="hint">Attempt mode first adds a proof to the blueprint, then asks Lean to formalize that blueprint proof. Recorded conjectures are published as exact open propositions and are never counted as proved.</div>
     <div class="leanbox" id="leanStatus">
       <details><summary>Lean setup not checked.</summary>
         <button type="button" onclick="checkLean()">Check Lean setup</button>
@@ -2137,6 +2218,7 @@ function params(){
             paper:v('f_paper'), lean_command:v('f_leancmd'),
             continue_run:c('f_continue'), fast:c('f_fast'), workers:v('f_workers'),
             section_size:v('f_section_size'),
+            conjecture_policy:v('f_conjecture_policy'),
             ...common};
   const names = [...document.querySelectorAll('.bpcheck:checked')].map(n=>n.value);
   if (active === 'validate') return {action:'validate', names};

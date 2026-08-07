@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "source_run": "20260802-224805",
+  "blueprint": "unconditional-unclonable-encryption",
+  "cases": [
+    {
+      "label": "def:finite-register-operators",
+      "statement_fingerprint": "historical-uue-finite-register-operators-v1",
+      "semantic_evidence": "The public interface must expose the concrete controlled operator required by the blueprint.",
+      "compiler_evidence": "unknown identifier 'RegisterOperator'",
+      "observed_transition": [
+        "statement_audit_rejection",
+        "compiler_patch_1",
+        "compiler_patch_2",
+        "compiler_patch_3",
+        "statement_audit_rejection"
+      ],
+      "required_invariant": "Every compiler patch prompt retains the unresolved semantic rejection until a statement audit accepts the declaration."
+    }
+  ]
+}

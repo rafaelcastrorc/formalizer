@@ -5,6 +5,17 @@ Phase 1 runs that exposed retry and scheduling regressions. They are committed
 test resources: the tests do not need local `.auto-blueprint/` telemetry, R2,
 network access, or a model account.
 
+`semantic_compiler_feedback_handoff.json` captures a statement-audit rejection
+followed by several compiler-only declaration patches. It protects the
+invariant that a compiler correction cannot forget an unresolved semantic
+constraint and recreate the same rejected public contract.
+
+`unknown_universe_retry.json` preserves the repeated mechanical Lean failure
+from `run-20260802-221127`: independently generated interfaces used `Type u`
+without declaring `u`. The regression requires the compiler boundary to add
+only the universe level named by Lean, retry the same command, and spend no
+model call or blueprint-repair trial.
+
 `correction_sampling.json` records exact prompt/plan/tier epochs and the
 candidate outcome produced by each stochastic sample. It deliberately includes
 cases where sample two or three was the first one to compile, plus the
@@ -40,6 +51,21 @@ dependency, but the old pipeline spent seven generation/patch/audit calls and
 324 seconds before discovering it. The regression requires the repaired
 component audit to precede every Lean-generation call and route the exact edge
 through the existing deterministic dependency transaction.
+
+The same fixture also preserves the UUE pending-boundary lifecycle regression
+from `run-20260802-233439`, where an applied certified edge retained stale
+state and reauthorized six model blueprint repairs totaling about 520 seconds.
+The regression requires the completed edge to resume Phase 1 without another
+model repair or redundant boundary audit.
+
+The fixture also preserves the compound transaction from
+`run-20260803-003136`. A deterministic edge for
+`def:local-basis-unitary` and a valid four-contract decomposition of
+`def:finite-register-operators` were merged before scope checking. The old
+scope check attributed the deterministic edit to the model, falsely rejected
+it as downstream, and discarded both authorized operations. The regression
+requires scope validation to inspect only the model-authored delta while the
+complete five-contract transaction remains committed.
 
 `immediate_dependency_edge.json` preserves the `def:local-basis-unitary`
 failure from `run-20260731-133708`. The statement auditor identified an
@@ -96,6 +122,14 @@ The regression drives the real parallel compile coordinator and requires a
 completed failure to enter its existing routing transaction before the slowest
 sibling finishes. It does not change how the failure is classified.
 
+`uue_repeated_compile_failure_lifecycle.json` preserves the repeated
+`thm:security` compiler failures from `run-20260803-031013`. Ordinary compile
+failures bypassed the persisted per-node retry lifecycle and regenerated
+malformed Lean through retries 51-55. The paired executable regression requires
+base and escalated compiler failures to use the same bounded lifecycle as
+statement-audit failures, switch once to blueprint-direct generation, and route
+only exhaustion of that direct lifecycle to scoped decomposition.
+
 `parallel_retry_state.json` preserves the three-worker Phase 1 overlap from
 `run-20260801-041251`. Three generation calls began together at `+1051s`, while
 another call entered the same wave at `+1070s`. Those workers share retained
@@ -143,5 +177,13 @@ canonicalization incorrectly rewrote the local dependent references to the
 global helper. The paired executable regression requires local member
 shadowing while retaining the earlier downstream bare-alias behavior.
 
-The fixtures contain hashes, outcomes, durations, and timestamps needed by the
-policy tests. They do not contain paper text, prompts, or generated Lean source.
+The fixtures contain hashes, outcomes, durations, timestamps, and minimal
+synthetic compiler inputs needed by the policy tests. They do not contain paper
+text, model prompts, or full generated formalizations.
+
+`integration_gate_reuse.json` preserves the 699-second boundary between the
+last frozen Phase 1 contract and Phase 2 in the Simplex snapshot
+`run-20260802-115840`. All 39 generated modules had already compiled when they
+froze. The regression requires the final integration gate to reuse all 39
+matching objects, perform no section recompilation, and retain one aggregate
+import check over the complete environment.

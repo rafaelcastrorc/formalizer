@@ -18,6 +18,61 @@
       "expected_lean_generation_calls_before_boundary": 0,
       "expected_route": "dependency-edge-repair",
       "ordinary_phase1_calls_added_without_blueprint_mutation": 0
+    },
+    {
+      "run_id": "20260802-233439",
+      "source_log": ".auto-blueprint/formalization/unconditional-unclonable-encryption/run-20260802-233439.log",
+      "repair_component": [
+        "def:finite-register-interface",
+        "def:density-operator-interface",
+        "def:unnormalized-partial-trace",
+        "def:reduced-operator"
+      ],
+      "dependency_target": "def:reduced-operator",
+      "missing_statement_dependency": "def:density-operator-interface",
+      "boundary_repair_labels": [],
+      "observed_repeated_blueprint_repair_calls": 6,
+      "observed_repeated_model_seconds": 519.7,
+      "expected_repeated_blueprint_repair_calls": 0,
+      "expected_next_action_after_edge": "resume_phase1",
+      "expected_additional_boundary_audits_after_edge": 0
+    },
+    {
+      "run_id": "20260803-003136",
+      "source_log": ".auto-blueprint/formalization/unconditional-unclonable-encryption/run-20260803-003136.log",
+      "model_repair_target": "def:finite-register-operators",
+      "deterministic_changed_labels": [
+        "def:local-basis-unitary"
+      ],
+      "model_changed_labels": [
+        "def:density-operator-interface",
+        "def:finite-register-operator-space",
+        "def:finite-register-operators",
+        "def:tensor-register-partial-trace"
+      ],
+      "observed_scope_checked_labels": [
+        "def:density-operator-interface",
+        "def:finite-register-operator-space",
+        "def:finite-register-operators",
+        "def:local-basis-unitary",
+        "def:tensor-register-partial-trace"
+      ],
+      "observed_false_scope_violation": "def:local-basis-unitary",
+      "observed_result": "scope_rolled_back",
+      "expected_scope_checked_labels": [
+        "def:density-operator-interface",
+        "def:finite-register-operator-space",
+        "def:finite-register-operators",
+        "def:tensor-register-partial-trace"
+      ],
+      "expected_scope_violations": [],
+      "expected_committed_labels": [
+        "def:density-operator-interface",
+        "def:finite-register-operator-space",
+        "def:finite-register-operators",
+        "def:local-basis-unitary",
+        "def:tensor-register-partial-trace"
+      ]
     }
   ]
 }

@@ -129,6 +129,45 @@ class PhaseOneOrchestrationReplayTests(unittest.TestCase):
         self.assertEqual(case["expected_lean_generation_calls_before_boundary"], 0)
         self.assertEqual(case["expected_route"], "dependency-edge-repair")
 
+    def test_completed_boundary_edge_cannot_reauthorize_model_repair(self) -> None:
+        case = _fixture("post_repair_boundary.json")["cases"][1]
+
+        self.assertEqual(case["boundary_repair_labels"], [])
+        self.assertEqual(case["observed_repeated_blueprint_repair_calls"], 6)
+        self.assertGreater(case["observed_repeated_model_seconds"], 519)
+        self.assertEqual(case["expected_repeated_blueprint_repair_calls"], 0)
+        self.assertEqual(case["expected_next_action_after_edge"], "resume_phase1")
+        self.assertEqual(case["expected_additional_boundary_audits_after_edge"], 0)
+
+    def test_compound_repair_scope_keeps_deterministic_and_model_work_separate(self) -> None:
+        case = _fixture("post_repair_boundary.json")["cases"][2]
+
+        self.assertEqual(case["run_id"], "20260803-003136")
+        self.assertIn(
+            case["observed_false_scope_violation"],
+            case["deterministic_changed_labels"],
+        )
+        self.assertNotIn(
+            case["observed_false_scope_violation"],
+            case["model_changed_labels"],
+        )
+        self.assertEqual(
+            set(case["expected_scope_checked_labels"]),
+            set(case["model_changed_labels"]),
+        )
+        self.assertEqual(case["expected_scope_violations"], [])
+        self.assertEqual(
+            set(case["observed_scope_checked_labels"]),
+            set(case["model_changed_labels"])
+            | set(case["deterministic_changed_labels"]),
+        )
+        self.assertEqual(case["observed_result"], "scope_rolled_back")
+        self.assertEqual(
+            set(case["expected_committed_labels"]),
+            set(case["deterministic_changed_labels"])
+            | set(case["model_changed_labels"]),
+        )
+
     def test_statement_dependency_evidence_routes_before_generation_retry(self) -> None:
         case = _fixture("immediate_dependency_edge.json")["cases"][0]
 

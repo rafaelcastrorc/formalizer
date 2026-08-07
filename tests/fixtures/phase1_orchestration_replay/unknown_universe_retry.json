@@ -1,0 +1,15 @@
+{
+  "source_run": "20260802-221127",
+  "blueprint": "unconditional-unclonable-encryption",
+  "failure_stage": "phase1_statement_compilation",
+  "generated_source": "import Mathlib\n\nset_option autoImplicit false\n\nstructure def_finite_register_operators where\n  Register : Type u\n  operator : Register -> Register\n",
+  "lean_output": "{path}:6:18: error: unknown universe level `u`\n{path}:7:23: error: unknown universe level `u`",
+  "observed_repetitions": 3,
+  "expected_declared_levels": [
+    "u"
+  ],
+  "expected_inserted_declaration": "universe u",
+  "expected_next_action": "retry_same_lean_command",
+  "expected_model_calls": 0,
+  "expected_repair_trials_consumed": 0
+}

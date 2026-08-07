@@ -24,22 +24,32 @@ from pathlib import Path
 
 from .base import ModelRunner, RunnerError, RunResult
 
-CODEX_APP_CLI = Path("/Applications/Codex.app/Contents/Resources/codex")
+CODEX_APP_CLIS = (
+    Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
+    Path("/Applications/Codex.app/Contents/Resources/codex"),
+)
 CLAUDE_APP_CLI = Path("/Applications/Claude.app/Contents/Resources/claude")
 
 
-def _which_or_app(name: str, app_path: Path) -> str | None:
+def _which_or_app(name: str, *app_paths: Path) -> str | None:
+    """Resolve a CLI from PATH or a macOS application bundle.
+
+    GUI-launched processes commonly receive a smaller PATH than an interactive
+    shell.  Keep bundle fallbacks explicit so the Web UI and terminal resolve
+    the same installed runner.
+    """
     exe = shutil.which(name)
     if exe:
         return exe
-    if app_path.is_file():
-        return str(app_path)
+    for app_path in app_paths:
+        if app_path.is_file():
+            return str(app_path)
     return None
 
 
 def list_codex_model_ids(*, timeout: int = 5) -> list[str]:
     """Return model slugs from the local Codex CLI catalog, if available."""
-    exe = _which_or_app("codex", CODEX_APP_CLI)
+    exe = _which_or_app("codex", *CODEX_APP_CLIS)
     if not exe:
         return []
     try:
@@ -315,9 +325,11 @@ class CodexRunner(ModelRunner):
     _SESSION_ID_RE = re.compile(r"session id:\s*([0-9a-fA-F][0-9a-fA-F-]{7,63})", re.IGNORECASE)
 
     def _run_impl(self, prompt: str, system: str, cwd: Path | None) -> RunResult:
-        exe = _which_or_app("codex", CODEX_APP_CLI)
+        exe = _which_or_app("codex", *CODEX_APP_CLIS)
         if not exe:
-            raise RunnerError("`codex` CLI not found on PATH or in /Applications/Codex.app")
+            raise RunnerError(
+                "`codex` CLI not found on PATH or in the ChatGPT/Codex app bundle"
+            )
         full_prompt = f"<system>\n{system}\n</system>\n\n{prompt}" if system else prompt
         exec_flags = [
             "--sandbox",

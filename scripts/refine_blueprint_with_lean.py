@@ -114,6 +114,69 @@ LEAN_GENERATION_ERROR_PATTERNS = (
     ".olean",
 )
 
+_UNKNOWN_UNIVERSE_LEVEL_RE = re.compile(
+    r"^(?P<path>.*?):\d+:\d+:\s+error:\s+unknown universe level\s+"
+    r"[`'](?P<level>[A-Za-z_][A-Za-z0-9_']*)[`']\s*$",
+    re.MULTILINE,
+)
+_UNIVERSE_DECL_RE = re.compile(r"^\s*universe\s+([^\n]+)$", re.MULTILINE)
+
+
+def _repair_unknown_universe_levels(path: Path, lean_output: str) -> tuple[str, ...]:
+    """Declare universe names that Lean reports as missing in ``path``.
+
+    Model-generated interfaces occasionally use ``Type u`` while omitting the
+    mechanical top-level ``universe u`` binder. Lean's diagnostic is precise,
+    so this repair does not infer or alter a mathematical contract: it inserts
+    only the identifiers that Lean itself reports as unknown, then callers
+    re-run the same compiler command once.
+
+    Diagnostics for other files are ignored. Existing universe declarations
+    are also respected, which makes the repair idempotent and prevents retry
+    recursion if another compiler error remains.
+    """
+    target = path.resolve()
+    reported: list[str] = []
+    for match in _UNKNOWN_UNIVERSE_LEVEL_RE.finditer(lean_output):
+        diagnostic_path = Path(match.group("path"))
+        try:
+            same_file = diagnostic_path.resolve() == target
+        except OSError:
+            same_file = diagnostic_path.name == path.name
+        if not same_file:
+            continue
+        level = match.group("level")
+        if level not in reported:
+            reported.append(level)
+
+    if not reported:
+        return ()
+
+    source = path.read_text(encoding="utf-8")
+    declared = {
+        token
+        for declaration in _UNIVERSE_DECL_RE.findall(source)
+        for token in re.findall(r"[A-Za-z_][A-Za-z0-9_']*", declaration)
+    }
+    missing = tuple(level for level in reported if level not in declared)
+    if not missing:
+        return ()
+
+    lines = source.splitlines(keepends=True)
+    insert_at = 0
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "prelude" or stripped.startswith("import "):
+            insert_at = index + 1
+
+    newline = "\r\n" if "\r\n" in source else "\n"
+    declaration = f"universe {' '.join(missing)}{newline}"
+    if insert_at < len(lines) and lines[insert_at].strip():
+        declaration += newline
+    lines.insert(insert_at, declaration)
+    path.write_text("".join(lines), encoding="utf-8")
+    return missing
+
 
 @dataclass
 class LeanAttempt:
@@ -643,28 +706,87 @@ def _standalone_accepted_code(chunks: list[AcceptedChunk]) -> str:
     return _compose_lean_file(imports, bodies)
 
 
+_TEX_ENV_TOKEN_RE = re.compile(r"\\(begin|end)\{([a-zA-Z*]+)\}")
+
+
+def _blank_tex_comments(text: str) -> str:
+    """Blank comments while preserving every source offset."""
+    lines: list[str] = []
+    for line in text.split("\n"):
+        escaped = False
+        for index, char in enumerate(line):
+            if char == "%" and not escaped:
+                line = line[:index] + " " * (len(line) - index)
+                break
+            escaped = char == "\\" and not escaped
+            if char != "\\":
+                escaped = False
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _node_environment_span(text: str, label: str, kind: str) -> tuple[int, int] | None:
+    """Return the balanced outer environment containing ``label``.
+
+    Blueprint statements routinely contain nested environments such as
+    ``pmatrix`` and ``aligned``. The first ``\\end{...}`` after a label is
+    therefore not necessarily the end of the blueprint node.
+    """
+    searchable = _blank_tex_comments(text)
+    label_pos = searchable.find(rf"\label{{{label}}}")
+    if label_pos == -1:
+        return None
+
+    # Recover the environment stack at the label. Prefer the environment kind
+    # recorded by validation, while retaining the nearest enclosing environment
+    # as a defensive fallback for custom/starred theorem environments.
+    stack: list[tuple[str, int]] = []
+    for token in _TEX_ENV_TOKEN_RE.finditer(searchable, 0, label_pos):
+        action, raw_name = token.groups()
+        if action == "begin":
+            stack.append((raw_name, token.start()))
+            continue
+        for index in range(len(stack) - 1, -1, -1):
+            if stack[index][0] == raw_name:
+                del stack[index:]
+                break
+    if not stack:
+        return None
+
+    normalized_kind = kind.rstrip("*")
+    matching = [item for item in stack if item[0].rstrip("*") == normalized_kind]
+    raw_name, begin = matching[-1] if matching else stack[-1]
+
+    # Balance occurrences of this exact outer environment name. Nested
+    # environments with other names do not affect its depth.
+    depth = 0
+    for token in _TEX_ENV_TOKEN_RE.finditer(searchable, begin):
+        action, token_name = token.groups()
+        if token_name != raw_name:
+            continue
+        depth += 1 if action == "begin" else -1
+        if depth == 0:
+            return begin, token.end()
+    return None
+
+
 def _node_tex_blocks(nodes: dict[str, Node]) -> dict[str, str]:
-    """Extract the rendered-source contract for each blueprint node."""
+    """Extract each complete node environment and its following proof."""
     by_file: dict[Path, str] = {}
     blocks: dict[str, str] = {}
     for label, node in nodes.items():
         if node.file not in by_file:
             by_file[node.file] = node.file.read_text(encoding="utf-8")
         text = by_file[node.file]
-        label_pos = text.find(rf"\label{{{label}}}")
-        if label_pos == -1:
-            blocks[label] = ""
-            continue
-        begin = text.rfind(r"\begin{", 0, label_pos)
-        env_end = text.find(r"\end{", label_pos)
-        if begin == -1 or env_end == -1:
+        span = _node_environment_span(text, label, node.kind)
+        if span is None:
+            label_pos = _blank_tex_comments(text).find(rf"\label{{{label}}}")
+            if label_pos == -1:
+                blocks[label] = ""
+                continue
             blocks[label] = text[label_pos : label_pos + 1200]
             continue
-        env_close = text.find("}", env_end)
-        if env_close == -1:
-            blocks[label] = text[begin : env_end + 80]
-            continue
-        block_end = env_close + 1
+        begin, block_end = span
         proof = re.match(r"\s*\\begin\{proof\}[\s\S]*?\\end\{proof\}", text[block_end:])
         if proof:
             block_end += proof.end()
@@ -2153,6 +2275,16 @@ def _run_lean(path: Path, lean_command: list[str]) -> LeanAttempt:
             print(f"  lean still checking... {elapsed}s elapsed", flush=True)
 
     combined = "\n".join(part for part in (stdout or "", stderr or "") if part)
+    if proc.returncode != 0:
+        repaired_levels = _repair_unknown_universe_levels(path, combined)
+        if repaired_levels:
+            print(
+                "  deterministically declared missing Lean universe level(s): "
+                + ", ".join(repaired_levels)
+                + "; retrying the same compile",
+                flush=True,
+            )
+            return _run_lean(path, lean_command)
     if proc.returncode == 0 and "declaration uses 'sorry'" in combined:
         # Lean treats `sorry` as a warning; for us it voids the verification.
         return LeanAttempt(
@@ -2219,6 +2351,16 @@ def _compile_module_olean(path: Path, lean_command: list[str]) -> LeanAttempt:
         stderr=stderr or "",
         kind="lean-generation" if proc.returncode != 0 else "lean",
     )
+    if not attempt.ok:
+        repaired_levels = _repair_unknown_universe_levels(path, attempt.output)
+        if repaired_levels:
+            print(
+                "  deterministically declared missing Lean universe level(s): "
+                + ", ".join(repaired_levels)
+                + "; retrying object compilation",
+                flush=True,
+            )
+            return _compile_module_olean(path, lean_command)
     if attempt.ok and build_olean_path != sibling_olean_path:
         with contextlib.suppress(OSError):
             shutil.copy2(build_olean_path, sibling_olean_path)

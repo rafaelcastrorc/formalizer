@@ -1,0 +1,1 @@
+{"contracts":[{"label":"def:local-basis-unitary","representation":"Local basis conjugation by U_{x_j,z_j}^\dagger.","vocabulary":[{"name":"localBasisUnitary","purpose":"basis unitary"}],"obligations":["U Z U^\dagger equals the local Pauli."],"provider_requirements":[]}]}
