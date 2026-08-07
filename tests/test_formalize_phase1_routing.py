@@ -3271,6 +3271,67 @@ theorem lem_target : True := by trivial
         self.assertEqual(normalized.decls[0].kind, "theorem")
         self.assertTrue(normalized.decls[0].text.startswith("theorem cor_result"))
 
+    def test_multi_line_docstring_is_one_declaration_prefix(self) -> None:
+        """Historical shape from simplex `run-20260807-102400`.
+
+        The `def:support-newton` patch at `+4191s` was discarded with
+        "unsupported module-level command(s)" naming the continuation lines of
+        its own docstring, because `_DECL_PREFIX_RE` only matched a single-line
+        `/-- ... -/`.
+        """
+        nodes = {"def:support-newton": node("def:support-newton")}
+        ctx = SimpleNamespace(nodes=nodes)
+        canonical = _canonicalize_model_lean(
+            ctx,
+            nodes,
+            """import Mathlib.Data.Real.Basic
+
+/-- Public interface: for a CPWL function `f` (see `def_cpwl`) on `R^n` and a
+polytope `P` (see `def_polytope`), this is the proposition that `f` is convex
+and positively homogeneous with `f = h_P`, and that `P` is the unique such
+polytope. -/
+def def_support_newton (n : Nat) : Prop := sorry
+""",
+        )
+        parsed = canonical.parsed
+        self.assertEqual(parsed.preamble, [])
+        self.assertEqual([decl.name for decl in parsed.decls], ["def_support_newton"])
+        self.assertIn("Public interface", parsed.decls[0].text)
+
+    def test_single_line_docstring_prefix_still_parses(self) -> None:
+        parsed = _parse_module(
+            "/-- One-line doc. -/\ndef def_base : Nat := sorry\n"
+        )
+        self.assertEqual(parsed.preamble, [])
+        self.assertEqual([decl.name for decl in parsed.decls], ["def_base"])
+
+    def test_nested_block_comment_does_not_split_a_declaration(self) -> None:
+        parsed = _parse_module(
+            "/-- outer /- inner -/ still outer\nmore text -/\n"
+            "def def_base : Nat := sorry\n"
+        )
+        self.assertEqual(parsed.preamble, [])
+        self.assertEqual([decl.name for decl in parsed.decls], ["def_base"])
+
+    def test_declaration_keyword_inside_docstring_is_not_a_declaration(self) -> None:
+        parsed = _parse_module(
+            "/-- We explain why\ndef bogus is only prose here\n-/\n"
+            "def def_base : Nat := sorry\n"
+        )
+        self.assertEqual([decl.name for decl in parsed.decls], ["def_base"])
+
+    def test_non_comment_module_prose_remains_invalid_preamble(self) -> None:
+        nodes = {"def:base": node("def:base")}
+        ctx = SimpleNamespace(nodes=nodes)
+        with self.assertRaises(ValueError) as caught:
+            _canonicalize_model_lean(
+                ctx,
+                nodes,
+                "Here is the declaration you asked for:\n"
+                "def def_base : Nat := sorry\n",
+            )
+        self.assertIn("unsupported module-level command", str(caught.exception))
+
     def test_model_module_boundary_owns_structure_and_flattens_namespace(self) -> None:
         nodes = {
             "def:base": node("def:base"),

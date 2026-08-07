@@ -917,6 +917,50 @@ def _coerce_alignment_audit_result(
     )
 
 
+def _block_comment_line_spans(lines: list[str]) -> tuple[dict[int, int], set[int]]:
+    """Locate Lean block comments that span whole lines.
+
+    Returns ``(opened_by, covered)`` where ``opened_by`` maps the index of the
+    line closing a top-level block comment to the index of the line that opened
+    it, and ``covered`` is every line index belonging to a block comment.
+
+    Lean block comments nest, so depth is tracked rather than matched pairwise.
+    A ``--`` line comment is only honoured outside a block comment, matching
+    Lean's own lexer.  An unterminated comment still marks its remaining lines
+    as covered so a truncated model response cannot leak prose into a
+    declaration boundary.
+    """
+    opened_by: dict[int, int] = {}
+    covered: set[int] = set()
+    depth = 0
+    start: int | None = None
+    for idx, line in enumerate(lines):
+        pos = 0
+        width = len(line)
+        while pos < width:
+            pair = line[pos : pos + 2]
+            if depth == 0 and pair == "--":
+                break
+            if pair == "/-":
+                if depth == 0:
+                    start = idx
+                depth += 1
+                pos += 2
+                continue
+            if pair == "-/" and depth > 0:
+                depth -= 1
+                pos += 2
+                if depth == 0 and start is not None:
+                    opened_by[idx] = start
+                    covered.update(range(start, idx + 1))
+                    start = None
+                continue
+            pos += 1
+        if depth > 0 and start is not None:
+            covered.update(range(start, idx + 1))
+    return opened_by, covered
+
+
 def _parse_module(code: str) -> ParsedModule:
     lines = code.splitlines()
     imports: list[str] = []
@@ -934,12 +978,29 @@ def _parse_module(code: str) -> ParsedModule:
             continue
         body_lines.append((idx, line))
 
+    # A multi-line `/-- ... -/` docstring is one prefix unit, not a sequence of
+    # unrecognized module-level commands.  Without this, only its opening line
+    # matches `_DECL_PREFIX_RE`, the backward walk stops immediately, and the
+    # continuation lines are reported as invalid preamble.
+    comment_opened_by, comment_covered = _block_comment_line_spans(
+        [line for _orig, line in body_lines]
+    )
+
     starts: list[int] = []  # indices into body_lines
     for pos, (_orig, line) in enumerate(body_lines):
+        if pos in comment_covered:
+            continue
         if _DECL_START_RE.match(line):
             start = pos
-            while start > 0 and _DECL_PREFIX_RE.match(body_lines[start - 1][1]):
-                start -= 1
+            while start > 0:
+                previous = start - 1
+                if previous in comment_opened_by:
+                    start = comment_opened_by[previous]
+                    continue
+                if _DECL_PREFIX_RE.match(body_lines[previous][1]):
+                    start = previous
+                    continue
+                break
             if not starts or start > starts[-1]:
                 starts.append(start)
 
@@ -954,8 +1015,9 @@ def _parse_module(code: str) -> ParsedModule:
         match = next(
             (
                 _DECL_START_RE.match(line)
-                for _orig, line in body_lines[start:end]
-                if _DECL_START_RE.match(line)
+                for offset, (_orig, line) in enumerate(body_lines[start:end])
+                if start + offset not in comment_covered
+                and _DECL_START_RE.match(line)
             ),
             None,
         )
