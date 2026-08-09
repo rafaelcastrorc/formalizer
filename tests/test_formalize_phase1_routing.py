@@ -114,8 +114,13 @@ from formalize_blueprint import (  # noqa: E402
     _run_pending_declaration_work,
     _run_phase2_whole_node_repairs,
     _run_phase2_whole_node_transaction,
+    _enqueue_phase2_repair_requests,
+    _pending_phase2_repair_request,
+    _complete_phase2_repair_request,
     _refine_statement_group,
     _phase1_repair_scope_violations,
+    _phase2_existing_repair_scope_violations,
+    _route_phase2_proof_outcomes,
     _phase1_recompile_environment,
     _phase1_target_kinds,
     _generate_uncompiled_phase1_candidate,
@@ -168,11 +173,13 @@ from formalize_blueprint import (  # noqa: E402
     CallResult,
     RepairRequest,
     Section,
+    SectionProofOutcome,
     Phase1LayerCandidate,
     SectionStuckState,
     SkeletonFinding,
     TARGETED_DECL_PATCH_ROUNDS,
 )
+from refine_blueprint_with_lean import _parse_decomposition_refusal  # noqa: E402
 from validate_blueprint import Node, validate_blueprint  # noqa: E402
 from build_classifier_dataset import build_datasets  # noqa: E402
 from webui import build_command as build_webui_command  # noqa: E402
@@ -418,6 +425,64 @@ class PhaseOneRoutingTests(unittest.TestCase):
         self.assertEqual(event, "phase2_whole_node_decomposition")
         self.assertTrue(fields["routed_immediately"])
 
+    def test_phase2_generation_exhaustion_does_not_authorize_blueprint_repair(
+        self,
+    ) -> None:
+        fixture = json.loads(
+            (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "phase2_orchestration_replay"
+                / "uue_static_layer_barrier.json"
+            ).read_text(encoding="utf-8")
+        )["generation_exhaustion_classification_regression"]
+        label = fixture["label"]
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "statement"},
+            contract_fps={label: "contract"},
+            base_timeout=300,
+            hard_timeout=600,
+            base_effort="medium",
+            escalation_effort="high",
+            telemetry=FakeTelemetry(),
+        )
+        with patch(
+            "formalize_blueprint._sections_for_deps", return_value=[]
+        ), patch(
+            "formalize_blueprint._generation_feedback_for", return_value=""
+        ), patch(
+            "formalize_blueprint._phase2_whole_node_prompt", return_value="prompt"
+        ), patch(
+            "formalize_blueprint._call_model",
+            side_effect=[
+                CallResult(status="timeout", error="base call timed out"),
+                CallResult(status="timeout", error=fixture["evidence"]),
+            ],
+        ) as call_model:
+            with self.assertRaises(RepairRequest) as raised:
+                _run_phase2_whole_node_transaction(
+                    ctx, label, [], _SectionNumberAllocator(2)
+                )
+
+        request = raised.exception
+        self.assertFalse(request.authorizes_blueprint_repair)
+        self.assertFalse(
+            _requires_blueprint_transaction(
+                request.authorizes_blueprint_repair,
+                request.required_dependencies,
+            )
+        )
+        self.assertEqual(request.labels, [label])
+        self.assertEqual(request.model_repair_labels, [])
+        self.assertIn(fixture["evidence"], request.evidence_by_label[label])
+        self.assertEqual(call_model.call_count, 2)
+        event, fields = ctx.telemetry.events[-1]
+        self.assertEqual(event, "phase2_whole_node_transaction")
+        self.assertEqual(fields["route"], "bounded_generation_retry")
+        self.assertFalse(fields["blueprint_edit_authorized"])
+
     def test_phase2_parallel_whole_node_repair_routes_authorized_failure(self) -> None:
         fixture = json.loads(
             (
@@ -475,6 +540,215 @@ class PhaseOneRoutingTests(unittest.TestCase):
         self.assertEqual(
             {label for section in sections for label in section.labels},
             set(accepted_labels),
+        )
+
+    def test_phase2_parallel_authorized_failures_remain_independent(self) -> None:
+        fixture = json.loads(
+            (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "phase2_orchestration_replay"
+                / "uue_static_layer_barrier.json"
+            ).read_text(encoding="utf-8")
+        )["independent_repair_queue_regression"]
+        accepted_labels = fixture["accepted_labels"]
+        failed_labels = fixture["independent_failure_labels"]
+        all_labels = [*accepted_labels, *failed_labels]
+        telemetry = FakeTelemetry()
+        ctx = SimpleNamespace(
+            nodes={label: node(label) for label in all_labels},
+            stmt_fps={label: f"fp:{label}" for label in all_labels},
+            workers=3,
+            telemetry=telemetry,
+            phase2_repair_queue=[],
+        )
+        sections: list[Section] = []
+
+        def complete_or_repair(_ctx, label, _sections, _alloc):
+            if label in accepted_labels:
+                index = accepted_labels.index(label) + 2
+                return [
+                    Section(
+                        index,
+                        [label],
+                        Path(f"Skeleton{index:02d}.lean"),
+                        f"Generated.Skeleton{index:02d}",
+                        [],
+                    )
+                ]
+            raise RepairRequest(
+                f"exact independent evidence for {label}",
+                [label],
+                section_labels=[label],
+                authorizes_blueprint_repair=True,
+            )
+
+        with patch(
+            "formalize_blueprint._run_phase2_whole_node_transaction",
+            side_effect=complete_or_repair,
+        ), patch("formalize_blueprint._save_ctx_state"):
+            with self.assertRaises(RepairRequest) as raised:
+                _run_phase2_whole_node_repairs(ctx, sections, set(all_labels))
+
+        self.assertEqual(
+            [payload["labels"] for payload in ctx.phase2_repair_queue],
+            fixture["expected_queue_scopes"],
+        )
+        self.assertEqual(raised.exception.labels, fixture["expected_queue_scopes"][0])
+        self.assertEqual(
+            {label for section in sections for label in section.labels},
+            set(accepted_labels),
+        )
+        first_id = raised.exception.queue_id
+        _complete_phase2_repair_request(ctx, first_id)
+        self.assertEqual(
+            _pending_phase2_repair_request(ctx).labels,
+            fixture["expected_queue_scopes"][1],
+        )
+        queued_event = next(
+            fields
+            for name, fields in telemetry.events
+            if name == "phase2_repair_queue_enqueued"
+        )
+        self.assertEqual(queued_event["aggregation"], "independent")
+
+    def test_decomposition_refusal_requires_exact_targeted_json(self) -> None:
+        label = "lem:target"
+        valid = (
+            "NEEDS-DECOMPOSITION: "
+            + json.dumps(
+                {
+                    "label": label,
+                    "missing_helpers": ["an explicit intermediate equality"],
+                    "reason": "the blueprint proof skips that equality",
+                }
+            )
+        )
+        self.assertEqual(
+            _parse_decomposition_refusal(valid, expected_labels={label})["label"],
+            label,
+        )
+        self.assertIsNone(
+            _parse_decomposition_refusal(
+                valid + "\nReturn Lean code after the JSON.",
+                expected_labels={label},
+            )
+        )
+        self.assertIsNone(
+            _parse_decomposition_refusal(
+                "NEEDS-DECOMPOSITION: {not valid JSON}",
+                expected_labels={label},
+            )
+        )
+        self.assertIsNone(
+            _parse_decomposition_refusal(
+                "NEEDS-DECOMPOSITION: "
+                + json.dumps(
+                    {
+                        "label": "<node label>",
+                        "missing_helpers": ["<each needed helper statement>"],
+                        "reason": "<why>",
+                    }
+                ),
+                expected_labels={label},
+            )
+        )
+        self.assertIsNone(
+            _parse_decomposition_refusal(valid, expected_labels={"lem:sibling"})
+        )
+
+    def test_phase2_frontier_decompositions_queue_independent_repairs(self) -> None:
+        fixture = json.loads(
+            (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "phase2_orchestration_replay"
+                / "uue_static_layer_barrier.json"
+            ).read_text(encoding="utf-8")
+        )["phase2_proof_frontier_explosion_regression"]
+        labels = fixture["independent_failure_labels"]
+        telemetry = FakeTelemetry()
+        ctx = SimpleNamespace(
+            nodes={label: node(label) for label in labels},
+            stmt_fps={label: f"fp:{label}" for label in labels},
+            stmt_blocks={label: f"Blueprint statement for {label}" for label in labels},
+            telemetry=telemetry,
+            phase2_repair_queue=[],
+            generation_feedback={},
+        )
+        outcomes = [
+            SectionProofOutcome(
+                section=Section(
+                    index,
+                    [label],
+                    Path(f"Skeleton{index:02d}.lean"),
+                    f"Generated.Skeleton{index:02d}",
+                    [],
+                ),
+                decomposition={label: [f"helper for {label}"]},
+                decomposition_evidence={label: f"exact refusal for {label}"},
+            )
+            for index, label in enumerate(labels, 1)
+        ]
+
+        request = _route_phase2_proof_outcomes(ctx, outcomes)
+
+        self.assertIsNotNone(request)
+        self.assertTrue(request.authorizes_blueprint_repair)
+        self.assertEqual(
+            [payload["labels"] for payload in ctx.phase2_repair_queue],
+            fixture["expected_queue_scopes"],
+        )
+        self.assertEqual(request.labels, fixture["expected_queue_scopes"][0])
+        self.assertTrue(
+            all(len(payload["labels"]) == 1 for payload in ctx.phase2_repair_queue)
+        )
+
+    def test_phase2_frontier_generation_failure_cannot_edit_blueprint(self) -> None:
+        label = "lem:ordinary-lean-failure"
+        ctx = SimpleNamespace(
+            nodes={label: node(label)},
+            stmt_fps={label: "fp"},
+            stmt_blocks={label: "Blueprint statement"},
+            telemetry=FakeTelemetry(),
+            phase2_repair_queue=[],
+            generation_feedback={},
+        )
+        outcome = SectionProofOutcome(
+            section=Section(1, [label], Path("Skeleton01.lean"), "Generated.S01", []),
+            failed={label: "unknown identifier in generated Lean"},
+        )
+
+        request = _route_phase2_proof_outcomes(ctx, [outcome])
+
+        self.assertIsNotNone(request)
+        self.assertFalse(request.authorizes_blueprint_repair)
+        self.assertEqual(request.labels, [label])
+        self.assertEqual(ctx.phase2_repair_queue, [])
+
+    def test_phase2_repair_scope_keeps_existing_context_read_only(self) -> None:
+        before = {
+            "target": node("target", uses={"dependency"}),
+            "dependency": node("dependency"),
+            "sibling": node("sibling"),
+        }
+        self.assertEqual(
+            _phase2_existing_repair_scope_violations(
+                before,
+                ["target"],
+                {"target", "dependency", "new-helper"},
+            ),
+            {"dependency"},
+        )
+        self.assertEqual(
+            _phase2_existing_repair_scope_violations(
+                before,
+                ["target", "dependency"],
+                {"target", "dependency", "new-helper"},
+            ),
+            set(),
         )
 
     def test_complete_node_gate_rejects_sorry_but_allows_completed_definition(self) -> None:
@@ -5450,13 +5724,32 @@ end ModelOutput
                         "repair_labels": ["hard"],
                         "required_dependencies": {"hard": ["peer"]},
                     },
+                    phase2_repair_queue=[
+                        {
+                            "request_id": "queued-repair-v1",
+                            "labels": ["peer"],
+                            "statement_fps": {"peer": "peer-v1"},
+                            "evidence": "independent Phase 2 failure",
+                            "decomposition_helpers": [],
+                            "section_labels": ["peer"],
+                            "context_labels": ["peer"],
+                            "authorizes_blueprint_repair": True,
+                            "failure_routes": [],
+                            "plan_revision_required": False,
+                            "required_dependencies": {},
+                            "model_repair_labels": ["peer"],
+                            "evidence_by_label": {
+                                "peer": "independent Phase 2 failure"
+                            },
+                        }
+                    ],
                     phase2_started=True,
                     phase1_baseline_labels={"cached", "hard", "peer"},
                     effective_section_size=6,
                     refinement_order="top-down",
                 )
             payload = json.loads(state.read_text(encoding="utf-8"))
-            self.assertEqual(payload["version"], 24)
+            self.assertEqual(payload["version"], 25)
             self.assertEqual(payload["conjecture_policy"], "attempt")
             self.assertEqual(payload["refinement_order"], "top-down")
             self.assertEqual(
@@ -5491,6 +5784,10 @@ end ModelOutput
             self.assertTrue(
                 payload["scheduler"]["repair_boundary_pending"]
                 ["require_component_closure"]
+            )
+            self.assertEqual(
+                payload["scheduler"]["phase2_repair_queue"][0]["request_id"],
+                "queued-repair-v1",
             )
             self.assertEqual(
                 payload["scheduler"]["local_group_partitions"]["hard"]["group"],
@@ -5590,6 +5887,7 @@ end ModelOutput
                 semantic_plan_entries={},
                 design_plan_alternates={},
                 blueprint_direct_generation={},
+                phase2_repair_queue=[],
                 phase2_started=False,
                 phase1_baseline_labels=set(),
                 effective_section_size=0,
@@ -5685,6 +5983,10 @@ end ModelOutput
             )
             self.assertTrue(
                 ctx.repair_boundary_pending["require_component_closure"]
+            )
+            self.assertEqual(
+                ctx.phase2_repair_queue[0]["request_id"],
+                "queued-repair-v1",
             )
             compile_mock.assert_not_called()
 

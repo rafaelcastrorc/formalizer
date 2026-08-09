@@ -88,5 +88,61 @@
     ],
     "expected_route": "immediate_authorized_blueprint_repair",
     "forbidden_route": "escalated_whole_node_generation"
+  },
+  "independent_repair_queue_regression": {
+    "source_run": "simplex/run-20260808-032618",
+    "observed_problem": "independent Phase 2 whole-node failures from one parallel frontier were unioned into one repair prompt; repair 36 changed 34 contracts and a later foundational repair invalidated 50 accepted dependents, expanding regeneration to 176 nodes",
+    "accepted_labels": [
+      "lem:relu-block-product",
+      "def:finite-polyhedral-subdivision-cells"
+    ],
+    "independent_failure_labels": [
+      "def:width-one-vector-relu-to-scalar-network",
+      "lem:polytope-to-finite-vertex-witness",
+      "lem:IsFaceOf-exposes-supporting-hyperplane"
+    ],
+    "expected_queue_scopes": [
+      ["def:width-one-vector-relu-to-scalar-network"],
+      ["lem:IsFaceOf-exposes-supporting-hyperplane"],
+      ["lem:polytope-to-finite-vertex-witness"]
+    ],
+    "forbidden_route": "unioned_authorized_repair",
+    "observed_unioned_change_count": 34,
+    "observed_invalidated_dependents": 50,
+    "observed_regeneration_count": 176
+  },
+  "generation_exhaustion_classification_regression": {
+    "source_run": "simplex/run-20260808-032618",
+    "observed_problem": "Phase 2 timeouts, malformed Lean, compiler failures, and deterministic generation failures exhausted base and escalation attempts, then incorrectly authorized blueprint repair 36; that repair changed 34 contracts without mathematical evidence that those blueprint contracts were defective",
+    "label": "lem:polytope-to-finite-vertex-witness",
+    "evidence": "escalation whole-node model call timed out",
+    "expected_route": "bounded_phase2_generation_retry",
+    "blueprint_edit_authorized": false,
+    "forbidden_route": "blueprint_repair"
+  },
+  "phase2_proof_frontier_explosion_regression": {
+    "source_run": "simplex/run-20260809-010031",
+    "observed_problem": "six independent Phase 2 decomposition findings were unioned into repair 1; the shared repair changed 21 contracts, added 15 helper nodes, and expanded the unpublished draft from 81 to 96 nodes before later repairs reached 106",
+    "initial_node_count": 81,
+    "observed_first_repair_node_count": 96,
+    "observed_later_node_count": 106,
+    "independent_failure_labels": [
+      "cor:classical-cpwl-bound",
+      "cor:near-tight-decimal",
+      "def:uniform-constant-depth-max",
+      "lem:delta4-subdivision-to-M",
+      "lem:support-polytope-equivalence",
+      "thm:cpwl-improved-bound"
+    ],
+    "expected_queue_scopes": [
+      ["cor:classical-cpwl-bound"],
+      ["cor:near-tight-decimal"],
+      ["def:uniform-constant-depth-max"],
+      ["lem:delta4-subdivision-to-M"],
+      ["lem:support-polytope-equivalence"],
+      ["thm:cpwl-improved-bound"]
+    ],
+    "placeholder_refusal": "NEEDS-DECOMPOSITION: {\"label\":\"<node label>\",\"missing_helpers\":[\"<each needed helper statement>\"],\"reason\":\"<why>\"}",
+    "forbidden_route": "unioned_phase2_frontier_blueprint_repair"
   }
 }

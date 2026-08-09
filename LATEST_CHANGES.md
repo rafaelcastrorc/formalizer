@@ -1,5 +1,125 @@
 # Latest Changes
 
+## 2026-08-09: Stop Phase 2 Proof-Frontier Node Explosion
+
+### Confirmed failure
+
+In Simplex `run-20260809-010031`, six independent Phase 2 proof workers
+requested decomposition. The proof-frontier scheduler merged all six labels and
+all helper suggestions into one blueprint-repair prompt. Repair 1 consequently
+changed 21 contracts and added 15 helpers, expanding the unpublished draft from
+81 to 96 nodes; later repairs reached 106 nodes. This bypassed the independent
+repair queue already used by Phase 2 whole-node workers.
+
+The same run also exposed a second authorization bug. The decomposition parser
+used a greedy regular expression and returned a repair payload even when JSON
+parsing failed. Two responses containing the prompt's literal example values
+(``<node label>``, ``<each needed helper statement>``, and ``<why>``) were
+therefore treated as mathematical evidence for blueprint decomposition.
+
+### Implemented correction
+
+- Every decomposition response must now consist solely of
+  `NEEDS-DECOMPOSITION:` followed by valid JSON. The payload must contain a
+  concrete non-placeholder label, at least one concrete helper statement, and
+  a reason. Its label must be one of the nodes assigned to that exact model
+  call. Malformed JSON, trailing prompt text, placeholders, and wrong-label
+  responses are ordinary generation failures and cannot edit the blueprint.
+- The strict parser is shared by the legacy loop, Phase 1 statement generation,
+  Phase 2 proof batches/singletons, and Phase 2 whole-node generation.
+- Phase 2 proof-frontier decomposition findings now enter the same persisted
+  independent repair queue as whole-node findings. Six refusals produce six
+  one-node transactions, not one six-root edit scope.
+- Ordinary Lean/compiler failures remain non-blueprint retries even when a
+  sibling worker produces valid decomposition evidence. Their node-owned
+  diagnostics are retained separately and never inherit the sibling's edit
+  authority.
+
+### Regression coverage
+
+The committed replay fixture records the exact 81-to-96-to-106 Simplex
+expansion. Tests verify the six independent queue scopes, rejection of malformed
+and placeholder refusals, target-label enforcement, and the non-blueprint route
+for ordinary Phase 2 generation failures. Full repository suite: `331` tests
+passed.
+
+## 2026-08-09: Do Not Convert Phase 2 Generation Exhaustion Into Blueprint Repair
+
+### Confirmed failure
+
+In Simplex `run-20260808-032618`, ordinary Phase 2 whole-node failures
+(timeouts, malformed Lean, compilation failures, and deterministic/alignment
+generation failures) exhausted the base and escalation attempts. The terminal
+fallback incorrectly marked that exhaustion as blueprint-authorized. Repair 36
+then changed 34 contracts without mathematical evidence that those contracts
+were defective, contributing to later invalidation of 50 accepted dependents
+and regeneration of 176 nodes.
+
+### Implemented correction
+
+- Whole-node generation exhaustion now returns a non-blueprint retry request.
+  Its exact per-node evidence is retained and the unpublished blueprint remains
+  unchanged.
+- Only explicit decomposition, semantic blueprint/decomposition evidence, or
+  certified required dependency edges can enter the blueprint transaction.
+- Outer retry telemetry, reports, and logs now identify Phase 2 generation
+  retries as Phase 2 rather than incorrectly calling them Phase 1 retries.
+
+### Regression coverage
+
+The committed historical fixture records the exact Simplex failure class and
+verifies that two exhausted model tiers route to the bounded Phase 2 generation
+retry lifecycle with `blueprint_edit_authorized = false`. The existing replay
+continues to verify that explicit `NEEDS-DECOMPOSITION` evidence immediately
+authorizes the independent Phase 2 repair queue.
+
+## 2026-08-08: Keep Independent Phase 2 Repair Authority Separate
+
+### Observed issue
+
+In Simplex `run-20260808-032618`, parallel Phase 2 complete-node workers
+reported independent blueprint defects. The scheduler unioned those requests
+into one repair prompt. Repair 36 consequently changed 34 contracts; the next
+repair changed foundational interfaces and invalidated 50 accepted dependents,
+eventually expanding complete-node regeneration to 176 nodes. Successful
+sibling worker results were preserved, but the merged edit authority erased
+the latency benefit.
+
+### Implemented solution
+
+- Authorized Phase 2 worker failures are now persisted as an ordered queue of
+  independent repair transactions. The original labels, exact evidence,
+  decomposition request, required dependency edges, and failure route remain
+  attached to their own transaction.
+- The outer loop processes one queued repair at a time. Post-repair boundary
+  validation completes before the next queue item, and accepted sibling
+  sections remain frozen.
+- A Phase 2 model repair may modify only pre-existing nodes explicitly named
+  by that transaction. Dependencies and neighbors are read-only. Newly added
+  helper nodes remain allowed and continue through the existing connectivity,
+  orientation, and scoped semantic boundary checks.
+- Queue state is statement-fingerprinted and saved in `skeleton_state.json`, so
+  interruption and `--continue` do not merge or lose pending repairs.
+- Telemetry records queue scopes and completion instead of only the former
+  combined repair.
+
+### Correctness boundary
+
+This does not suppress any failure or accept partial mathematics. It narrows
+who may edit existing blueprint contracts. If a foundational dependency is
+itself defective, the auditor must name it in its own repair request; merely
+being supplied as context no longer grants edit authority. Every changed or
+new node still passes blueprint validation, graph checks, post-repair semantic
+audit, Lean compilation, statement alignment, and the final assembled check.
+
+### Regression coverage
+
+The committed Phase 2 replay fixture records the exact Simplex blast-radius
+case and verifies that three worker failures remain three queue items while
+accepted siblings survive. Focused tests also verify the Phase 2 existing-node
+scope guard and persisted queue restoration. Full repository suite: `327`
+tests passed.
+
 ## 2026-08-03: Close Phase 2 Helper Components Before Lean Regeneration
 
 ### Confirmed failure

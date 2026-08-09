@@ -713,6 +713,32 @@ compact semantic plan plus candidate-derived typed contracts described above.
    computed from the actual unit size rather than the configured maximum batch
    capacity, so a singleton gets one initial attempt and one feedback-aware
    retry instead of paying for bisection rounds that cannot occur.
+   When parallel complete-node workers independently authorize blueprint
+   repair, their edit permissions are queued as separate persisted
+   transactions; they are never unioned into one broad repair prompt. Each
+   transaction may edit only the pre-existing nodes named by its own evidence.
+   Dependencies and neighboring contracts are read-only context. A repair may
+   add new dependency-connected helper nodes, but those helpers still pass the
+   normal graph checks and scoped post-repair blueprint audit before Lean
+   generation. Accepted sibling nodes remain frozen while the queue is
+   processed, and `--continue` restores the queue without recombining it.
+   The same rule applies to ordinary Phase 2 proof-frontier workers: concurrent
+   decomposition findings become one queued transaction per explicitly named
+   node. A decomposition response grants edit authority only when the entire
+   response is valid `NEEDS-DECOMPOSITION` JSON containing a concrete target
+   label assigned to that model call, concrete missing helper statements, and a
+   reason. Malformed JSON, copied prompt placeholders, trailing prose, or a
+   different node label are generation failures and cannot mutate the
+   blueprint. A sibling's valid decomposition finding never converts unrelated
+   compiler or generation failures into blueprint repairs.
+   Exhausting base and escalation generation for a complete node does **not**
+   authorize blueprint mutation. Timeouts, malformed responses, Lean compiler
+   failures, deterministic generation failures, and alignment failures
+   classified as Lean-generation consume the bounded Phase 2 generation-retry
+   budget with the blueprint unchanged. Blueprint edits require separate,
+   explicit mathematical evidence: a concrete `NEEDS-DECOMPOSITION` response,
+   a semantic blueprint/decomposition verdict, or a cycle-checked required
+   dependency edge certified by the deterministic or semantic audit.
 3. **Repair — evidence only.** A timed-out model call is treated as latency,
    never as mathematical difficulty: batches are bisected, targeted declaration
    patches are used for small skeleton failures, and singletons are retried at

@@ -2629,12 +2629,11 @@ def _aggregate_authorized_repair_requests(
     *,
     frozen_sections: Iterable["Section"] = (),
 ) -> RepairRequest:
-    """Merge every independently authorized repair from one parallel frontier.
+    """Merge authorized repairs where the caller owns one shared transaction.
 
-    Parallel generation can surface dependency-edge, blueprint, and
-    decomposition failures together. The outer loop performs one transaction,
-    but it must retain every authorized action instead of selecting whichever
-    exception happened to be first in a list.
+    Phase 1 uses this for a dependency-closed generation component. Phase 2
+    complete-node workers deliberately do not call it: their failures are
+    independent queue items with separate edit authority.
     """
     ordered = list(requests)
     if not ordered:
@@ -2701,6 +2700,209 @@ def _aggregate_authorized_repair_requests(
         model_repair_labels=model_labels,
         evidence_by_label=evidence_by_label,
     )
+
+
+def _failure_route_to_payload(route: FailureScopeDecision) -> dict[str, Any]:
+    return {
+        "action": route.action,
+        "parts": [list(part) for part in route.parts],
+        "failed_labels": list(route.failed_labels),
+        "accepted_labels": list(route.accepted_labels),
+    }
+
+
+def _failure_route_from_payload(payload: Mapping[str, Any]) -> FailureScopeDecision:
+    return FailureScopeDecision(
+        action=str(payload.get("action") or "singleton"),
+        parts=tuple(
+            tuple(str(label) for label in part)
+            for part in payload.get("parts") or []
+        ),
+        failed_labels=tuple(
+            str(label) for label in payload.get("failed_labels") or []
+        ),
+        accepted_labels=tuple(
+            str(label) for label in payload.get("accepted_labels") or []
+        ),
+    )
+
+
+def _phase2_repair_request_payload(
+    ctx: "Ctx", request: RepairRequest
+) -> dict[str, Any]:
+    """Serialize one independently authorized Phase-2 repair transaction."""
+    labels = list(dict.fromkeys(str(label) for label in request.labels))
+    statement_fps = {
+        label: str(getattr(ctx, "stmt_fps", {}).get(label) or "")
+        for label in labels
+    }
+    identity = {
+        "labels": labels,
+        "statement_fps": statement_fps,
+        "model_repair_labels": list(request.model_repair_labels),
+        "required_dependencies": {
+            label: sorted(dependencies)
+            for label, dependencies in request.required_dependencies.items()
+        },
+        "decomposition_helpers": list(request.decomposition_helpers),
+        "evidence_sha256": hashlib.sha256(
+            request.evidence.encode("utf-8")
+        ).hexdigest(),
+    }
+    request_id = hashlib.sha256(
+        json.dumps(identity, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return {
+        "request_id": request_id,
+        "labels": labels,
+        "statement_fps": statement_fps,
+        "evidence": request.evidence[-24000:],
+        "decomposition_helpers": list(request.decomposition_helpers),
+        "section_labels": list(request.section_labels),
+        "context_labels": list(request.context_labels),
+        "authorizes_blueprint_repair": True,
+        "failure_routes": [
+            _failure_route_to_payload(route)
+            for route in request.failure_routes
+        ],
+        "plan_revision_required": bool(request.plan_revision_required),
+        "required_dependencies": {
+            label: sorted(dependencies)
+            for label, dependencies in request.required_dependencies.items()
+        },
+        "model_repair_labels": list(request.model_repair_labels),
+        "evidence_by_label": dict(request.evidence_by_label),
+    }
+
+
+def _prune_stale_phase2_repair_queue(ctx: "Ctx") -> None:
+    """Drop queued evidence only when its exact blueprint statement changed."""
+    current_fps = getattr(ctx, "stmt_fps", {})
+    current_nodes = getattr(ctx, "nodes", {})
+    retained: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for payload in getattr(ctx, "phase2_repair_queue", []):
+        if not isinstance(payload, dict):
+            continue
+        request_id = str(payload.get("request_id") or "")
+        labels = [str(label) for label in payload.get("labels") or []]
+        statement_fps = payload.get("statement_fps") or {}
+        if (
+            not request_id
+            or request_id in seen
+            or not labels
+            or any(label not in current_nodes for label in labels)
+            or any(
+                str(statement_fps.get(label) or "")
+                and str(statement_fps.get(label) or "") != current_fps.get(label)
+                for label in labels
+            )
+        ):
+            continue
+        retained.append(payload)
+        seen.add(request_id)
+    ctx.phase2_repair_queue = retained
+
+
+def _enqueue_phase2_repair_requests(
+    ctx: "Ctx", requests: Iterable[RepairRequest]
+) -> None:
+    """Queue authorized worker failures without unioning their edit scopes."""
+    if not hasattr(ctx, "phase2_repair_queue"):
+        ctx.phase2_repair_queue = []
+    _prune_stale_phase2_repair_queue(ctx)
+    existing = {
+        str(payload.get("request_id") or "")
+        for payload in ctx.phase2_repair_queue
+    }
+    added: list[dict[str, Any]] = []
+    for request in sorted(
+        requests, key=lambda item: tuple(str(label) for label in item.labels)
+    ):
+        if not request.authorizes_blueprint_repair:
+            raise ValueError("only blueprint-authorized requests may be queued")
+        payload = _phase2_repair_request_payload(ctx, request)
+        if payload["request_id"] in existing:
+            continue
+        ctx.phase2_repair_queue.append(payload)
+        existing.add(payload["request_id"])
+        added.append(payload)
+    telemetry = getattr(ctx, "telemetry", None)
+    if telemetry is not None and added:
+        _record(
+            telemetry,
+            "phase2_repair_queue_enqueued",
+            request_ids=[payload["request_id"] for payload in added],
+            repair_scopes=[payload["labels"] for payload in added],
+            queue_size=len(ctx.phase2_repair_queue),
+            aggregation="independent",
+        )
+
+
+def _pending_phase2_repair_request(ctx: "Ctx") -> RepairRequest | None:
+    """Return, but do not remove, the next persisted Phase-2 repair."""
+    if not hasattr(ctx, "phase2_repair_queue"):
+        ctx.phase2_repair_queue = []
+    _prune_stale_phase2_repair_queue(ctx)
+    if not ctx.phase2_repair_queue:
+        return None
+    payload = ctx.phase2_repair_queue[0]
+    routes = [
+        _failure_route_from_payload(route)
+        for route in payload.get("failure_routes") or []
+        if isinstance(route, dict)
+    ]
+    request = RepairRequest(
+        str(payload.get("evidence") or ""),
+        [str(label) for label in payload.get("labels") or []],
+        decomposition_helpers=[
+            str(item) for item in payload.get("decomposition_helpers") or []
+        ],
+        section_labels=[
+            str(label) for label in payload.get("section_labels") or []
+        ],
+        context_labels=[
+            str(label) for label in payload.get("context_labels") or []
+        ],
+        authorizes_blueprint_repair=True,
+        failure_routes=routes,
+        plan_revision_required=bool(payload.get("plan_revision_required")),
+        required_dependencies={
+            str(label): {str(dep) for dep in dependencies}
+            for label, dependencies in (
+                payload.get("required_dependencies") or {}
+            ).items()
+        },
+        model_repair_labels=[
+            str(label) for label in payload.get("model_repair_labels") or []
+        ],
+        evidence_by_label={
+            str(label): str(evidence)
+            for label, evidence in (
+                payload.get("evidence_by_label") or {}
+            ).items()
+        },
+    )
+    request.queue_id = str(payload.get("request_id") or "")
+    return request
+
+
+def _complete_phase2_repair_request(ctx: "Ctx", request_id: str) -> None:
+    """Acknowledge exactly one successful queued repair transaction."""
+    before = len(getattr(ctx, "phase2_repair_queue", []))
+    ctx.phase2_repair_queue = [
+        payload
+        for payload in getattr(ctx, "phase2_repair_queue", [])
+        if str(payload.get("request_id") or "") != request_id
+    ]
+    telemetry = getattr(ctx, "telemetry", None)
+    if telemetry is not None and len(ctx.phase2_repair_queue) != before:
+        _record(
+            telemetry,
+            "phase2_repair_queue_completed",
+            request_id=request_id,
+            queue_size=len(ctx.phase2_repair_queue),
+        )
 
 
 @dataclass
@@ -2842,6 +3044,11 @@ class Ctx:
     # generation/compilation calls on it. This record is persisted so killing
     # the process between mutation and audit cannot bypass the boundary.
     repair_boundary_pending: dict[str, Any] = field(default_factory=dict)
+    # Parallel Phase-2 workers may independently prove that different
+    # blueprint nodes need repair. Preserve each edit authorization as its own
+    # transaction; unioning them gives one model accidental authority over a
+    # large, unrelated part of the graph.
+    phase2_repair_queue: list[dict[str, Any]] = field(default_factory=list)
     # Phase 1 is a one-way workflow milestone. Once the complete initial
     # skeleton freezes, later blueprint edits belong to Phase 2 and are
     # formalized as complete statement+body declarations in one transaction.
@@ -5127,6 +5334,7 @@ def _save_state(
     design_plan_alternates: dict[str, dict[str, Any]] | None = None,
     blueprint_direct_generation: dict[str, dict[str, Any]] | None = None,
     repair_boundary_pending: dict[str, Any] | None = None,
+    phase2_repair_queue: list[dict[str, Any]] | None = None,
     phase2_started: bool = False,
     phase1_baseline_labels: set[str] | None = None,
     effective_section_size: int = 0,
@@ -5523,13 +5731,29 @@ def _save_state(
         if boundary_labels
         else {}
     )
+    phase2_queue_payload = [
+        copy.deepcopy(payload)
+        for payload in (phase2_repair_queue or [])
+        if isinstance(payload, dict)
+        and payload.get("request_id")
+        and payload.get("labels")
+        and all(
+            str(label) in stmt_fps
+            and (
+                not str((payload.get("statement_fps") or {}).get(str(label)) or "")
+                or str((payload.get("statement_fps") or {}).get(str(label)) or "")
+                == stmt_fps.get(str(label))
+            )
+            for label in payload.get("labels") or []
+        )
+    ]
 
     path = _state_path(name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
-                "version": 24,
+                "version": 25,
                 "refinement_order": refinement_order,
                 "conjecture_policy": conjecture_policy,
                 "sections": entries,
@@ -5576,6 +5800,7 @@ def _save_state(
                         for label in sorted(direct_generation_payload)
                     },
                     "repair_boundary_pending": boundary_payload,
+                    "phase2_repair_queue": phase2_queue_payload,
                     "workflow": {
                         "phase2_started": bool(phase2_started),
                         "phase1_baseline_labels": sorted(
@@ -5624,6 +5849,7 @@ def _save_ctx_state(ctx: Ctx, sections: list[Section]) -> None:
             ctx, "blueprint_direct_generation", {}
         ),
         repair_boundary_pending=getattr(ctx, "repair_boundary_pending", {}),
+        phase2_repair_queue=getattr(ctx, "phase2_repair_queue", []),
         phase2_started=bool(getattr(ctx, "phase2_started", False)),
         phase1_baseline_labels=set(
             getattr(ctx, "phase1_baseline_labels", set())
@@ -5881,6 +6107,13 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
         if boundary_labels
         else {}
     )
+    raw_phase2_queue = scheduler.get("phase2_repair_queue") or []
+    ctx.phase2_repair_queue = [
+        copy.deepcopy(payload)
+        for payload in raw_phase2_queue
+        if isinstance(payload, dict)
+    ]
+    _prune_stale_phase2_repair_queue(ctx)
     raw_plan = scheduler.get("design_plan_entries") or {}
     ctx.design_plan_entries = {
         str(label): {
@@ -6478,6 +6711,26 @@ def _phase1_repair_scope_violations(
         connected.update(newly_connected)
         pending -= newly_connected
     return {label for label in changed if label not in allowed}
+
+
+def _phase2_existing_repair_scope_violations(
+    before: dict[str, Node],
+    targets: Iterable[str],
+    changed: Iterable[str],
+) -> set[str]:
+    """Pre-existing contracts edited without direct Phase-2 evidence.
+
+    A complete-node failure authorizes edits to its named target component,
+    not to every dependency supplied as read-only context. Brand-new helper
+    nodes are intentionally excluded here; the existing connectivity,
+    decomposition-orientation, and post-repair boundary gates validate them.
+    """
+    allowed = set(targets)
+    return {
+        label
+        for label in changed
+        if label in before and label not in allowed
+    }
 
 
 def _decomposition_orientation_findings(
@@ -13728,7 +13981,9 @@ def _bulk_skeleton_pass(
         if result.status != "ok":
             _log(f"  design pass {result.status}; falling back to per-section generation")
             break
-        if _parse_decomposition_refusal(result.text) is not None:
+        if _parse_decomposition_refusal(
+            result.text, expected_labels=chunk
+        ) is not None:
             _log("  design pass returned a decomposition refusal; leaving it to the section loop")
             break
         try:
@@ -14473,9 +14728,11 @@ def _freeze_section(
                 )
             completed_exchanges.add(exchange)
 
-            refusal = _parse_decomposition_refusal(result.text)
+            refusal = _parse_decomposition_refusal(
+                result.text, expected_labels=labels
+            )
             if refusal is not None:
-                refused = [refusal["label"]] if refusal["label"] in labels else list(labels)
+                refused = [refusal["label"]]
                 invalid_mappings = _invalid_mathlib_refusal_mappings(ctx, refusal)
                 if invalid_mappings:
                     invalid_mathlib_refusal_count += 1
@@ -15606,7 +15863,9 @@ def _generate_phase1_statement_group(
             sessions=sessions,
         )
         candidate = result.text or result.partial_text
-        refusal = _parse_decomposition_refusal(candidate)
+        refusal = _parse_decomposition_refusal(
+            candidate, expected_labels=labels
+        )
         if refusal is not None:
             feedback = (
                 "The previous statement-generation call requested decomposition. "
@@ -18574,7 +18833,9 @@ def _run_phase2_whole_node_transaction(
             sessions=sessions,
         )
         candidate_text = result.text or result.partial_text
-        refusal = _parse_decomposition_refusal(candidate_text)
+        refusal = _parse_decomposition_refusal(
+            candidate_text, expected_labels={label}
+        )
         if refusal is not None:
             refusal_evidence = (
                 f"Generator requested decomposition for {label}: "
@@ -18675,14 +18936,20 @@ def _run_phase2_whole_node_transaction(
         label=label,
         status="exhausted",
         evidence=last_evidence[-4000:],
+        failure_class="lean_generation_exhausted",
+        route="bounded_generation_retry",
+        blueprint_edit_authorized=False,
     )
     raise RepairRequest(
-        "Phase 2 could not complete the repaired blueprint node after base and "
-        "escalated whole-node attempts. Repair or decompose this node using the "
-        "exact Lean/audit evidence below:\n\n" + last_evidence,
+        "Phase 2 could not generate a valid complete Lean node after base and "
+        "escalated whole-node attempts. The blueprint remains unchanged because "
+        "the failures provide no mathematical evidence that its contract needs "
+        "repair. Retry Lean generation using the exact evidence below:\n\n"
+        + last_evidence,
         [label],
         section_labels=[label],
-        authorizes_blueprint_repair=True,
+        authorizes_blueprint_repair=False,
+        evidence_by_label={label: last_evidence},
     )
 
 
@@ -18766,9 +19033,17 @@ def _run_phase2_whole_node_repairs(
                 if request.authorizes_blueprint_repair
             ]
             if authorized:
-                request = _aggregate_authorized_repair_requests(
-                    authorized, frozen_sections=[]
-                )
+                # Every worker produced evidence for its own node/component.
+                # Keep those edit scopes independent: unioning them let one
+                # repair model rewrite unrelated foundational interfaces and
+                # invalidate accepted work from other branches.
+                _enqueue_phase2_repair_requests(ctx, authorized)
+                _save_ctx_state(ctx, sections)
+                request = _pending_phase2_repair_request(ctx)
+                if request is None:
+                    raise RuntimeError(
+                        "authorized Phase 2 repair queue unexpectedly became empty"
+                    )
             else:
                 request = _aggregate_retry_requests(
                     failures, frozen_sections=[]
@@ -18791,6 +19066,82 @@ class SectionProofOutcome:
     proved: list[str] = field(default_factory=list)
     failed: dict[str, str] = field(default_factory=dict)  # label -> evidence
     decomposition: dict[str, list[str]] = field(default_factory=dict)  # label -> helpers
+    decomposition_evidence: dict[str, str] = field(default_factory=dict)
+
+
+def _route_phase2_proof_outcomes(
+    ctx: Ctx,
+    outcomes: Iterable[SectionProofOutcome],
+) -> RepairRequest | None:
+    """Route one proof frontier without widening blueprint-edit authority.
+
+    Explicit decomposition findings are independent mathematical repair
+    transactions, one per named blueprint node. Ordinary compiler/generation
+    failures remain Lean retries and never inherit blueprint-edit authority
+    merely because a sibling worker requested decomposition.
+    """
+    ordered = list(outcomes)
+    failed: dict[str, str] = {}
+    authorized: list[RepairRequest] = []
+    for outcome in ordered:
+        failed.update(outcome.failed)
+        for label, helpers in outcome.decomposition.items():
+            reason = outcome.decomposition_evidence.get(
+                label, "generator requested decomposition"
+            )
+            evidence = (
+                f"Phase 2 implementation requested decomposition for {label}.\n"
+                f"Blueprint statement:\n{ctx.stmt_blocks.get(label, '')[:2500]}\n"
+                f"Exact decomposition evidence:\n{reason[-5000:]}"
+            )
+            authorized.append(
+                RepairRequest(
+                    evidence,
+                    [label],
+                    decomposition_helpers=list(helpers),
+                    section_labels=[label],
+                    context_labels=[label],
+                    authorizes_blueprint_repair=True,
+                    evidence_by_label={label: reason},
+                )
+            )
+
+    if authorized:
+        _enqueue_phase2_repair_requests(ctx, authorized)
+        if failed:
+            _store_generation_feedback(
+                ctx,
+                failed,
+                "\n\n".join(
+                    f"- {label}: {evidence}" for label, evidence in failed.items()
+                ),
+                source="phase2_proof_frontier_parallel_failure",
+                evidence_by_label=failed,
+            )
+        request = _pending_phase2_repair_request(ctx)
+        if request is None:
+            raise RuntimeError(
+                "Phase 2 decomposition queue unexpectedly became empty"
+            )
+        return request
+
+    if not failed:
+        return None
+    evidence = "\n\n".join(
+        f"== Node {label} ==\n"
+        f"Blueprint statement:\n{ctx.stmt_blocks.get(label, '')[:2500]}\n"
+        f"Lean-generation evidence:\n{error[-3500:]}"
+        for label, error in sorted(failed.items())
+    )
+    return RepairRequest(
+        "Phase 2 body implementation did not produce accepted Lean. Retry the "
+        "same frozen statements using the exact node-owned evidence below; the "
+        "blueprint is unchanged.\n\n" + evidence,
+        sorted(failed),
+        section_labels=sorted(failed),
+        authorizes_blueprint_repair=False,
+        evidence_by_label=failed,
+    )
 
 
 def _proof_base_round_limit(configured_batch_size: int, label_count: int) -> int:
@@ -19214,11 +19565,15 @@ def _prove_section(
                     next_batch_size=batch_size,
                 )
                 continue
-            refusal = _parse_decomposition_refusal(result.text)
+            refusal = _parse_decomposition_refusal(
+                result.text, expected_labels=batch
+            )
             if refusal is not None:
-                refused = refusal["label"] if refusal["label"] in batch else batch[0]
+                refused = refusal["label"]
                 outcome.decomposition[refused] = refusal["missing_helpers"]
-                errors[refused] = f"generator refusal: {refusal['reason']}"
+                refusal_evidence = f"generator refusal: {refusal['reason']}"
+                outcome.decomposition_evidence[refused] = refusal_evidence
+                errors[refused] = refusal_evidence
                 next_remaining.extend(label for label in batch if label != refused)
                 _record(
                     ctx.telemetry,
@@ -19240,6 +19595,14 @@ def _prove_section(
             outcome.proved.extend(proved)
             errors.update(batch_errors)
             outcome.decomposition.update(batch_repairs)
+            outcome.decomposition_evidence.update(
+                {
+                    label: batch_errors.get(
+                        label, "semantic audit requested decomposition"
+                    )
+                    for label in batch_repairs
+                }
+            )
             failed_batch = [
                 label
                 for label in batch
@@ -19368,10 +19731,14 @@ def _prove_section(
                     error=result.error,
                 )
                 continue
-            refusal = _parse_decomposition_refusal(result.text)
+            refusal = _parse_decomposition_refusal(
+                result.text, expected_labels={label}
+            )
             if refusal is not None:
                 outcome.decomposition[label] = refusal["missing_helpers"]
-                errors[label] = f"generator refusal: {refusal['reason']}"
+                refusal_evidence = f"generator refusal: {refusal['reason']}"
+                outcome.decomposition_evidence[label] = refusal_evidence
+                errors[label] = refusal_evidence
                 _record(
                     ctx.telemetry,
                     "proof_attempt_result",
@@ -19391,6 +19758,14 @@ def _prove_section(
             )
             errors.update(batch_errors)
             outcome.decomposition.update(batch_repairs)
+            outcome.decomposition_evidence.update(
+                {
+                    repair_label: batch_errors.get(
+                        repair_label, "semantic audit requested decomposition"
+                    )
+                    for repair_label in batch_repairs
+                }
+            )
             if batch_repairs:
                 _record(
                     ctx.telemetry,
@@ -21620,6 +21995,11 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             repair_boundary_active = bool(ctx.repair_boundary_pending)
             boundary_request = _pending_repair_boundary_request(ctx)
+            queued_phase2_request = (
+                None
+                if boundary_request is not None
+                else _pending_phase2_repair_request(ctx)
+            )
             if repair_boundary_active:
                 # Persist both an accepted audit (cleared state) and a routed
                 # rejection before any further model call can be interrupted.
@@ -21659,6 +22039,7 @@ def main(argv: list[str] | None = None) -> int:
             repair_evidence_by_label: dict[str, str] = {}
             phase1_repair = False
             repair_authorized = True
+            active_phase2_repair_id = ""
 
             if boundary_request is not None:
                 evidence_for_repair = boundary_request.evidence
@@ -21675,6 +22056,37 @@ def main(argv: list[str] | None = None) -> int:
                 phase1_repair = True
                 _quarantine_labels(
                     ctx, boundary_request.labels, "post_repair_boundary_audit"
+                )
+            elif queued_phase2_request is not None:
+                evidence_for_repair = queued_phase2_request.evidence
+                repair_labels = list(queued_phase2_request.labels)
+                repair_authorized = True
+                repair_required_dependencies = (
+                    queued_phase2_request.required_dependencies
+                )
+                repair_model_labels = list(
+                    queued_phase2_request.model_repair_labels
+                )
+                repair_evidence_by_label = dict(
+                    queued_phase2_request.evidence_by_label
+                )
+                repair_helpers = list(
+                    queued_phase2_request.decomposition_helpers
+                )
+                repair_section_labels = list(
+                    queued_phase2_request.section_labels
+                )
+                repair_context_labels = list(
+                    queued_phase2_request.context_labels
+                )
+                active_phase2_repair_id = str(
+                    getattr(queued_phase2_request, "queue_id", "")
+                )
+                phase1_repair = False
+                _log(
+                    "==> Processing independent queued Phase 2 blueprint repair: "
+                    + ", ".join(repair_labels[:8])
+                    + f" ({len(ctx.phase2_repair_queue)} queued)"
                 )
 
             if evidence_for_repair is None:
@@ -21766,6 +22178,9 @@ def main(argv: list[str] | None = None) -> int:
                         ) or sorted(authorized)
                         repair_context_labels = list(request.context_labels)
                         phase1_repair = not ctx.phase2_started
+                        active_phase2_repair_id = str(
+                            getattr(request, "queue_id", "")
+                        )
 
                 elif not phase1_integration_checked:
                     stage = _contract_work_stage(ctx)
@@ -21894,31 +22309,21 @@ def main(argv: list[str] | None = None) -> int:
                         for future in concurrent.futures.as_completed(futures):
                             outcomes.append(future.result())
                     _save_ctx_state(ctx, sections)
-                    failed: dict[str, str] = {}
-                    helpers: list[str] = []
-                    for outcome in outcomes:
-                        failed.update(outcome.failed)
-                        for label, missing in outcome.decomposition.items():
-                            failed[label] = failed.get(label, "generator requested decomposition")
-                            helpers.extend(missing)
-                    if failed:
-                        parts = []
-                        for label, error in sorted(failed.items()):
-                            parts.append(
-                                f"== Node {label} ==\n"
-                                f"Blueprint statement:\n{ctx.stmt_blocks.get(label, '')[:2500]}\n"
-                                f"Lean evidence:\n{error[-3500:]}"
-                            )
-                        evidence_for_repair = (
-                            "Body implementation failed for the nodes below after batched "
-                            "and escalated attempts. Repair the blueprint: add the missing "
-                            "intermediate lemma/definition nodes, hypotheses, or split "
-                            "nodes whose proofs are too large for one declaration.\n\n"
-                            + "\n\n".join(parts)
+                    request = _route_phase2_proof_outcomes(ctx, outcomes)
+                    if request is not None:
+                        evidence_for_repair = request.evidence
+                        repair_labels = list(request.labels)
+                        repair_helpers = list(request.decomposition_helpers)
+                        repair_section_labels = list(request.section_labels)
+                        repair_context_labels = list(request.context_labels)
+                        repair_authorized = request.authorizes_blueprint_repair
+                        repair_required_dependencies = request.required_dependencies
+                        repair_model_labels = list(request.model_repair_labels)
+                        repair_evidence_by_label = dict(request.evidence_by_label)
+                        active_phase2_repair_id = str(
+                            getattr(request, "queue_id", "")
                         )
-                        repair_labels = sorted(failed)
-                        repair_helpers = helpers
-                        repair_section_labels = repair_labels
+                        phase1_repair = False
                     else:
                         proved_now = sorted(
                             {label for outcome in outcomes for label in outcome.proved}
@@ -22046,9 +22451,20 @@ def main(argv: list[str] | None = None) -> int:
                 repair_authorized,
                 repair_required_dependencies,
             ):
+                retry_stage = _contract_work_stage(ctx)
+                retry_event = (
+                    "phase2_generation_retry"
+                    if bool(getattr(ctx, "phase2_started", False))
+                    else "phase1_generation_retry"
+                )
+                retry_source = (
+                    "outer_phase2_retry"
+                    if bool(getattr(ctx, "phase2_started", False))
+                    else "outer_phase1_retry"
+                )
                 if repair_trials >= args.max_trials:
                     report_lines += [
-                        "## Stopped: Phase 1 generation retry budget exhausted",
+                        f"## Stopped: {retry_stage} generation retry budget exhausted",
                         "",
                         "```text",
                         evidence_for_repair[-6000:],
@@ -22068,15 +22484,16 @@ def main(argv: list[str] | None = None) -> int:
                 repair_trials += 1
                 _record(
                     ctx.telemetry,
-                    "phase1_generation_retry",
+                    retry_event,
                     labels=repair_labels,
                     trial=repair_trials,
                     max_trials=args.max_trials,
                     evidence=evidence_for_repair[-4000:],
                     blueprint_edited=False,
+                    workflow_phase=(2 if ctx.phase2_started else 1),
                 )
                 _log(
-                    f"==> {_contract_work_stage(ctx)} generation retry {repair_trials}/"
+                    f"==> {retry_stage} generation retry {repair_trials}/"
                     f"{args.max_trials}; blueprint unchanged; affected: "
                     + ", ".join(repair_labels[:8])
                 )
@@ -22084,14 +22501,14 @@ def main(argv: list[str] | None = None) -> int:
                 if evidence_tail:
                     _log("  retry evidence (last lines):\n" + evidence_tail)
                 report_lines.append(
-                    f"- Phase 1 generation retry {repair_trials} without "
+                    f"- {retry_stage} generation retry {repair_trials} without "
                     f"blueprint edit: `{', '.join(repair_labels[:8])}`"
                 )
                 _store_generation_feedback(
                     ctx,
                     repair_labels,
                     evidence_for_repair,
-                    source="outer_phase1_retry",
+                    source=retry_source,
                     evidence_by_label=(repair_evidence_by_label or None),
                 )
                 _save_ctx_state(ctx, sections)
@@ -22359,6 +22776,19 @@ def main(argv: list[str] | None = None) -> int:
                     if phase1_repair
                     else set()
                 )
+                # Phase 2 receives exact evidence for complete nodes. Existing
+                # dependencies and neighboring contracts are read-only unless
+                # that same request names them as defective. New helper nodes
+                # remain legal and are checked by the graph/boundary gates.
+                phase2_existing_scope_violations = (
+                    _phase2_existing_repair_scope_violations(
+                        scope_nodes_before,
+                        scope_targets,
+                        checked_changes,
+                    )
+                    if bool(getattr(ctx, "phase2_started", False))
+                    else set()
+                )
                 _record(
                     ctx.telemetry,
                     "blueprint_repair_scope",
@@ -22382,8 +22812,15 @@ def main(argv: list[str] | None = None) -> int:
                         set(scope_nodes_before) - set(ctx.nodes)
                     ),
                     downstream_scope_violations=sorted(downstream_scope_violations),
+                    phase2_existing_scope_violations=sorted(
+                        phase2_existing_scope_violations
+                    ),
                 )
-                if disconnected or downstream_scope_violations:
+                if (
+                    disconnected
+                    or downstream_scope_violations
+                    or phase2_existing_scope_violations
+                ):
                     content_path.write_text(
                         scope_content_before, encoding="utf-8"
                     )
@@ -22411,6 +22848,7 @@ def main(argv: list[str] | None = None) -> int:
                         status=(
                             "scope_rolled_back"
                             if downstream_scope_violations
+                            or phase2_existing_scope_violations
                             else "disconnected_rolled_back"
                         ),
                         changed_labels=sorted(checked_changes),
@@ -22420,8 +22858,21 @@ def main(argv: list[str] | None = None) -> int:
                         ),
                         disconnected_labels=sorted(disconnected),
                         downstream_scope_violations=sorted(downstream_scope_violations),
+                        phase2_existing_scope_violations=sorted(
+                            phase2_existing_scope_violations
+                        ),
                     )
-                    if downstream_scope_violations:
+                    if phase2_existing_scope_violations:
+                        report_lines.append(
+                            f"- {action} {repair_trials}: rolled back edits to "
+                            "pre-existing Phase 2 contracts outside the directly "
+                            "authorized scope `"
+                            + ", ".join(
+                                sorted(phase2_existing_scope_violations)[:8]
+                            )
+                            + "`"
+                        )
+                    elif downstream_scope_violations:
                         report_lines.append(
                             f"- {action} {repair_trials}: rolled back downstream "
                             f"contract changes `{', '.join(sorted(downstream_scope_violations)[:8])}`"
@@ -22435,7 +22886,16 @@ def main(argv: list[str] | None = None) -> int:
                     if boundary_audit_changed is not None:
                         boundary_audit_changed.clear()
                     disconnected_rollback = True
-                    if downstream_scope_violations:
+                    if phase2_existing_scope_violations:
+                        escalation_note = (
+                            "The previous Phase 2 repair was rolled back because it "
+                            "edited pre-existing blueprint nodes outside the exact "
+                            "failure scope. Treat dependencies and neighboring nodes "
+                            "as read-only. Edit only the listed target node(s); new "
+                            "dependency-connected helper nodes are allowed when the "
+                            "evidence requires decomposition."
+                        )
+                    elif downstream_scope_violations:
                         escalation_note = (
                             "The previous Phase 1 repair was rolled back because it "
                             "changed downstream/consumer blueprint contracts instead "
@@ -22453,6 +22913,19 @@ def main(argv: list[str] | None = None) -> int:
                             "the next repair dependency-connected; add explicit uses "
                             "edges for genuinely necessary helpers or consumers."
                         )
+            if (
+                active_phase2_repair_id
+                and changed
+                and not disconnected_rollback
+                and (
+                    not repair_model_labels
+                    or scope_changed is None
+                    or bool(scope_changed)
+                )
+            ):
+                _complete_phase2_repair_request(
+                    ctx, active_phase2_repair_id
+                )
             if changed:
                 noop_repairs = 0
                 escalation_note = ""

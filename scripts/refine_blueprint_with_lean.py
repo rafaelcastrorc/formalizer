@@ -41,6 +41,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 from generate_blueprint import _extract_json, read_paper
 from lean_preflight import check_lean_environment, default_lean_command
@@ -428,28 +429,54 @@ def _pre_decomposition_candidates(
     return [(label, reasons) for _score, label, reasons in candidates[:limit]]
 
 
-def _parse_decomposition_refusal(text: str) -> dict | None:
+def _parse_decomposition_refusal(
+    text: str,
+    expected_labels: Iterable[str] | None = None,
+) -> dict | None:
     """Detect a structured generation refusal (node needs blueprint helpers).
 
     The generation prompt allows the model to reply with a single
     ``NEEDS-DECOMPOSITION: {...json...}`` line instead of emitting weakened
-    Lean it knows cannot match the blueprint node 1-1.
+    Lean it knows cannot match the blueprint node 1-1. Treat this as blueprint
+    edit authority only when the entire response is one valid, concrete JSON
+    refusal for a node assigned to this call. Prompt examples, malformed JSON,
+    trailing prose, and refusals naming another node are ordinary generation
+    failures, not mathematical evidence for changing the blueprint.
     """
-    match = re.search(r"NEEDS-DECOMPOSITION:\s*(\{.*\})", text, re.DOTALL)
-    if not match:
+    stripped = text.strip()
+    prefix = "NEEDS-DECOMPOSITION:"
+    if not stripped.startswith(prefix):
         return None
-    payload: dict = {"label": "", "missing_helpers": [], "reason": ""}
     try:
-        parsed = json.loads(match.group(1))
-        if isinstance(parsed, dict):
-            payload["label"] = str(parsed.get("label") or "")
-            payload["missing_helpers"] = [
-                str(h) for h in (parsed.get("missing_helpers") or []) if str(h).strip()
-            ]
-            payload["reason"] = str(parsed.get("reason") or "")
+        parsed = json.loads(stripped[len(prefix):].strip())
     except json.JSONDecodeError:
-        payload["reason"] = match.group(1)[:2000]
-    return payload
+        return None
+    if not isinstance(parsed, dict):
+        return None
+
+    label = str(parsed.get("label") or "").strip()
+    reason = str(parsed.get("reason") or "").strip()
+    raw_helpers = parsed.get("missing_helpers")
+    if not isinstance(raw_helpers, list):
+        return None
+    helpers = [str(helper).strip() for helper in raw_helpers if str(helper).strip()]
+    placeholder_values = {
+        "<node label>",
+        "<each needed helper statement>",
+        "<why>",
+    }
+    if (
+        not label
+        or not reason
+        or not helpers
+        or label in placeholder_values
+        or reason in placeholder_values
+        or any(helper in placeholder_values for helper in helpers)
+    ):
+        return None
+    if expected_labels is not None and label not in set(expected_labels):
+        return None
+    return {"label": label, "missing_helpers": helpers, "reason": reason}
 
 
 def _decomposition_note(labels: list[str], helpers: list[str] | None = None) -> str:
@@ -3864,9 +3891,11 @@ def main(argv: list[str] | None = None) -> int:
                 prompt=prompt_artifact.to_event(REPO_ROOT),
                 response=response_artifact.to_event(REPO_ROOT),
             )
-            refusal = _parse_decomposition_refusal(lean_result.text)
+            refusal = _parse_decomposition_refusal(
+                lean_result.text, expected_labels=target_labels
+            )
             if refusal is not None:
-                refused = [refusal["label"]] if refusal["label"] in target_labels else list(target_labels)
+                refused = [refusal["label"]]
                 telemetry.record(
                     "decomposition_requested",
                     decision_id=decision_id,
