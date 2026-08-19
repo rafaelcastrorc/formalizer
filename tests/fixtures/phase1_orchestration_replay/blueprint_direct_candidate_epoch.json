@@ -1,0 +1,23 @@
+{
+  "source_log": ".auto-blueprint/formalization/simplex/run-20260815-013516.log",
+  "observed_transition": {
+    "label": "def:paper-claim-seven-block",
+    "ordinary_compile_failure_s": 1360,
+    "blueprint_direct_activation_s": 1360,
+    "stale_candidate_reuse_s": 1403,
+    "second_compile_failure_s": 1569
+  },
+  "statement_fp": "statement-v1",
+  "ordinary_plan": {
+    "schema_version": 7,
+    "target_signature": "def_paper_claim_seven_block : Prop",
+    "helpers": [],
+    "decisions": ["ordinary typed plan"]
+  },
+  "candidate": "def def_paper_claim_seven_block : Prop := True\n",
+  "direct_evidence": "The ordinary compiler-correction lifecycle failed; generate directly from the blueprint.",
+  "expected": {
+    "stale_candidate_stored_under_direct_epoch": false,
+    "next_transaction_requires_fresh_generation": true
+  }
+}

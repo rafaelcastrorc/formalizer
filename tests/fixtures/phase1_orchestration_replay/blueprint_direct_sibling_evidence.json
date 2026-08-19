@@ -1,0 +1,19 @@
+{
+  "run_id": "20260814-235036",
+  "blueprint": "simplex",
+  "labels": [
+    "def:reported-best-wang-sun-upper-bound",
+    "def:paper-max-construction",
+    "remark:open-depth-questions"
+  ],
+  "stable_label": "def:reported-best-wang-sun-upper-bound",
+  "changed_sibling_label": "def:paper-max-construction",
+  "changed_sibling_marker": "SECOND-PAPER-MAX-FINDING",
+  "statement_fingerprints": {
+    "def:reported-best-wang-sun-upper-bound": "d274c221355d1767928ba996ca86885d1496f5638522ac38f80c08cf63cdf1ad",
+    "def:paper-max-construction": "efda9e104a9a26bc7c9f40df466f2790cfb78cac11b700df3aca01313da53a85",
+    "remark:open-depth-questions": "open-depth-questions-v1"
+  },
+  "first_audit": "Blueprint contract audit rejected:\n- def:paper-max-construction [reject]: The declaration does not expose the required public correctness statement that the arity-m network computes MAX_m.\n- def:reported-best-wang-sun-upper-bound [reject]: The generated declaration erases the quantified Wang-Sun bound.\n- remark:open-depth-questions [reject]: The declaration changes open questions into solved claims.",
+  "second_audit": "Blueprint contract audit rejected:\n- def:paper-max-construction [reject]: SECOND-PAPER-MAX-FINDING: the revised declaration still omits the concrete network construction.\n- def:reported-best-wang-sun-upper-bound [reject]: The generated declaration erases the quantified Wang-Sun bound.\n- remark:open-depth-questions [reject]: The declaration changes open questions into solved claims."
+}

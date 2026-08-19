@@ -1,0 +1,1517 @@
+{
+  "milestone": {
+    "observed_frozen_count": 86,
+    "observed_required_count": 109,
+    "phase1_frozen_at_least": 80
+  },
+  "observed_seconds": 2379.0,
+  "recorded_totals": {
+    "model_calls": 70,
+    "model_seconds": 2245.806534,
+    "object_builds": 40,
+    "object_seconds": 454.949354
+  },
+  "schema_version": 1,
+  "source_blueprint": "simplex",
+  "source_run": "20260813-235136-d2d9c925",
+  "tasks": [
+    {
+      "actual_start_s": 8.542763,
+      "duration_s": 285.457236,
+      "labels": [
+        "cor:cpwl-four-two-layers",
+        "cor:dyadic-decimal",
+        "prop:linear-size",
+        "thm:previous-cpwl-bound",
+        "def:polytope-complexity",
+        "cor:max-depth-formal-difference",
+        "cor:geometric-signed-simplex",
+        "lem:rhombic-bases",
+        "cor:max-five-geometric",
+        "lem:newton-correction-faces",
+        "remark:geometric-recursion-gap",
+        "thm:universal-approximation",
+        "prop:wang-sun-term-count",
+        "remark:open-depth-questions",
+        "prop:dyadic-weights",
+        "prop:binary-tree-max-bound",
+        "thm:main-cpwl",
+        "prop:max-five-depth",
+        "thm:polytope-triangulation",
+        "lem:support-minkowski-sum",
+        "cor:subdivision-depth-bound",
+        "lem:delta-four-cells-class-two",
+        "lem:delta-four-subdivision",
+        "lem:newton-p-cells",
+        "prop:geometric-three-to-one",
+        "cor:max-general-depth",
+        "thm:wang-sun-representation",
+        "thm:max-three-lower-bound",
+        "lem:cover-depth-bound",
+        "lem:polytope-class-face-closed",
+        "lem:delta-four-cell-reassociate",
+        "lem:tetrahedron-point-triangle",
+        "lem:triangle-class-two",
+        "lem:ceiling-log-three",
+        "lem:max-arity-restriction",
+        "thm:main-max",
+        "lem:max-newton-simplex",
+        "lem:polytope-class-sum-closed",
+        "lem:relu-depth-formal-difference",
+        "lem:full-additivity",
+        "constr:delta-four-cells",
+        "lem:claim-six",
+        "lem:claim-seven",
+        "def:depth-classes",
+        "lem:max-five-upper-bound",
+        "def:newton-polytope",
+        "def:formal-minkowski-difference",
+        "lem:two-cell-valuation",
+        "cor:tetrahedron-subdivision",
+        "lem:relu-network-is-cpwl",
+        "lem:t-space-depth-transfer",
+        "lem:claim-five-iterated",
+        "lem:p-terms-depth-two",
+        "lem:q-depth-two",
+        "lem:r-terms-depth-two",
+        "thm:support-polytope-correspondence",
+        "def:polyhedral-subdivision",
+        "lem:tetrahedron-simplex",
+        "lem:rhombic-cells-class-two",
+        "lem:tetrahedron-cell-cover",
+        "lem:tetrahedron-cell-faces",
+        "lem:claim-five",
+        "lem:affine-precomposition",
+        "lem:two-layer-template",
+        "lem:support-function-properties",
+        "lem:polytope-class-monotone",
+        "lem:tetrahedron-projection-square",
+        "constr:rhombic-cells",
+        "lem:rhombus-class-one",
+        "def:cpwl-function",
+        "lem:claim-five-p-membership",
+        "lem:claim-five-q-membership",
+        "lem:claim-five-r-membership",
+        "lem:tspace-b2-b3",
+        "lem:tspace-b3-next",
+        "lem:max-two-relu",
+        "lem:parallel-linear-combination",
+        "lem:claim-four",
+        "def:support-function",
+        "def:polytope-classes",
+        "def:tetrahedron-midpoints",
+        "def:relu-network",
+        "def:t-space",
+        "lem:m-x5-case",
+        "lem:m-symmetry",
+        "lem:m-x1-case",
+        "def:minkowski-sum",
+        "constr:tetrahedron",
+        "def:relu-scalar",
+        "def:t-function",
+        "def:m-expression",
+        "lem:p1-x1-case",
+        "lem:p2-r23-x1-case",
+        "lem:p3-r13-x1-case",
+        "lem:p4-r14-x1-case",
+        "lem:r24-q-x1-case",
+        "def:polytope",
+        "def:max-function",
+        "def:p1",
+        "def:p2",
+        "def:p3",
+        "def:p4",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23",
+        "def:r24"
+      ],
+      "purpose": "phase1_semantic_plan",
+      "resource": "model",
+      "source_seq": 116
+    },
+    {
+      "actual_start_s": 293.353917,
+      "duration_s": 17.646083,
+      "labels": [
+        "def:r24",
+        "def:polytope",
+        "lem:tetrahedron-point-triangle"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 119
+    },
+    {
+      "actual_start_s": 294.038935,
+      "duration_s": 24.961065,
+      "labels": [
+        "def:relu-scalar",
+        "def:cpwl-function",
+        "lem:ceiling-log-three",
+        "def:max-function",
+        "def:p1",
+        "def:p2",
+        "def:p3",
+        "def:p4",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 139
+    },
+    {
+      "actual_start_s": 330.754544,
+      "duration_s": 20.245456,
+      "labels": [
+        "def:cpwl-function",
+        "lem:ceiling-log-three"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 223
+    },
+    {
+      "actual_start_s": 357.444472,
+      "duration_s": 19.555528,
+      "labels": [
+        "def:cpwl-function",
+        "lem:ceiling-log-three"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 259
+    },
+    {
+      "actual_start_s": 370.071867,
+      "duration_s": 17.928133,
+      "labels": [
+        "lem:tetrahedron-point-triangle"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 288
+    },
+    {
+      "actual_start_s": 382.981041,
+      "duration_s": 7.018959,
+      "labels": [
+        "lem:ceiling-log-three"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 292
+    },
+    {
+      "actual_start_s": 394.523789,
+      "duration_s": 6.476211,
+      "labels": [
+        "def:r24",
+        "def:polytope",
+        "lem:tetrahedron-point-triangle"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 368
+    },
+    {
+      "actual_start_s": 406.527944,
+      "duration_s": 13.472056,
+      "labels": [
+        "def:r24",
+        "def:polytope",
+        "lem:tetrahedron-point-triangle"
+      ],
+      "purpose": "statement_audit",
+      "resource": "model",
+      "source_seq": 371
+    },
+    {
+      "actual_start_s": 420.85507,
+      "duration_s": 12.14493,
+      "labels": [
+        "def:p3",
+        "def:p4",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 386
+    },
+    {
+      "actual_start_s": 420.397995,
+      "duration_s": 20.602005,
+      "labels": [
+        "def:support-function",
+        "def:minkowski-sum",
+        "thm:polytope-triangulation",
+        "def:polyhedral-subdivision",
+        "constr:tetrahedron"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 418
+    },
+    {
+      "actual_start_s": 420.339732,
+      "duration_s": 22.660268,
+      "labels": [
+        "def:relu-scalar",
+        "def:cpwl-function",
+        "lem:ceiling-log-three",
+        "def:max-function",
+        "def:p1",
+        "def:p2"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 451
+    },
+    {
+      "actual_start_s": 452.336714,
+      "duration_s": 6.663286,
+      "labels": [
+        "def:p3",
+        "def:p4",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 487
+    },
+    {
+      "actual_start_s": 452.571324,
+      "duration_s": 7.428676,
+      "labels": [
+        "def:support-function",
+        "def:minkowski-sum",
+        "thm:polytope-triangulation",
+        "def:polyhedral-subdivision",
+        "constr:tetrahedron"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 489
+    },
+    {
+      "actual_start_s": 454.212819,
+      "duration_s": 7.787181,
+      "labels": [
+        "def:relu-scalar",
+        "def:cpwl-function",
+        "lem:ceiling-log-three",
+        "def:max-function",
+        "def:p1",
+        "def:p2"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 491
+    },
+    {
+      "actual_start_s": 468.992821,
+      "duration_s": 24.007179,
+      "labels": [
+        "def:relu-scalar",
+        "def:cpwl-function",
+        "lem:ceiling-log-three",
+        "def:max-function",
+        "def:p1",
+        "def:p2",
+        "def:p3",
+        "def:p4",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23",
+        "def:support-function",
+        "def:minkowski-sum",
+        "thm:polytope-triangulation",
+        "def:polyhedral-subdivision",
+        "constr:tetrahedron"
+      ],
+      "purpose": "statement_audit",
+      "resource": "model",
+      "source_seq": 493
+    },
+    {
+      "actual_start_s": 499.304442,
+      "duration_s": 6.695558,
+      "labels": [
+        "def:relu-scalar",
+        "lem:ceiling-log-three",
+        "def:max-function",
+        "def:p1",
+        "def:p2"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 509
+    },
+    {
+      "actual_start_s": 511.977554,
+      "duration_s": 6.022446,
+      "labels": [
+        "def:support-function",
+        "def:minkowski-sum",
+        "constr:tetrahedron"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 517
+    },
+    {
+      "actual_start_s": 519.833808,
+      "duration_s": 62.166192,
+      "labels": [
+        "def:polyhedral-subdivision"
+      ],
+      "purpose": "blueprint_repair",
+      "resource": "model",
+      "source_seq": 528
+    },
+    {
+      "actual_start_s": 585.066607,
+      "duration_s": 9.933393,
+      "labels": [
+        "def:polytope-face",
+        "def:cell-intersections-are-faces"
+      ],
+      "purpose": "post_repair_blueprint_audit",
+      "resource": "model",
+      "source_seq": 542
+    },
+    {
+      "actual_start_s": 594.433511,
+      "duration_s": 29.566489,
+      "labels": [
+        "thm:polytope-triangulation",
+        "def:polyhedral-subdivision",
+        "def:cell-intersections-are-faces",
+        "def:polytope-face"
+      ],
+      "purpose": "phase1_semantic_plan",
+      "resource": "model",
+      "source_seq": 544
+    },
+    {
+      "actual_start_s": 623.924921,
+      "duration_s": 20.075079,
+      "labels": [
+        "def:cpwl-function"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 551
+    },
+    {
+      "actual_start_s": 624.53594,
+      "duration_s": 20.46406,
+      "labels": [
+        "def:relu-network"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 560
+    },
+    {
+      "actual_start_s": 644.635653,
+      "duration_s": 14.364347,
+      "labels": [
+        "def:relu-network"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 568
+    },
+    {
+      "actual_start_s": 624.544266,
+      "duration_s": 36.455734,
+      "labels": [
+        "def:t-function",
+        "def:m-expression",
+        "lem:p1-x1-case",
+        "lem:p2-r23-x1-case",
+        "lem:p3-r13-x1-case",
+        "lem:p4-r14-x1-case",
+        "lem:r24-q-x1-case",
+        "def:polytope-classes",
+        "def:formal-minkowski-difference",
+        "lem:two-cell-valuation",
+        "lem:support-minkowski-sum",
+        "def:polytope-face"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 576
+    },
+    {
+      "actual_start_s": 661.189875,
+      "duration_s": 8.810125,
+      "labels": [
+        "def:polytope-classes",
+        "def:formal-minkowski-difference",
+        "def:polytope-face"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 606
+    },
+    {
+      "actual_start_s": 644.087191,
+      "duration_s": 30.912809,
+      "labels": [
+        "lem:tetrahedron-simplex",
+        "def:tetrahedron-midpoints",
+        "lem:tetrahedron-projection-square"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 636
+    },
+    {
+      "actual_start_s": 684.470516,
+      "duration_s": 9.529484,
+      "labels": [
+        "def:t-function",
+        "def:m-expression",
+        "lem:p1-x1-case",
+        "lem:p2-r23-x1-case",
+        "lem:p3-r13-x1-case",
+        "lem:p4-r14-x1-case",
+        "lem:r24-q-x1-case",
+        "def:polytope-classes",
+        "def:formal-minkowski-difference",
+        "lem:two-cell-valuation",
+        "lem:support-minkowski-sum",
+        "def:polytope-face"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 660
+    },
+    {
+      "actual_start_s": 684.396128,
+      "duration_s": 9.603872,
+      "labels": [
+        "def:relu-network"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 663
+    },
+    {
+      "actual_start_s": 684.356261,
+      "duration_s": 9.643739,
+      "labels": [
+        "def:cpwl-function"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 665
+    },
+    {
+      "actual_start_s": 734.582283,
+      "duration_s": 21.417717,
+      "labels": [
+        "lem:tetrahedron-simplex",
+        "def:tetrahedron-midpoints",
+        "lem:tetrahedron-projection-square"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 668
+    },
+    {
+      "actual_start_s": 772.528462,
+      "duration_s": 23.471538,
+      "labels": [
+        "def:relu-network",
+        "def:cpwl-function",
+        "def:t-function",
+        "def:m-expression",
+        "lem:p1-x1-case",
+        "lem:p2-r23-x1-case",
+        "lem:p3-r13-x1-case",
+        "lem:p4-r14-x1-case",
+        "lem:r24-q-x1-case",
+        "def:polytope-classes",
+        "def:formal-minkowski-difference",
+        "lem:two-cell-valuation",
+        "lem:support-minkowski-sum",
+        "def:polytope-face",
+        "lem:tetrahedron-simplex",
+        "def:tetrahedron-midpoints",
+        "lem:tetrahedron-projection-square"
+      ],
+      "purpose": "statement_audit",
+      "resource": "model",
+      "source_seq": 670
+    },
+    {
+      "actual_start_s": 795.399353,
+      "duration_s": 21.600647,
+      "labels": [
+        "def:relu-network"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 695
+    },
+    {
+      "actual_start_s": 795.375861,
+      "duration_s": 43.624139,
+      "labels": [
+        "def:t-space",
+        "thm:wang-sun-representation",
+        "lem:m-x5-case",
+        "lem:m-symmetry",
+        "lem:m-x1-case",
+        "lem:support-function-properties",
+        "lem:polytope-class-monotone",
+        "lem:polytope-class-sum-closed",
+        "def:polytope-complexity",
+        "lem:full-additivity",
+        "lem:polytope-class-face-closed",
+        "def:cell-intersections-are-faces"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 704
+    },
+    {
+      "actual_start_s": 796.015629,
+      "duration_s": 51.984371,
+      "labels": [
+        "constr:rhombic-cells",
+        "lem:rhombus-class-one"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 734
+    },
+    {
+      "actual_start_s": 839.959787,
+      "duration_s": 17.040213,
+      "labels": [
+        "lem:polytope-class-face-closed",
+        "def:cell-intersections-are-faces"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 750
+    },
+    {
+      "actual_start_s": 870.476353,
+      "duration_s": 8.523647,
+      "labels": [
+        "def:t-space",
+        "thm:wang-sun-representation",
+        "lem:m-x5-case",
+        "lem:m-symmetry",
+        "lem:m-x1-case",
+        "lem:support-function-properties",
+        "lem:polytope-class-monotone",
+        "lem:polytope-class-sum-closed",
+        "def:polytope-complexity",
+        "lem:full-additivity",
+        "lem:polytope-class-face-closed",
+        "def:cell-intersections-are-faces"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 784
+    },
+    {
+      "actual_start_s": 870.569098,
+      "duration_s": 8.430902,
+      "labels": [
+        "def:relu-network"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 786
+    },
+    {
+      "actual_start_s": 897.515123,
+      "duration_s": 17.484877,
+      "labels": [
+        "constr:rhombic-cells",
+        "lem:rhombus-class-one"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 788
+    },
+    {
+      "actual_start_s": 931.306898,
+      "duration_s": 21.693102,
+      "labels": [
+        "def:relu-network",
+        "def:t-space",
+        "thm:wang-sun-representation",
+        "lem:m-x5-case",
+        "lem:m-symmetry",
+        "lem:m-x1-case",
+        "lem:support-function-properties",
+        "lem:polytope-class-monotone",
+        "lem:polytope-class-sum-closed",
+        "def:polytope-complexity",
+        "lem:full-additivity",
+        "lem:polytope-class-face-closed",
+        "def:cell-intersections-are-faces",
+        "constr:rhombic-cells",
+        "lem:rhombus-class-one"
+      ],
+      "purpose": "statement_audit",
+      "resource": "model",
+      "source_seq": 790
+    },
+    {
+      "actual_start_s": 959.24993,
+      "duration_s": 6.75007,
+      "labels": [
+        "def:t-space",
+        "thm:wang-sun-representation",
+        "lem:m-x5-case",
+        "lem:m-symmetry",
+        "lem:m-x1-case",
+        "lem:support-function-properties",
+        "lem:polytope-class-monotone",
+        "lem:polytope-class-sum-closed",
+        "def:polytope-complexity",
+        "lem:full-additivity",
+        "def:cell-intersections-are-faces"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 807
+    },
+    {
+      "actual_start_s": 982.467119,
+      "duration_s": 18.532881,
+      "labels": [
+        "constr:rhombic-cells"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 812
+    },
+    {
+      "actual_start_s": 1003.951806,
+      "duration_s": 18.048194,
+      "labels": [
+        "lem:polytope-class-face-closed",
+        "lem:rhombus-class-one"
+      ],
+      "purpose": "phase1_semantic_plan",
+      "resource": "model",
+      "source_seq": 828
+    },
+    {
+      "actual_start_s": 1022.869297,
+      "duration_s": 17.130703,
+      "labels": [
+        "lem:relu-depth-formal-difference",
+        "lem:polytope-class-face-closed",
+        "def:polyhedral-subdivision",
+        "lem:rhombic-bases",
+        "lem:rhombus-class-one",
+        "lem:tetrahedron-cell-cover",
+        "lem:tetrahedron-cell-faces",
+        "lem:triangle-class-two",
+        "thm:universal-approximation",
+        "prop:wang-sun-term-count"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 831
+    },
+    {
+      "actual_start_s": 1022.951122,
+      "duration_s": 71.048878,
+      "labels": [
+        "lem:relu-network-is-cpwl",
+        "lem:claim-five-p-membership",
+        "lem:claim-five-q-membership",
+        "lem:claim-five-r-membership",
+        "lem:tspace-b2-b3",
+        "lem:tspace-b3-next",
+        "lem:max-two-relu",
+        "lem:affine-precomposition",
+        "lem:parallel-linear-combination",
+        "thm:max-three-lower-bound",
+        "lem:claim-four",
+        "thm:support-polytope-correspondence"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 832
+    },
+    {
+      "actual_start_s": 1039.825768,
+      "duration_s": 178.174232,
+      "labels": [
+        "lem:relu-depth-formal-difference",
+        "lem:polytope-class-face-closed",
+        "def:polyhedral-subdivision",
+        "lem:rhombic-bases",
+        "lem:rhombus-class-one",
+        "lem:tetrahedron-cell-cover",
+        "lem:tetrahedron-cell-faces",
+        "lem:triangle-class-two",
+        "thm:universal-approximation",
+        "prop:wang-sun-term-count"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 878
+    },
+    {
+      "actual_start_s": 1217.609826,
+      "duration_s": 16.390174,
+      "labels": [
+        "lem:tetrahedron-cell-faces"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 904
+    },
+    {
+      "actual_start_s": 1259.535801,
+      "duration_s": 23.464199,
+      "labels": [
+        "lem:relu-depth-formal-difference",
+        "thm:universal-approximation"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 973
+    },
+    {
+      "actual_start_s": 1298.740986,
+      "duration_s": 16.259014,
+      "labels": [
+        "lem:relu-depth-formal-difference",
+        "lem:polytope-class-face-closed",
+        "def:polyhedral-subdivision",
+        "lem:rhombic-bases",
+        "lem:rhombus-class-one",
+        "lem:tetrahedron-cell-cover",
+        "lem:tetrahedron-cell-faces",
+        "lem:triangle-class-two",
+        "thm:universal-approximation",
+        "prop:wang-sun-term-count"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 998
+    },
+    {
+      "actual_start_s": 1331.055657,
+      "duration_s": 17.944343,
+      "labels": [
+        "lem:relu-depth-formal-difference",
+        "lem:polytope-class-face-closed",
+        "def:polyhedral-subdivision",
+        "lem:rhombic-bases",
+        "lem:rhombus-class-one",
+        "lem:tetrahedron-cell-cover",
+        "lem:tetrahedron-cell-faces",
+        "lem:triangle-class-two",
+        "thm:universal-approximation",
+        "prop:wang-sun-term-count"
+      ],
+      "purpose": "statement_audit",
+      "resource": "model",
+      "source_seq": 1000
+    },
+    {
+      "actual_start_s": 1364.071089,
+      "duration_s": 15.928911,
+      "labels": [
+        "lem:relu-depth-formal-difference",
+        "lem:polytope-class-face-closed",
+        "def:polyhedral-subdivision",
+        "lem:rhombic-bases",
+        "lem:rhombus-class-one",
+        "lem:tetrahedron-cell-faces",
+        "lem:triangle-class-two",
+        "thm:universal-approximation",
+        "prop:wang-sun-term-count"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1014
+    },
+    {
+      "actual_start_s": 1380.184794,
+      "duration_s": 9.815206,
+      "labels": [
+        "lem:relu-network-is-cpwl"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1032
+    },
+    {
+      "actual_start_s": 1381.062397,
+      "duration_s": 19.937603,
+      "labels": [
+        "lem:claim-five-q-membership"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1046
+    },
+    {
+      "actual_start_s": 1380.542856,
+      "duration_s": 24.457144,
+      "labels": [
+        "lem:claim-five-p-membership"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1059
+    },
+    {
+      "actual_start_s": 1400.346498,
+      "duration_s": 7.653502,
+      "labels": [
+        "lem:tspace-b2-b3",
+        "lem:tspace-b3-next"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1073
+    },
+    {
+      "actual_start_s": 1404.623618,
+      "duration_s": 16.376382,
+      "labels": [
+        "lem:max-two-relu"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1091
+    },
+    {
+      "actual_start_s": 1408.516764,
+      "duration_s": 21.483236,
+      "labels": [
+        "lem:affine-precomposition"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1105
+    },
+    {
+      "actual_start_s": 1421.377471,
+      "duration_s": 23.622529,
+      "labels": [
+        "lem:parallel-linear-combination"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1119
+    },
+    {
+      "actual_start_s": 1430.119573,
+      "duration_s": 15.880427,
+      "labels": [
+        "thm:max-three-lower-bound"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1132
+    },
+    {
+      "actual_start_s": 1390.422398,
+      "duration_s": 62.577602,
+      "labels": [
+        "lem:claim-five-r-membership"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1145
+    },
+    {
+      "actual_start_s": 1446.07099,
+      "duration_s": 26.92901,
+      "labels": [
+        "lem:tetrahedron-cell-cover"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1157
+    },
+    {
+      "actual_start_s": 1444.75696,
+      "duration_s": 28.24304,
+      "labels": [
+        "lem:claim-four",
+        "thm:support-polytope-correspondence",
+        "thm:polytope-triangulation",
+        "lem:rhombic-cells-class-two"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1169
+    },
+    {
+      "actual_start_s": 1484.540294,
+      "duration_s": 9.459706,
+      "labels": [
+        "lem:relu-network-is-cpwl"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1237
+    },
+    {
+      "actual_start_s": 1484.469738,
+      "duration_s": 9.530262,
+      "labels": [
+        "lem:claim-five-q-membership"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1240
+    },
+    {
+      "actual_start_s": 1484.359055,
+      "duration_s": 9.640945,
+      "labels": [
+        "lem:claim-five-p-membership"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1243
+    },
+    {
+      "actual_start_s": 1502.882893,
+      "duration_s": 9.117107,
+      "labels": [
+        "lem:tspace-b2-b3",
+        "lem:tspace-b3-next"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1246
+    },
+    {
+      "actual_start_s": 1503.750787,
+      "duration_s": 9.249213,
+      "labels": [
+        "lem:max-two-relu"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1249
+    },
+    {
+      "actual_start_s": 1503.437772,
+      "duration_s": 9.562228,
+      "labels": [
+        "lem:claim-five-r-membership"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1252
+    },
+    {
+      "actual_start_s": 1521.646698,
+      "duration_s": 9.353302,
+      "labels": [
+        "lem:parallel-linear-combination"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1255
+    },
+    {
+      "actual_start_s": 1521.616653,
+      "duration_s": 9.383346,
+      "labels": [
+        "thm:max-three-lower-bound"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1258
+    },
+    {
+      "actual_start_s": 1546.77168,
+      "duration_s": 16.22832,
+      "labels": [
+        "lem:tetrahedron-cell-cover"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1264
+    },
+    {
+      "actual_start_s": 1545.953026,
+      "duration_s": 20.046974,
+      "labels": [
+        "lem:affine-precomposition"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 1266
+    },
+    {
+      "actual_start_s": 1573.320909,
+      "duration_s": 6.679091,
+      "labels": [
+        "lem:affine-precomposition"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1273
+    },
+    {
+      "actual_start_s": 1594.928448,
+      "duration_s": 21.071552,
+      "labels": [
+        "lem:relu-network-is-cpwl",
+        "lem:claim-five-p-membership",
+        "lem:claim-five-q-membership",
+        "lem:claim-five-r-membership",
+        "lem:tspace-b2-b3",
+        "lem:tspace-b3-next",
+        "lem:max-two-relu",
+        "lem:affine-precomposition",
+        "lem:parallel-linear-combination",
+        "thm:max-three-lower-bound",
+        "lem:tetrahedron-cell-cover"
+      ],
+      "purpose": "statement_audit",
+      "resource": "model",
+      "source_seq": 1275
+    },
+    {
+      "actual_start_s": 1616.073687,
+      "duration_s": 19.926313,
+      "labels": [
+        "lem:t-space-depth-transfer"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1319
+    },
+    {
+      "actual_start_s": 1616.511117,
+      "duration_s": 20.488883,
+      "labels": [
+        "lem:claim-five-q-membership"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 1332
+    },
+    {
+      "actual_start_s": 1637.370506,
+      "duration_s": 15.629494,
+      "labels": [
+        "thm:polytope-triangulation"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1342
+    },
+    {
+      "actual_start_s": 1636.471943,
+      "duration_s": 39.528057,
+      "labels": [
+        "lem:claim-seven",
+        "def:depth-classes",
+        "lem:max-arity-restriction",
+        "lem:two-layer-template",
+        "lem:claim-four",
+        "thm:support-polytope-correspondence"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1356
+    },
+    {
+      "actual_start_s": 1616.255641,
+      "duration_s": 230.744359,
+      "labels": [
+        "lem:claim-five-p-membership"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 1388
+    },
+    {
+      "actual_start_s": 1857.540717,
+      "duration_s": 7.459283,
+      "labels": [
+        "lem:t-space-depth-transfer"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1405
+    },
+    {
+      "actual_start_s": 1858.053712,
+      "duration_s": 7.946288,
+      "labels": [
+        "lem:claim-five-p-membership"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1408
+    },
+    {
+      "actual_start_s": 1857.563342,
+      "duration_s": 17.436658,
+      "labels": [
+        "lem:claim-five-q-membership"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 1424
+    },
+    {
+      "actual_start_s": 1881.991238,
+      "duration_s": 7.008762,
+      "labels": [
+        "lem:claim-five-q-membership"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1431
+    },
+    {
+      "actual_start_s": 1871.939495,
+      "duration_s": 24.060505,
+      "labels": [
+        "lem:claim-seven",
+        "def:depth-classes"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 1434
+    },
+    {
+      "actual_start_s": 1890.058063,
+      "duration_s": 17.941937,
+      "labels": [
+        "thm:polytope-triangulation"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1451
+    },
+    {
+      "actual_start_s": 1903.616391,
+      "duration_s": 7.383609,
+      "labels": [
+        "lem:claim-seven",
+        "def:depth-classes",
+        "lem:max-arity-restriction",
+        "lem:two-layer-template",
+        "lem:claim-four",
+        "thm:support-polytope-correspondence"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1453
+    },
+    {
+      "actual_start_s": 1907.161114,
+      "duration_s": 16.838886,
+      "labels": [
+        "lem:rhombic-cells-class-two"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1455
+    },
+    {
+      "actual_start_s": 1939.530621,
+      "duration_s": 18.469379,
+      "labels": [
+        "lem:t-space-depth-transfer",
+        "lem:claim-five-p-membership",
+        "lem:claim-five-q-membership",
+        "lem:claim-seven",
+        "def:depth-classes",
+        "lem:max-arity-restriction",
+        "lem:two-layer-template",
+        "lem:claim-four",
+        "thm:support-polytope-correspondence",
+        "thm:polytope-triangulation",
+        "lem:rhombic-cells-class-two"
+      ],
+      "purpose": "statement_audit",
+      "resource": "model",
+      "source_seq": 1457
+    },
+    {
+      "actual_start_s": 1958.570925,
+      "duration_s": 17.429075,
+      "labels": [
+        "cor:tetrahedron-subdivision"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1484
+    },
+    {
+      "actual_start_s": 1959.047821,
+      "duration_s": 17.952179,
+      "labels": [
+        "thm:polytope-triangulation"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 1496
+    },
+    {
+      "actual_start_s": 1958.323441,
+      "duration_s": 50.676559,
+      "labels": [
+        "lem:claim-five",
+        "prop:binary-tree-max-bound",
+        "lem:p-terms-depth-two",
+        "lem:q-depth-two",
+        "lem:r-terms-depth-two",
+        "def:newton-polytope"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1505
+    },
+    {
+      "actual_start_s": 2021.315197,
+      "duration_s": 6.684803,
+      "labels": [
+        "lem:claim-five",
+        "prop:binary-tree-max-bound",
+        "lem:p-terms-depth-two",
+        "lem:q-depth-two",
+        "lem:r-terms-depth-two",
+        "def:newton-polytope"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1541
+    },
+    {
+      "actual_start_s": 2040.409595,
+      "duration_s": 16.590405,
+      "labels": [
+        "thm:polytope-triangulation"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1546
+    },
+    {
+      "actual_start_s": 2040.136993,
+      "duration_s": 24.863007,
+      "labels": [
+        "cor:tetrahedron-subdivision"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 1548
+    },
+    {
+      "actual_start_s": 2080.999767,
+      "duration_s": 16.000233,
+      "labels": [
+        "cor:tetrahedron-subdivision"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 1555
+    },
+    {
+      "actual_start_s": 2112.739056,
+      "duration_s": 32.260944,
+      "labels": [
+        "cor:tetrahedron-subdivision"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 1562
+    },
+    {
+      "actual_start_s": 2162.572632,
+      "duration_s": 16.427368,
+      "labels": [
+        "cor:tetrahedron-subdivision"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1569
+    },
+    {
+      "actual_start_s": 2195.343948,
+      "duration_s": 14.656052,
+      "labels": [
+        "lem:claim-five",
+        "prop:binary-tree-max-bound",
+        "lem:p-terms-depth-two",
+        "lem:q-depth-two",
+        "lem:r-terms-depth-two",
+        "def:newton-polytope",
+        "thm:polytope-triangulation",
+        "cor:tetrahedron-subdivision"
+      ],
+      "purpose": "statement_audit",
+      "resource": "model",
+      "source_seq": 1571
+    },
+    {
+      "actual_start_s": 2209.558498,
+      "duration_s": 16.441502,
+      "labels": [
+        "constr:delta-four-cells"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1581
+    },
+    {
+      "actual_start_s": 2209.524078,
+      "duration_s": 20.475922,
+      "labels": [
+        "cor:geometric-signed-simplex"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1589
+    },
+    {
+      "actual_start_s": 2210.116362,
+      "duration_s": 20.883638,
+      "labels": [
+        "lem:claim-five-iterated",
+        "thm:previous-cpwl-bound",
+        "lem:max-five-upper-bound",
+        "lem:max-newton-simplex"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1601
+    },
+    {
+      "actual_start_s": 2226.904314,
+      "duration_s": 7.095686,
+      "labels": [
+        "constr:delta-four-cells"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 1615
+    },
+    {
+      "actual_start_s": 2230.956711,
+      "duration_s": 11.043289,
+      "labels": [
+        "lem:max-newton-simplex"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 1623
+    },
+    {
+      "actual_start_s": 2230.715613,
+      "duration_s": 22.284387,
+      "labels": [
+        "prop:geometric-three-to-one"
+      ],
+      "purpose": "phase1_statement_generation",
+      "resource": "model",
+      "source_seq": 1637
+    },
+    {
+      "actual_start_s": 2280.883998,
+      "duration_s": 18.116002,
+      "labels": [
+        "lem:claim-five-iterated",
+        "thm:previous-cpwl-bound",
+        "lem:max-five-upper-bound",
+        "lem:max-newton-simplex"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1657
+    },
+    {
+      "actual_start_s": 2280.887673,
+      "duration_s": 18.112327,
+      "labels": [
+        "cor:geometric-signed-simplex"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1660
+    },
+    {
+      "actual_start_s": 2280.636796,
+      "duration_s": 27.363204,
+      "labels": [
+        "constr:delta-four-cells"
+      ],
+      "purpose": "skeleton_declaration_patch",
+      "resource": "model",
+      "source_seq": 1662
+    },
+    {
+      "actual_start_s": 2314.446234,
+      "duration_s": 16.553766,
+      "labels": [
+        "prop:geometric-three-to-one"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1669
+    },
+    {
+      "actual_start_s": 2324.496074,
+      "duration_s": 16.503926,
+      "labels": [
+        "constr:delta-four-cells"
+      ],
+      "purpose": "lean_object_compilation",
+      "resource": "lean",
+      "source_seq": 1671
+    },
+    {
+      "actual_start_s": 2357.058857,
+      "duration_s": 21.941143,
+      "labels": [
+        "lem:claim-five-iterated",
+        "thm:previous-cpwl-bound",
+        "lem:max-five-upper-bound",
+        "lem:max-newton-simplex",
+        "cor:geometric-signed-simplex",
+        "constr:delta-four-cells",
+        "prop:geometric-three-to-one"
+      ],
+      "purpose": "statement_audit",
+      "resource": "model",
+      "source_seq": 1673
+    }
+  ],
+  "workers": {
+    "lean": 3,
+    "model": 3
+  }
+}

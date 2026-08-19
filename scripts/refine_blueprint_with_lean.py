@@ -188,6 +188,7 @@ class LeanAttempt:
     reason: str = ""
     kind: str = "lean"
     rejected_labels: set[str] | None = None
+    duration_s: float = 0.0
 
     @property
     def output(self) -> str:
@@ -1850,6 +1851,15 @@ STATEMENT-PHASE CONVENTIONS (this audit runs BEFORE any proofs are written):
   its completed body receives a separate semantic audit in Phase 2. Structure
   fields and inductive constructors are part of the interface and must already
   be complete here.
+- A proposition-valued predicate such as
+  `def p (x : X) : Prop := sorry` already has a complete Phase-1 public
+  interface. The formula defining when `p x` holds belongs in the deferred
+  body; NEVER move that formula into the result type merely to expose it in
+  Phase 1. Reject such a declaration only for a concrete public-interface
+  defect: a missing or wrongly typed parameter, a wrong result type, or a
+  separately named public helper that another blueprint statement must
+  reference. Internal predicates or clauses that can be implemented inside
+  the body are Phase-2 obligations, not missing Phase-1 helpers.
 - The blueprint is the source of truth. The design-plan contract is an
   untrusted intermediate artifact used to decide which artifact needs
   correction; never weaken the blueprint to agree with the plan.
@@ -1922,6 +1932,12 @@ If anything should block publication, return:
       "failure_origin": "lean" | "plan" | "both",
       "missing_plan_requirements": [
         "exact blueprint obligation absent from the current design plan"
+      ],
+      "interface_defects": [
+        "exact defect in the public parameters, result type, or required public helper"
+      ],
+      "deferred_body_obligations": [
+        "exact semantic clause that Phase 2 must implement in a deferred def/abbrev body"
       ]
     }}
   ]
@@ -1956,6 +1972,13 @@ For `plan` and `both`, `missing_plan_requirements` MUST be nonempty and quote
 the mathematical obligations visible in the blueprint but absent from the
 plan. Never infer a plan defect merely because another valid Lean encoding is
 possible. Outside the statement phase, use `lean` and an empty list.
+For every rejected deferred `def`/`abbrev`, `interface_defects` is mandatory
+and must be nonempty. It may contain only defects in the public declaration
+header or a genuinely required separately named public helper. If the header
+is adequate and only the eventual body is missing mathematical clauses, do not
+reject: return those clauses in `deferred_body_obligations` with severity
+`defer`, and keep the top-level result accepted. For non-deferred declarations,
+or when neither list applies, return empty lists for both fields.
 {decomposition_guidance}
 
 Reject examples:
@@ -2332,7 +2355,12 @@ def _run_lean(path: Path, lean_command: list[str]) -> LeanAttempt:
     )
 
 
-def _compile_module_olean(path: Path, lean_command: list[str]) -> LeanAttempt:
+def _compile_module_olean(
+    path: Path,
+    lean_command: list[str],
+    *,
+    timeout: int = 600,
+) -> LeanAttempt:
     """Compile an accepted generated module to the Lake import-search directory.
 
     Generated modules live under ``AutoBlueprint/...`` and later sections import
@@ -2346,6 +2374,13 @@ def _compile_module_olean(path: Path, lean_command: list[str]) -> LeanAttempt:
     build_olean_path.parent.mkdir(parents=True, exist_ok=True)
     sibling_olean_path = path.with_suffix(".olean")
     command = lean_command + ["-o", str(build_olean_path), str(path)]
+    # A failed rebuild must not leave an older object looking current.  The
+    # caller records successful compilation fingerprints only after this
+    # function returns ``ok``.
+    for artifact in (build_olean_path, sibling_olean_path):
+        with contextlib.suppress(OSError):
+            artifact.unlink(missing_ok=True)
+    started = time.monotonic()
     try:
         proc = subprocess.Popen(
             command,
@@ -2356,29 +2391,37 @@ def _compile_module_olean(path: Path, lean_command: list[str]) -> LeanAttempt:
             text=True,
             start_new_session=True,
         )
-        stdout, stderr = proc.communicate(timeout=600)
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         stdout, stderr = proc.communicate()
+        for artifact in (build_olean_path, sibling_olean_path):
+            with contextlib.suppress(OSError):
+                artifact.unlink(missing_ok=True)
         return LeanAttempt(
             ok=False,
             command=command,
             stdout=stdout or "",
             stderr=stderr or "",
-            reason="Lean module object compilation timed out after 600s.",
-            kind="lean-generation",
+            reason=f"Lean module object compilation timed out after {timeout}s.",
+            kind="object-timeout",
+            duration_s=time.monotonic() - started,
         )
     attempt = LeanAttempt(
         ok=proc.returncode == 0,
         command=command,
         stdout=stdout or "",
         stderr=stderr or "",
-        kind="lean-generation" if proc.returncode != 0 else "lean",
+        kind="object-compilation" if proc.returncode != 0 else "lean",
+        duration_s=time.monotonic() - started,
     )
     if not attempt.ok:
+        for artifact in (build_olean_path, sibling_olean_path):
+            with contextlib.suppress(OSError):
+                artifact.unlink(missing_ok=True)
         repaired_levels = _repair_unknown_universe_levels(path, attempt.output)
         if repaired_levels:
             print(
@@ -2387,7 +2430,7 @@ def _compile_module_olean(path: Path, lean_command: list[str]) -> LeanAttempt:
                 + "; retrying object compilation",
                 flush=True,
             )
-            return _compile_module_olean(path, lean_command)
+            return _compile_module_olean(path, lean_command, timeout=timeout)
     if attempt.ok and build_olean_path != sibling_olean_path:
         with contextlib.suppress(OSError):
             shutil.copy2(build_olean_path, sibling_olean_path)

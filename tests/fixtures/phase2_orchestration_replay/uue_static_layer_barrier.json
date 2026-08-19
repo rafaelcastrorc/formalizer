@@ -144,5 +144,55 @@
     ],
     "placeholder_refusal": "NEEDS-DECOMPOSITION: {\"label\":\"<node label>\",\"missing_helpers\":[\"<each needed helper statement>\"],\"reason\":\"<why>\"}",
     "forbidden_route": "unioned_phase2_frontier_blueprint_repair"
+  },
+  "transactional_repair_verification_regression": {
+    "source_run": "simplex/run-20260809-223432",
+    "observed_problem": "the scheduler applied every queued Phase 2 blueprint repair before generating and verifying the replacement Lean from the preceding repair; the unpublished draft expanded from 65 to 173 nodes while only 16 Phase 2 implementations completed",
+    "initial_node_count": 65,
+    "observed_node_count": 173,
+    "observed_repair_count": 54,
+    "observed_phase2_implementations": 16,
+    "queued_labels": [
+      "lem:first-independent-defect",
+      "lem:second-independent-defect",
+      "lem:third-independent-defect"
+    ],
+    "required_lifecycle": [
+      "activate_repair",
+      "edit_blueprint",
+      "audit_blueprint_boundary",
+      "generate_complete_lean",
+      "compile_and_align",
+      "acknowledge_repair",
+      "revalidate_queue"
+    ],
+    "blocked_stage": "verify",
+    "max_unverified_blueprint_repairs": 1,
+    "additional_model_calls_on_healthy_path": 0
+  },
+  "provisional_component_rollback_regression": {
+    "source_run": "simplex/run-20260813-131224",
+    "observed_problem": "Phase 2 verification requested another decomposition after the first blueprint edit, and the next repair extended the already-unverified draft instead of retrying the original component from its pre-edit graph; across continued runs the Phase-1 baseline of 75 labels expanded to 145 draft labels",
+    "phase1_baseline_node_count": 75,
+    "observed_draft_node_count": 145,
+    "original_root": "def:finite-indexed-minkowski-sum",
+    "original_evidence": "the finite indexed Minkowski-sum node needs a complete explicit blueprint decomposition",
+    "original_helpers": [
+      "finite indexed Minkowski sums of polytopes are polytopes"
+    ],
+    "provisional_helper_labels": [
+      "def:finite-choice-sum-set",
+      "lem:finite-choice-sum-set-polytope",
+      "lem:fin-two-choice-sum-set-equals-minkowski-join",
+      "lem:finite-indexed-minkowski-sum-explicit-replacement"
+    ],
+    "prior_followup_evidence": "an earlier rejected provisional component also omitted the finite-choice witness interface",
+    "followup_evidence": "the provisional replacement still lacks the exact binary-join bridge needed by its complete Lean declaration",
+    "followup_helpers": [
+      "the Fin 2 indexed sum agrees with the binary Minkowski join"
+    ],
+    "required_route": "restore_pre_edit_snapshot_then_retry_original_component",
+    "forbidden_route": "extend_unverified_provisional_helpers",
+    "additional_model_calls_on_healthy_path": 0
   }
 }

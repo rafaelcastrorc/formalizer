@@ -1,0 +1,83 @@
+{
+  "source_run": ".auto-blueprint/formalization/simplex/run-20260813-030629.log",
+  "source_blueprint": "simplex",
+  "observed_repairs": {
+    "first_repeated_repair": 60,
+    "last_repeated_repair_in_snapshot": 98,
+    "repeated_scope_rollbacks": 39,
+    "blocked_labels": [
+      "lem:m-function-pointwise-public-signed-half-sum",
+      "lem:m-function-satisfies-public-pointwise-specification"
+    ]
+  },
+  "nodes": {
+    "def:m-function": [],
+    "lem:m-function-eq-public-signed-affine-readout": [
+      "def:m-function"
+    ],
+    "lem:m-function-satisfies-public-pointwise-specification": [
+      "lem:m-function-eq-public-signed-affine-readout"
+    ],
+    "lem:m-function-pointwise-public-signed-half-sum": [
+      "def:m-function",
+      "lem:m-function-satisfies-public-pointwise-specification"
+    ]
+  },
+  "generated_module": "def def_m_function : Nat := sorry\n\ntheorem lem_m_function_eq_public_signed_affine_readout : def_m_function = 1 := by sorry\n\ntheorem lem_m_function_satisfies_public_pointwise_specification : True := by sorry\n\ntheorem lem_m_function_pointwise_public_signed_half_sum : True := by sorry\n",
+  "failure": {
+    "label": "lem:m-function-satisfies-public-pointwise-specification",
+    "missing_helpers": [
+      "a pointwise realization of the public signed affine readout"
+    ],
+    "evidence": "The proof is blocked because `def:m-function` / `def_m_function` is still an opaque, incomplete definition body and cannot be unfolded to the signed-half-sum formula."
+  },
+  "expected": {
+    "route": "phase2_definition_prerequisite",
+    "prerequisite_labels": [
+      "def:m-function"
+    ],
+    "blueprint_edited": false,
+    "repair_trial_consumed": false,
+    "resume_order_after_prerequisite": "top-down"
+  },
+  "invalidated_provider_case": {
+    "source_run": ".auto-blueprint/formalization/simplex/run-20260813-125126.log",
+    "nodes": {
+      "def:p1": [],
+      "def:m-public-signed-affine-readout": [
+        "def:p1"
+      ],
+      "def:m-function": [
+        "def:m-public-signed-affine-readout"
+      ],
+      "lem:m-function-pointwise-public-signed-half-sum": [
+        "def:m-function"
+      ],
+      "lem:unrelated-invalidated-node": []
+    },
+    "frozen_labels": [
+      "def:p1",
+      "lem:m-function-pointwise-public-signed-half-sum"
+    ],
+    "generated_module": "def def_p1 : Nat := 1\n\ntheorem lem_m_function_pointwise_public_signed_half_sum : True := by sorry\n",
+    "pending_declaration_work": [
+      "def:m-public-signed-affine-readout",
+      "def:m-function",
+      "lem:unrelated-invalidated-node"
+    ],
+    "failure": {
+      "label": "lem:m-function-pointwise-public-signed-half-sum",
+      "evidence": "The frozen Lean provider def:m-function / def_m_function is opaque or incomplete and does not expose the public signed affine readout equation."
+    },
+    "expected": {
+      "route": "phase2_invalidated_definition_prerequisite",
+      "prerequisite_labels": [
+        "def:m-public-signed-affine-readout",
+        "def:m-function"
+      ],
+      "unrelated_work_deferred": true,
+      "blueprint_edited": false,
+      "repair_trial_consumed": false
+    }
+  }
+}

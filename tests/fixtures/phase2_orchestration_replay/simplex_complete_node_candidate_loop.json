@@ -1,0 +1,85 @@
+{
+  "source_run": ".auto-blueprint/telemetry/runs/20260810-025600-bfe3d503.jsonl",
+  "source_blueprint": "simplex",
+  "label": "lem:changed",
+  "exact_lean_failure": "Lean rejected delivered statements:\nerror: type mismatch in the complete proof body",
+  "observed": {
+    "phase2_whole_node_model_calls": 164,
+    "phase2_whole_node_model_seconds": 38387.2,
+    "timed_out_calls": 45,
+    "exhausted_transactions": 57,
+    "committed_transactions": 20,
+    "dominant_nodes": {
+      "lem:relu-block-flattened-final-map-at-casted-input": {
+        "calls": 46,
+        "model_seconds": 13877.0
+      },
+      "def:relu-block-final-affine-layer-raw": {
+        "calls": 37,
+        "model_seconds": 12714.8
+      },
+      "lem:relu-block-casted-flattened-final-width-transport": {
+        "calls": 9,
+        "model_seconds": 2229.8
+      }
+    },
+    "resumed_success_average_seconds": 221.9,
+    "fresh_success_average_seconds": 71.7
+  },
+  "required_behavior": {
+    "retain_rejected_complete_candidate": true,
+    "correct_candidate_before_full_regeneration": true,
+    "correction_is_fresh_session": true,
+    "correction_timeout_cap_seconds": 300,
+    "rerun_all_acceptance_gates": true,
+    "phase1_patch_prompt_forbidden": true
+  },
+  "deterministic_latency_benchmark": {
+    "label": "def:relu-component-hidden-activations",
+    "required_gates": [
+      "deterministic_coverage",
+      "lean_compile",
+      "statement_alignment",
+      "object_integration"
+    ],
+    "legacy_observed_trace": [
+      {"action": "full_generation", "duration_s": 89.96991520799929, "outcome": "deterministic_rejected"},
+      {"action": "full_generation", "duration_s": 88.37132945899793, "outcome": "lean_rejected"},
+      {"action": "full_generation", "duration_s": 70.07815566699719, "outcome": "lean_rejected"},
+      {"action": "full_generation", "duration_s": 29.50558749999618, "outcome": "lean_rejected"},
+      {"action": "full_generation", "duration_s": 67.84186950000003, "outcome": "lean_rejected"},
+      {"action": "full_generation", "duration_s": 68.2496763329982, "outcome": "lean_rejected"},
+      {
+        "action": "full_generation",
+        "duration_s": 29.085260584004573,
+        "outcome": "accepted",
+        "gates": [
+          "deterministic_coverage",
+          "lean_compile",
+          "statement_alignment",
+          "object_integration"
+        ]
+      }
+    ],
+    "retained_candidate_counterfactual": [
+      {"action": "full_generation", "duration_s": 89.96991520799929, "outcome": "deterministic_rejected"},
+      {
+        "action": "targeted_correction",
+        "duration_s": 71.7,
+        "outcome": "accepted",
+        "duration_basis": "observed fresh successful Phase 2 call average",
+        "gates": [
+          "deterministic_coverage",
+          "lean_compile",
+          "statement_alignment",
+          "object_integration"
+        ]
+      }
+    ],
+    "timeout_limits_s": {
+      "legacy_full_generation": 600,
+      "retained_candidate_correction": 300
+    },
+    "scope": "Legacy durations and outcomes are observed. The successful targeted correction is a deterministic counterfactual using the observed fresh-success average; this proves scheduler savings under that outcome, not future model wall-clock speed."
+  }
+}

@@ -1,5 +1,706 @@
 # Latest Changes
 
+## 2026-08-17: Candidate-Owned Audit Defects Switch to Blueprint-Direct Generation
+
+### Confirmed failure
+
+Real-model validation found a Phase 1 case where generated Lean compiled but
+the statement-alignment audit rejected the candidate-owned contract itself. The
+`def:relu-network` example stored arbitrary functions instead of the affine
+layer/composition semantics required by the blueprint. The old route treated
+that as ordinary Lean-generation failure, so the next call could keep trying to
+repair Lean against the same rejected local contract.
+
+### Correction
+
+- If a semantic audit rejects a declaration whose plan entry originated from a
+  Phase 1 candidate (`origin == phase1_candidate`) and the audit names concrete
+  missing blueprint requirements, the node no longer retries under that stale
+  candidate-owned plan.
+- The node switches to the existing blueprint-direct generation lifecycle with
+  the exact audit evidence attached.
+- Dependency-edge findings still use the deterministic dependency-repair path;
+  accepted audit verdicts still freeze normally.
+
+### Regression
+
+Added focused regressions for both integrated-audit and semantic-first routing.
+Real-model spot checks covered an accepted case, a dependency-edge case, and the
+candidate-owned `def:relu-network` defect. Full unit tests and Phase 1
+historical replays pass.
+
+## 2026-08-17: Invalidate Downstream Plans Only After Interface Fingerprint Changes
+
+### Confirmed failure
+
+Switching a child node to blueprint-direct generation safely abandoned the
+child's bad local plan, but downstream plans could still have been written
+against that child's old public surface. An immediate downstream invalidation
+would be safe but too aggressive: if the regenerated child exposed the same
+interface, it would force unnecessary model calls.
+
+### Correction
+
+- Blueprint-direct activation records the child node's previous public
+  interface fingerprint.
+- The run persists that fingerprint through `--continue`.
+- When the child contract later freezes, the accepted public interface
+  fingerprint is computed from the frozen typed contract surface.
+- Downstream cached plans, alternates, candidates, and retry state are cleared
+  only if the accepted interface fingerprint differs from the previous one.
+- If the public interface is unchanged, upstream cached work remains reusable.
+
+### Regression
+
+Added a regression proving that activation alone does not clear an upstream
+plan, freezing with the same interface still preserves it, and freezing with a
+changed interface invalidates only the downstream stale state. Full unit tests,
+Phase 1 historical replays, scheduler latency replay, and `git diff --check`
+pass.
+
+## 2026-08-17: Route Missing Named Object Audit Failures to Decomposition
+
+### Confirmed failure
+
+The Simplex telemetry showed `lem:claim-five-r-membership` repeatedly failing
+Phase 1 statement alignment because the generated declaration did not expose
+the four concrete lifted `R13`, `R14`, `R23`, and `R24` terms and their
+half-sum formulas. The critic evidence identified missing concrete mathematical
+objects, but the router treated the finding as ordinary Lean-generation failure,
+which allowed repeated statement retries and eventual long model-call timeouts.
+
+### Correction
+
+- Statement-audit routing now recognizes reject evidence that explicitly says a
+  declaration is missing concrete, named, lifted, bundled, displayed, or
+  explicit mathematical objects, terms, formulas, operations, relations, or
+  interfaces.
+- Only that narrow evidence class is rerouted to the existing blueprint
+  decomposition path; generic representation complaints and ordinary Lean
+  translation failures still remain Lean-generation issues.
+- The change adds no model call. It changes the destination of an already
+  required audit verdict so the existing scoped decomposition transaction can
+  create the missing helper nodes instead of retrying the same under-exposed
+  statement.
+
+### Regression
+
+Added a focused regression for the historical lifted-`R13`/`R14`/`R23`/`R24`
+shape and kept the existing guard that representation-style audit complaints do
+not authorize blueprint repair. Full unit tests and Phase 1 historical replays
+pass.
+
+## 2026-08-15: Keep Deferred Predicate Bodies Out of Phase 1 Contracts
+
+The Simplex refinement generated a correct predicate header for
+`def:common-face`, but the statement critic rejected it because its terminal
+`sorry` did not yet implement the exposed-face and intersection clauses. A
+subsequent Phase-1 correction moved those body semantics into the result type,
+turning a predicate into a proposition asserted for every input.
+
+- The shared statement-audit schema now distinguishes concrete public-interface
+  defects from deferred body obligations.
+- For a typed Phase-1 `def`/`abbrev` ending in `sorry`, body-only findings are
+  carried as Phase-2 obligations and cannot trigger statement regeneration.
+- Missing or wrongly typed parameters, wrong result types, and genuinely
+  required public helpers still reject the Phase-1 contract.
+- Added regressions for the exact deferred `common-face` predicate and for a
+  malformed version that omits its public `F` parameter.
+
+This changes no persisted-state migration policy. A run containing the earlier
+reshaped contract must be restarted fresh; future fresh runs preserve the
+correct predicate skeleton and audit its completed body in Phase 2.
+
+## 2026-08-15: Centralize Phase 1 Generation-Epoch Transitions
+
+### Problem
+
+Plan correction, retained-alternate activation, closure repair, plan
+invalidation, and blueprint-direct activation all change the contract under
+which Phase 1 code is generated. These branches previously duplicated parts of
+the required cleanup. One branch could clear the retry lifecycle but leave a
+candidate, while another could prune candidates but retain an obsolete local
+partition or exchange ledger. The stale-candidate bug below was one concrete
+result of that split ownership.
+
+### Correction
+
+- One atomic transition now owns every scheduler store tied to the replaced
+  Phase 1 generation epoch: candidate code, Phase 1 retry provenance, exact
+  exchange history, quarantine, and local group partitions.
+- The transition is a coordinator, not a second cleanup implementation. It
+  composes the existing candidate, retry, quarantine, and partition primitives;
+  only exchange-history clearing needed a new store-specific primitive.
+- Semantic-plan revision now defers its transition until the full retained
+  shared-candidate component is known, so that path crosses the epoch exactly
+  once instead of first resetting the target and then resetting the component.
+- Every live plan replacement, plan deletion, and strategy switch calls that
+  transition at the mutation boundary. Downstream callers no longer repeat
+  their own `_clear_retry_lifecycle`/candidate-pruning pairs.
+- Shared-helper candidate components are removed atomically when any member's
+  plan changes. Unaffected nodes keep their independent retry tier.
+- Exact compiler and critic feedback is intentionally preserved. The one path
+  that revises a semantically rejected contract captures the old compiling
+  declaration before the transition and restores it afterwards only as an
+  explicitly rejected correction seed.
+- Parallel closure evaluation is non-committing. It changes only its isolated
+  plan copy; the live transition happens once, after the accepted component is
+  merged.
+
+### Regression
+
+The routing suite now verifies the transition across all owned scheduler
+stores, including shared-helper candidate removal, while proving that Phase 2
+retry state and exact Phase 1 feedback remain intact.
+
+## 2026-08-15: Keep Phase 1 Candidates in Their Producing Strategy Epoch
+
+### Confirmed failure
+
+Simplex `run-20260815-013516` exhausted three compiler corrections for
+`def:paper-claim-seven-block` and activated blueprint-direct generation at
+`+1360s`. At `+1403s`, however, the next transaction launched no statement
+generation call: the failed ordinary-plan candidate had been saved again as a
+reusable candidate after the strategy changed. The pipeline then spent three
+more compiler-correction calls on the same stale declaration before routing to
+decomposition at `+1569s`.
+
+### Correction
+
+- Every in-memory Phase 1 candidate now carries the exact plan/strategy
+  fingerprint under which its declarations were generated.
+- Candidate persistence rejects code when that producing fingerprint differs
+  from the current contract or blueprint-direct strategy. The code remains
+  failure evidence, but cannot be relabelled as fresh output from a strategy
+  that never generated it.
+- The same epoch boundary now applies to the interface-usability route: its
+  failed declaration is recorded before plan revision and is then pruned by
+  the centralized transition. If correction is unavailable and the plan is
+  invalidated, the same transition starts fresh scoped planning. Old code
+  cannot be saved under either replacement.
+- This does not reduce the documented three-sample stochastic allowance. A
+  genuinely fresh blueprint-direct candidate retains its normal correction
+  lifecycle; only the duplicate lifecycle over stale code is removed.
+
+### Regression
+
+The committed `blueprint_direct_candidate_epoch.json` fixture preserves the
+observed transition and verifies that an ordinary-plan candidate cannot cross
+the blueprint-direct epoch boundary as reusable code.
+
+## 2026-08-15: Isolate Circuit-Breaker Evidence by Blueprint Node
+
+### Confirmed failure
+
+Simplex `run-20260814-235036` initially froze contracts quickly, then spent its
+tail repeatedly regenerating the same declarations. The persisted scheduler
+state showed that `def:reported-best-wang-sun-upper-bound` had retained audit
+findings owned by `def:paper-max-construction` and
+`remark:open-depth-questions`. Because blueprint-direct evidence participates
+in the candidate plan fingerprint, every unrelated sibling finding made the
+unchanged Wang-Sun candidate look stale and restarted its correction work.
+
+### Correction
+
+- The shared blueprint-direct circuit breaker now accepts declaration-owned
+  evidence and stores only the slice belonging to each activated node.
+- Compiler, semantic-audit, and deterministic-precompile exhaustion all pass
+  their existing structured per-node evidence through the shared router.
+- Genuinely shared operational findings, such as a planner omitting several
+  requested contracts, must opt in explicitly to shared evidence. An
+  unattributed multi-node diagnostic is no longer copied into every node.
+- Continuation deterministically migrates already-saved circuit-breaker state:
+  structured sibling findings are removed before evidence is fingerprinted,
+  while unmarked singleton/shared operational evidence remains intact.
+- Candidate fingerprinting remains strict: a node's own changed evidence still
+  invalidates its candidate, while a sibling's evidence cannot do so. This
+  changes no model-call budget, dependency order, or acceptance gate.
+
+### Regression
+
+The committed `blueprint_direct_sibling_evidence.json` fixture reproduces the
+real statement fingerprints and mixed rejection shape from the run. Its test
+proves that changing only the paper-construction finding changes only that
+node's fingerprint; the unchanged Wang-Sun node retains its evidence,
+fingerprint, and candidate eligibility.
+
+## 2026-08-14: Persist Phase 1 Sampling and Stream Candidate Typechecking
+
+### Confirmed latency
+
+Historical Phase 1 telemetry showed two general orchestration costs unrelated
+to mathematical difficulty. First, the three compiler-correction samples
+allowed inside one transaction reset after an outer retry. Across the committed
+corpus, persisting that allowance at three suppresses 27 repeated calls and
+594.5 model-seconds without losing any recorded first-compiling outcome; caps
+of one or two do lose successful historical samples. Second, completed
+generation workers waited behind slower sibling model calls before any Lean
+typechecking began. The committed trace includes a 477-second idle interval for
+work whose subsequent typecheck took 46 seconds.
+
+The latest Simplex run also spent roughly 7,200 model-seconds across 190 Phase 1
+calls before proof work: 65 declaration patches, 59 statement generations, 39
+statement audits, 11 plan calls, and 10 blueprint repairs. These measurements
+show that repeated correction and serialized orchestration, not one unusually
+slow node, dominated the run.
+
+### Implemented correction
+
+- The exact Phase 1 exchange key now includes statement and plan fingerprints,
+  candidate input, runner/model, tier, purpose, and prompt hash.
+- Its three-sample allowance persists across inner corrections, outer retries,
+  process restart, and `--continue`. Exhaustion launches no model and returns
+  the retained evidence to the existing failure router. A changed statement,
+  plan, candidate, model, tier, or prompt creates a new eligible epoch.
+- Each dependency-independent worker now performs generation, deterministic
+  checks, and Lean typechecking as one streamed transaction. A completed worker
+  starts typechecking while slower siblings remain in generation.
+- Every typechecked candidate still waits for the same one batched statement
+  audit. Object generation, import integration, partial-sibling preservation,
+  dependency order, and every blueprint/Lean acceptance rule are unchanged.
+
+### Related correctness fix
+
+The post-repair boundary now compares repaired TeX with an immutable pre-edit
+statement snapshot. `Node` objects contain source locations rather than frozen
+text, so rereading a pre-repair `Node` after the edit previously compared the
+new file with itself. An existing-node statement edit could therefore miss the
+early boundary audit and spend another generation/compile/audit cycle before
+the mandatory final audit caught it.
+
+### Verification
+
+- Added an executable synchronization regression that blocks one generation
+  worker and proves a fast sibling enters typechecking before the blocked worker
+  returns, while the final audit still runs exactly once after both settle.
+- Added persisted sampling regressions for the third allowed sample, blocked
+  fourth sample, model-key invalidation, state pruning, and immutable repair
+  snapshots.
+- All `295` Phase 1 routing tests and all `367` repository tests passed.
+- All committed Simplex planner replays passed `--require-progress`; the
+  dependency scheduler replay retained its existing timing and eligibility
+  results because this change does not weaken or reorder graph dependencies.
+
+## 2026-08-14: Snapshot Direct Phase 2 Repairs Before Blueprint Edits
+
+### Confirmed failure
+
+Simplex `run-20260814-043118` completed Phase 1 and accepted 13 Phase 2
+implementations before a legitimate decomposition request repaired
+`cor:geometric-signed-simplex`. The repair added a provisional five-node
+component. Verification then requested another decomposition for
+`lem:simplex-face-polytope`, but rollback crashed because the active repair had
+no pre-edit transaction snapshot.
+
+The transaction snapshot existed only on the orchestration path that consumed
+a repair at the beginning of a later queue iteration. A repair returned
+directly by the current parallel proof frontier was queued and activated in the
+same iteration, but that path skipped snapshot creation before mutating the
+draft.
+
+### Implemented correction
+
+- One transaction gate now performs repair activation, scheduler-state
+  persistence, and durable blueprint/Lean snapshot creation together.
+- Both queued repairs and repairs returned directly by proof outcomes use that
+  same gate. A Phase 2 blueprint repair without a persisted queue identity is
+  rejected before any mutation.
+- Nested decomposition during complete-node verification can therefore restore
+  the exact pre-edit draft and retry the original repair roots with the new
+  evidence, as documented. No Lean, semantic, or blueprint acceptance gate was
+  changed.
+
+### Regression
+
+- Added a committed fixture extracted from `run-20260814-043118` and a test
+  that routes the direct decomposition, creates the transaction, mutates the
+  draft provisionally, and verifies exact restoration of the baseline.
+- The focused snapshot/rollback tests passed, full discovery passed `366`
+  tests, every committed Simplex Phase 1 plan replay passed
+  `--require-progress`, and the Phase 2 latency replay retained its `2.741x`
+  deterministic result.
+
+## 2026-08-14: Defer Phase 1 Objects and Drain Independent Branches
+
+### Measured opportunity
+
+Two committed Phase 1 task traces were replayed without a model or Lean. The
+replay preserves recorded model/object durations, worker counts, and per-label
+causal order. Allowing graph-independent work to advance reduced the current
+trace from 3,320s to 3,011s (`1.103x`) and the earlier best trace from 2,379s to
+1,568s (`1.517x`). Even an optimistic zero-eligibility replay with all rejected
+object work removed reached only `2.083x` and `1.736x`, respectively. The
+change is therefore useful but is not represented as a complete 2x solution.
+
+### Implemented correction
+
+- Phase 1 still performs deterministic validation and ordinary Lean checking
+  before the statement-alignment audit.
+- `.olean` generation now occurs only for declarations accepted by that audit.
+  Accepted declarations still pass the same object-generation and integrated
+  import gates before they count as frozen.
+- A rejected sibling is removed before object generation. Accepted siblings
+  are extracted, rechecked, object-built, integrated, and retained exactly as
+  before.
+- When a Phase 1 failure blocks only one dependency closure, the scheduler
+  advances other already-ready graph branches before returning the failure to
+  the serialized repair loop. Blueprint edits remain serialized; generation
+  never races an edit to the unpublished draft.
+- Telemetry distinguishes typechecked candidates, post-audit object builds,
+  and the start/completion of independent-branch draining.
+
+### Regression
+
+- Added portable scheduler timing fixtures for the current and historical-best
+  Simplex traces plus a deterministic replay CLI.
+- Added tests proving that pre-audit compilation requests defer object builds,
+  semantic acceptance still requires object generation, rejected nodes never
+  reach the post-audit object set, and an independent child branch advances
+  before a local failure returns to repair.
+- Full discovery passed `365` tests. Every committed Simplex Phase 1 plan
+  replay passed `--require-progress`, the Phase 1 scheduler replay reproduced
+  the timing bounds above, the Phase 2 latency replay retained its `2.741x`
+  deterministic result, Python compilation passed, and `git diff --check`
+  passed.
+
+## 2026-08-14: Do Not Reject Blueprint-Owned Names as Placeholders
+
+### Confirmed failure
+
+Simplex `run-20260813-235136` repeatedly rejected the required declaration
+`remark_geometric_recursion_gap` as a placeholder because the generic helper
+name heuristic treats `_gap` as suspicious. The model could not repair that
+finding: one-to-one coverage requires the declaration to keep the canonical
+name derived from `remark:geometric-recursion-gap`. The run consequently made
+repeated generation and patch calls for an unchangeable deterministic finding.
+
+### Implemented correction
+
+- The placeholder-name heuristic now exempts only exact blueprint target names
+  supplied by the deterministic target table.
+- Plan-owned and invented helper names remain subject to the same placeholder
+  heuristic, including helpers containing `gap`, `stub`, `todo`, `sorry`, or
+  `trivial`.
+- No statement, dependency, Lean compilation, or semantic-alignment gate was
+  weakened.
+
+### Regression
+
+- Added a regression proving that the exact required target
+  `remark_geometric_recursion_gap` is accepted.
+- Added the inverse regression proving that a plan-owned helper named
+  `local_gap_helper` is still rejected.
+- The complete Phase 1 routing module passed (`289` tests).
+- Every committed Simplex Phase 1 plan replay passed `--require-progress`.
+- The deterministic Phase 2 latency replay passed its improvement and
+  equal-correctness-gate assertions.
+- Full discovery ran `357` tests; its only failures were the existing ten
+  historical-plan fixture mismatches caused by comparing 14-contract recorded
+  responses with the currently modified 107-target Simplex blueprint.
+
+## 2026-08-13: Make Phase 2 Blueprint Repairs Truly Atomic
+
+### Confirmed failure
+
+The Phase 2 queue prevented two independent repairs from editing the blueprint
+at the same time, but it did not provide rollback across the edit-and-verify
+boundary. A repair mutated the unpublished draft immediately. If complete Lean
+verification then requested another decomposition, the next repair extended
+that already-unverified draft. Across continued Simplex runs, the Phase-1
+baseline of 75 labels consequently reached 145 draft labels even though the
+later helper components had never all passed Lean and alignment together.
+
+This violated the documented meaning of a Phase 2 whole-node transaction. The
+one-to-one blueprint/Lean checks were still present; the scheduler was feeding
+them an accumulated provisional graph.
+
+### Implemented correction
+
+- Activating a Phase 2 blueprint repair now creates a durable pre-edit snapshot
+  of the unpublished blueprint, scheduler state, generated Lean sources, and
+  generated compiled objects before the model can write.
+- If verification of the staged changed/new nodes exposes another authorized
+  blueprint defect, the scheduler restores that exact snapshot. The rejected
+  provisional helper component disappears from both the blueprint and Lean.
+- The new diagnostic and helper requirements are merged into the original
+  repair request. The repair model must replace the original component from
+  the clean graph; it cannot incrementally extend rejected helper nodes.
+- The snapshot is removed only after every replacement blueprint node has a
+  complete compiled and alignment-audited Lean declaration. Successful repairs
+  incur no additional model call.
+- A process interrupted while the repair model is writing restores the pre-edit
+  snapshot before blueprint validation on continuation. Older active states
+  without snapshots establish one migration baseline to prevent any further
+  accumulation; they cannot reconstruct already-discarded historical state.
+
+### Regression
+
+The committed Phase 2 replay now records the observed 75-to-145 Simplex
+expansion and the `def:finite-indexed-minkowski-sum` provisional helper
+component. Tests verify exact restoration of the draft, generated Lean,
+compiled objects, and scheduler state, and verify that follow-up evidence
+returns edit authority to the original blueprint root rather than a discarded
+helper label.
+
+- Full repository suite: `353` tests passed.
+- Every committed Simplex Phase 1 plan replay passed `--require-progress`.
+- The Phase 2 retained-candidate latency replay passed its equal-gate and
+  deterministic-improvement assertions.
+- Python compilation and `git diff --check` passed.
+
+## 2026-08-13: Resume Invalidated Phase 2 Providers Without Blueprint Repair
+
+### Confirmed failure
+
+In Simplex `run-20260813-125126`, an extraordinary Phase 2 repair had
+legitimately invalidated generated declarations while preserving the repaired
+blueprint draft. On continuation, the saved audit evidence still identified
+`def:m-function` as the incomplete Lean provider. Because that declaration was
+now absent rather than present with a terminal `sorry`, the prerequisite route
+did not recognize it and repeatedly sent the consumer back to blueprint repair.
+
+The invalidation itself was expected. The bug was interpreting missing
+generated Lean after that invalidation as evidence that the already-repaired
+blueprint needed another edit.
+
+### Implemented correction
+
+- The existing Phase 2 provider detector now recognizes evidence-named
+  definition providers that are either deferred or absent after invalidation.
+- It schedules only the provider's missing, existing blueprint dependency
+  closure. It does not infer dependencies, reopen Phase 1, edit TeX, or consume
+  a blueprint-repair trial.
+- Pending declaration work prioritizes that local closure; the existing
+  complete-node Phase 2 executor rebuilds it dependency-first. Unrelated
+  invalidated nodes remain pending for normal scheduling.
+- The persisted post-repair boundary takes the same route, so `--continue`
+  escapes the stale blueprint-repair loop immediately.
+
+### Regression
+
+The committed Simplex orchestration fixture now includes the exact saved-state
+shape from `run-20260813-125126`: a frozen consumer, a missing two-definition
+provider closure, and unrelated invalidated work. The regression requires the
+public readout definition to run first, `def:m-function` second, and no
+blueprint edit or repair-trial consumption.
+
+## 2026-08-13: Route Opaque Definition Blockers Inside Phase 2
+
+### Confirmed failure
+
+In Simplex `run-20260813-030629`, Phase 2 repeatedly repaired the same two
+`m-function` helper lemmas from repair 60 through repair 98. The repair model
+kept trying to change `def:m-function`; the Phase 2 scope guard correctly
+rolled that provider edit back, but the scheduler then issued the same repair
+again. The generated `def_m_function` still had a terminal `sorry`, while the
+audit evidence explicitly said the consumer needed to unfold that definition.
+
+The blueprint was not the blocker. Top-down Phase 2 can assume lower theorem
+statements, but it cannot reduce an unimplemented definition body. Treating
+that condition as blueprint decomposition consumed 39 repeated repair calls
+without changing the relevant Lean state.
+
+### Implemented correction
+
+- Phase 2 now detects only evidence-named, still-deferred `def`/`abbrev`/
+  `instance` declarations in the blocked node's existing dependency closure.
+- Those declarations become persisted local implementation prerequisites and
+  run dependency-first before the blocked consumer is retried.
+- Normal Phase 2 order remains top-down everywhere else. The route does not
+  mutate TeX, infer a new dependency edge, reopen Phase 1, or consume a repair
+  trial.
+- The same conversion applies at the post-repair boundary, so `--continue`
+  states already caught in this loop escape without another blueprint edit.
+- Active Phase 2 repair transactions are acknowledged once all replacement
+  declarations have real bodies, preventing a completed prerequisite route
+  from leaving the repair queue permanently active.
+- Telemetry records the blocked labels, selected prerequisites, exact evidence,
+  normal order, override order, and the fact that no blueprint edit/trial was
+  consumed.
+
+### Regression
+
+The committed fixture
+`tests/fixtures/phase2_orchestration_replay/simplex_opaque_definition_prerequisite.json`
+captures the real `m-function` graph and rejection. Tests require the scheduler
+to select only `def:m-function`, leave the repair queue empty, preserve the
+blueprint, persist the override, and resume ordinary top-down scheduling after
+the body is complete.
+
+## 2026-08-13: Diagnose Public-Interface Object Timeouts Before Model Retry
+
+### Measured failure
+
+In Simplex `run-20260813-010635`, the same complete Phase 2 node reached
+`lean -o` repeatedly and consumed six 600-second object-build waits. Direct
+controls separated three costs:
+
+- imports-only objects completed in roughly 15-17 seconds;
+- ordinary Lean checking of the real declaration and of the same statement
+  with a `sorry` body completed in roughly 47-61 seconds;
+- object generation for both the real declaration and the statement-only
+  control exceeded 90-120 seconds, and the canonical path repeatedly exhausted
+  600 seconds.
+
+The proof body was therefore not the measured bottleneck. The expensive part
+was the public dependent interface itself: repeated casts, anonymous nested
+products, and long projection chains. The old pipeline labeled every object
+timeout as generic Lean generation and paid for another proof rewrite, which
+could not change that result.
+
+### Implemented correction
+
+- Fast-pipeline candidate object builds now use a 90-second usability budget;
+  legacy callers and final from-scratch integration retain their existing
+  longer budgets.
+- A timed-out complete Phase 2 candidate gets exactly one disposable
+  statement-only control compile. If it passes, correction preserves the
+  public interface byte-for-byte and simplifies only the body. If it also
+  times out, correction preserves the exact blueprint mathematics but may
+  replace the costly anonymous Lean representation with bounded named
+  same-node structures and fields.
+- A Phase 1 timeout is already a statement-only control because all bodies are
+  deferred. It revises or invalidates only the affected advisory interface-plan
+  entries and regenerates those exact contracts. It does not authorize a
+  blueprint edit.
+- Saved pre-change Phase 2 candidates whose 600-second timeout was recorded as
+  generic object compilation are diagnosed once on `--continue` before any
+  model call.
+- Failed object builds remove partial or stale `.olean` files, and telemetry
+  records the duration, phase, timeout, and deterministic classification.
+
+### Correctness boundary and regression
+
+The blueprint remains the mathematical source of truth. No timeout changes the
+blueprint, weakens a statement, skips an audit, or accepts a candidate. Every
+replacement still passes deterministic ownership/dependency checks, ordinary
+Lean checking, independent statement/body alignment, object generation, and
+integration.
+
+The committed fixture
+`tests/fixtures/phase2_orchestration_replay/simplex_object_interface_timeout.json`
+preserves the real timings and repeated-timeout exposure. Executable tests
+verify both diagnostic outcomes, the 90-second bound, retained mathematical
+source-of-truth instructions, and the historical interface-timeout route.
+
+- Full repository suite: `347` tests passed.
+- Phase 1 historical plan replay passed with `--require-progress`.
+- Phase 2 retained-candidate replay passed with the same four acceptance gates
+  and a `2.741x` deterministic logical-clock improvement.
+- Python compilation and `git diff --check` passed.
+
+## 2026-08-13: Retain and Correct Complete Phase 2 Candidates
+
+### Confirmed bottleneck
+
+Historical telemetry from Simplex run `20260810-025600-bfe3d503` records 164
+Phase 2 complete-node model calls consuming 38,387 model-seconds. Forty-five
+calls timed out, 57 complete-node transactions exhausted, and only 20
+transactions committed. Three nodes alone consumed 101 calls and roughly
+28,822 model-seconds. A rejected complete declaration was discarded, so an
+outer retry usually paid for another full generation instead of correcting the
+existing statement-and-body candidate.
+
+The telemetry also separates backend-session cost: successful resumed Phase 2
+calls averaged 221.9 seconds, while successful fresh calls averaged 71.7
+seconds. Thirty-three resumed calls reached the 600-second timeout. This
+evidence applies specifically to self-contained complete-node correction;
+Phase 1's anchored statement-patch sessions remain unchanged.
+
+### Implemented correction
+
+- A failed Phase 2 statement-and-body candidate is retained with its exact
+  deterministic, compiler, object-compilation, or alignment rejection.
+- The next model call receives that complete candidate, the complete blueprint
+  node and proof, frozen dependency interfaces, and only the current rejection.
+  It must return a corrected complete node. It cannot route through the Phase 1
+  patcher, which intentionally emits terminal `sorry` bodies.
+- `allow_patch=False` therefore remains deliberate at the shared freeze gate:
+  acceptance is still atomic over the whole statement and real body. The new
+  correction happens outside that gate and re-runs every gate afterward.
+- Complete-node corrections use fresh backend sessions and are capped at 300
+  seconds. The candidate is fingerprinted by its blueprint statement,
+  contract, and dependency context and survives bounded outer retries and
+  `--continue`. Exact no-progress corrections are not replayed.
+- Disposable candidate Lean checks are capped at 90 seconds; the final
+  assembled integration check retains its longer timeout. The broad
+  `import Mathlib` diagnostic retry now runs only for missing-name errors, not
+  for type mismatches, unfinished tactics, or heartbeat exhaustion.
+- Phase 1 declaration-local correction prompts now include only the affected
+  targets and their plan-owned structural declarations. The authoritative
+  dependency-contract table remains present, but unrelated declarations from
+  a large section are no longer repeated in the model prompt.
+
+### Correctness boundary
+
+Nothing is accepted from the retained candidate merely because it is cheaper
+to edit. Every corrected node still passes deterministic coverage, Lean,
+object compilation, statement alignment against the complete blueprint node,
+and ordinary integration. A blueprint or dependency-contract change
+invalidates the candidate automatically. Compiler failure alone still cannot
+authorize a blueprint edit, and Phase 2 never reopens Phase 1.
+
+### Regression coverage
+
+The committed replay fixture
+`tests/fixtures/phase2_orchestration_replay/simplex_complete_node_candidate_loop.json`
+preserves the measured call counts, time, timeout, and session data from the
+historical run. Executable regressions verify fresh-session correction,
+retained-candidate reuse across outer retries, the 300-second correction cap,
+complete-body atomic validation, candidate-state persistence, focused Phase 1
+patch prompts, and selective broad-import diagnosis.
+
+- Full repository suite: `339` tests passed.
+- Phase 1 orchestration, trajectory, and recorded-plan replay tests passed.
+- Every committed Simplex plan replay passed `--require-progress`.
+- The deterministic Phase 2 logical-clock benchmark reduces the committed
+  scenario from seven full generations and 443.102 observed model-seconds to
+  one generation plus one correction and 161.67 simulated model-seconds
+  (`2.741x`), while requiring the same four acceptance gates.
+- Python compilation and `git diff --check` passed.
+
+## 2026-08-10: Verify Each Phase 2 Repair Before Applying the Next
+
+### Confirmed failure
+
+In Simplex `run-20260809-223432`, independent repair scopes were correctly
+queued, but the scheduler acknowledged each scope immediately after editing the
+blueprint. It then drained the rest of the queue before generating replacement
+Lean. The unpublished draft grew from 65 to 173 nodes, consumed 54 repairs, and
+completed only 16 Phase 2 implementations. The queue therefore prevented one
+broad edit but still accumulated many unverified edits.
+
+### Implemented correction
+
+- Phase 2 now persists one active repair with explicit `repair` and `verify`
+  stages. A later queued blueprint edit cannot start while replacement Lean for
+  the active repair is pending.
+- A repair is acknowledged only after its changed/new nodes complete the
+  existing whole-node generation, deterministic checks, compilation, statement
+  alignment, and integration gates. Phase 1 is never reopened.
+- Queue entries include a deterministic fingerprint of the target statements
+  and their transitive statement/proof dependency environment. After a repair
+  verifies, diagnoses based on a changed environment are superseded instead of
+  being applied to stale graph state.
+- If verification discovers another genuine helper defect, it extends the
+  active transaction; independent sibling findings remain queued.
+- State schema 27 persists the active transaction and retained complete-node
+  correction candidates across interruption and
+  `--continue`.
+
+### Latency boundary and regression coverage
+
+The correction adds no model-call stage. Queue activation, context
+fingerprinting, staleness checks, and acknowledgment are deterministic; the
+existing repair, boundary-audit, complete-node generation, compilation, and
+alignment calls are merely ordered transactionally. The committed historical
+fixture records the 65-to-173 failure and tests that at most one unverified edit
+exists, stale dependency-context evidence is removed, active state survives
+save/resume even after its statement changes, and the scheduling transition
+invokes no model. The full repository suite passes (`333` tests), the complete
+committed Simplex planner replay passes with `--require-progress`, and
+`git diff --check` is clean.
+
 ## 2026-08-09: Stop Phase 2 Proof-Frontier Node Explosion
 
 ### Confirmed failure
@@ -2693,3 +3394,45 @@ rediscovering the same missing package interface. Phase 2 whole-node responses
 now route a valid decomposition diagnosis immediately to the authorized,
 bounded blueprint-repair transaction with the exact helper list. This does not
 change Phase 1's stricter policy for statement-only refusals.
+## 2026-08-14: Historical Phase 1 Replays Use Immutable Graph Snapshots
+
+**Problem.** The committed planner responses were recorded against a historical
+65-node Simplex graph (62 generated contracts), but the replay harness rebuilt
+the graph from the mutable working blueprint. After the working draft grew to
+107 generated targets, only 14 historical labels overlapped. Full test discovery
+therefore reported ten false failures by comparing 14 parsed contracts with 107
+live targets.
+
+**Change.** Each committed run is now bound through
+`tests/fixtures/phase1_plan_replay/manifest.json` to a content-addressed,
+committed graph snapshot. The replay reconstructs node order, statement/proof
+dependencies, Mathlib ownership, Lean mappings, and statement identities from
+that snapshot. Current-blueprint reconstruction remains available only for ad
+hoc local telemetry that has not been promoted to the fixture corpus.
+
+**Invariant.** A historical regression is evaluated against the exact graph it
+recorded, so editing a live blueprint cannot make a portable fixture pass or
+fail. Missing context or a context hash mismatch is a hard test error.
+
+## 2026-08-14: Bound Pre-Compilation Deterministic Retries
+
+**Problem.** In `simplex/run-20260813-235136`, the canonical target
+`remark_geometric_recursion_gap` matched the helper-name placeholder heuristic.
+That false deterministic rejection occurred before Lean compilation, where the
+request did not carry its producing model tier and therefore bypassed the
+persisted retry lifecycle. The same node restarted ordinary generation from
+repair 28 through at least repair 57 while Phase 1 remained at 118/119.
+
+**Change.** Canonical names required by blueprint labels are exempt from the
+helper-name placeholder heuristic; planned and model-invented helpers remain
+checked. Every non-plan-closure deterministic generation failure now carries
+its producing tier to the Phase-1 coordinator. The coordinator advances the
+same bounded lifecycle used by compiler and semantic failures: base,
+escalation, blueprint-direct generation, then scoped decomposition. Plan state
+is changed only by the coordinator after parallel workers settle.
+
+**Regression.** A committed replay records the exact Simplex label, statement
+fingerprint, rejection, and observed retry range. Tests cover the immediate
+canonical-name case, retain rejection for placeholder-like helper names, drive
+the failure through the real parallel coordinator, and verify the complete
+bounded lifecycle through terminal decomposition.

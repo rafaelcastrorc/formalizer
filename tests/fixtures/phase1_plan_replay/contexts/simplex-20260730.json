@@ -1,0 +1,1315 @@
+{
+  "blueprint": "simplex",
+  "nodes": [
+    {
+      "kind": "definition",
+      "label": "def:binary-max",
+      "lean_decl": "max",
+      "mathlibok": true,
+      "proof_uses": [],
+      "source_order": 0,
+      "statement_fp": "442fc6e6c4d72584c62899fbd8fabe6c12c4ebcf8f4aa5ab0a190e7766d2c059",
+      "statement_uses": [],
+      "uses": []
+    },
+    {
+      "kind": "definition",
+      "label": "def:affine-map",
+      "lean_decl": "AffineMap",
+      "mathlibok": true,
+      "proof_uses": [],
+      "source_order": 1,
+      "statement_fp": "edd2e492f1f0904d6e1bf32f0a4549b93e9109e2a857da3582c5284f8c2dd936",
+      "statement_uses": [],
+      "uses": []
+    },
+    {
+      "kind": "definition",
+      "label": "def:relu-function",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 2,
+      "statement_fp": "614ebf40159b1b917a5b2e1b798ebfd39b6627c3c6a6820ae431cee21a83dadd",
+      "statement_uses": [
+        "def:binary-max"
+      ],
+      "uses": [
+        "def:binary-max"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:relu-network",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 3,
+      "statement_fp": "07c4fd5c7e038b9e441e3e3d4784c1fd62636273801a91ed27911e997ced701a",
+      "statement_uses": [
+        "def:affine-map",
+        "def:relu-function"
+      ],
+      "uses": [
+        "def:affine-map",
+        "def:relu-function"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:cpwl",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 4,
+      "statement_fp": "8989b3f4c7d4ab5a6a918bb25a6244a9a15f6f21d0189cde461b8e10e0b1461f",
+      "statement_uses": [],
+      "uses": []
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:relu-network-cpwl",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:cpwl",
+        "def:relu-function",
+        "def:relu-network"
+      ],
+      "source_order": 5,
+      "statement_fp": "1e61f6adfcec100582d42e41afa29c756fb6c8f749200a6cd311c7ed1e8c287c",
+      "statement_uses": [
+        "def:cpwl",
+        "def:relu-network"
+      ],
+      "uses": [
+        "def:cpwl",
+        "def:relu-function",
+        "def:relu-network"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:cpwl-reluset",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 6,
+      "statement_fp": "cfbe8a9df1209bcb12016a64dd501757bd1e23406b3de751fb66415701093bf3",
+      "statement_uses": [
+        "def:cpwl",
+        "def:relu-network"
+      ],
+      "uses": [
+        "def:cpwl",
+        "def:relu-network"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:maxn",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 7,
+      "statement_fp": "105ebc429766a7d0c8bdf243785a61e3eec3bf8a47e16ac08272077aebbcb853",
+      "statement_uses": [
+        "def:binary-max"
+      ],
+      "uses": [
+        "def:binary-max"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:max2-one-hidden",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:maxn",
+        "def:relu-function"
+      ],
+      "source_order": 8,
+      "statement_fp": "9bea6534cc2ca1376dfbf685166bfa55043e7a6eaa0a715ae67d2af537eb653f",
+      "statement_uses": [
+        "def:maxn",
+        "def:relu-network"
+      ],
+      "uses": [
+        "def:maxn",
+        "def:relu-function",
+        "def:relu-network"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:binary-tree-max",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:maxn",
+        "lem:max2-one-hidden"
+      ],
+      "source_order": 9,
+      "statement_fp": "2256a2c218ec1f73cdc3736a5c55403a03622d4bcd4b1a1184cd7bd23d3e3611",
+      "statement_uses": [
+        "def:maxn",
+        "def:relu-network",
+        "lem:max2-one-hidden"
+      ],
+      "uses": [
+        "def:maxn",
+        "def:relu-network",
+        "lem:max2-one-hidden"
+      ]
+    },
+    {
+      "kind": "theorem",
+      "label": "thm:wang-sun-representation",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 10,
+      "statement_fp": "cd621f921b66154897234c64f5592837286a5bc9e959de3a3caf95da0b60c2cc",
+      "statement_uses": [
+        "def:affine-map",
+        "def:cpwl",
+        "def:maxn"
+      ],
+      "uses": [
+        "def:affine-map",
+        "def:cpwl",
+        "def:maxn"
+      ]
+    },
+    {
+      "kind": "corollary",
+      "label": "cor:classical-cpwl-bound",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:relu-network",
+        "lem:binary-tree-max",
+        "thm:wang-sun-representation"
+      ],
+      "source_order": 11,
+      "statement_fp": "764284ffcac2497d252696077e246e9bee5143eb0c188a8b403dc3ebb215264a",
+      "statement_uses": [
+        "def:cpwl-reluset",
+        "lem:binary-tree-max",
+        "thm:wang-sun-representation"
+      ],
+      "uses": [
+        "def:cpwl-reluset",
+        "def:relu-network",
+        "lem:binary-tree-max",
+        "thm:wang-sun-representation"
+      ]
+    },
+    {
+      "kind": "conjecture",
+      "label": "conj:hbdss-max-depth",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 12,
+      "statement_fp": "61fa0bd9ecb758d8135e1ea9a62893dec2ae4e6255a2a99c152bb6a9de39f4d1",
+      "statement_uses": [
+        "def:cpwl-reluset",
+        "def:maxn"
+      ],
+      "uses": [
+        "def:cpwl-reluset",
+        "def:maxn"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:max3-depth-lower-bound",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 13,
+      "statement_fp": "7054064c197fad49c7f22f1a36449872694d8e275801f76d402131be1bf95bb2",
+      "statement_uses": [
+        "def:maxn",
+        "def:relu-network"
+      ],
+      "uses": [
+        "def:maxn",
+        "def:relu-network"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:p1",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 14,
+      "statement_fp": "e1aebbc1608557dc30158c3670cd536091c97ca985eb4ba9c45fd74df39723e1",
+      "statement_uses": [
+        "def:maxn"
+      ],
+      "uses": [
+        "def:maxn"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:p2",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 15,
+      "statement_fp": "fb7b0009587c3c326210af0d017c4e99dc91704f7bb8574c58512280a1719a3d",
+      "statement_uses": [
+        "def:maxn"
+      ],
+      "uses": [
+        "def:maxn"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:p3",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 16,
+      "statement_fp": "01b966bc380e762562938ade34aba26e98c5a0d280ea71a103dae9286ed10d74",
+      "statement_uses": [
+        "def:maxn"
+      ],
+      "uses": [
+        "def:maxn"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:p4",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 17,
+      "statement_fp": "399d1eccd5ecfecfe7166c353d4fcb68e7d0d1d5a3f7d0e20343c3b9aa65463d",
+      "statement_uses": [
+        "def:maxn"
+      ],
+      "uses": [
+        "def:maxn"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:q",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 18,
+      "statement_fp": "ddcc40efff34328a3251395e72cdb2624c3e028915773c03c4ec18566c386bc6",
+      "statement_uses": [
+        "def:maxn"
+      ],
+      "uses": [
+        "def:maxn"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:r13",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 19,
+      "statement_fp": "11657ab7ea5cd1ab2e6fd8efcbda527e17da76eb4f1e16cce2e719c0acf6b28a",
+      "statement_uses": [
+        "def:maxn"
+      ],
+      "uses": [
+        "def:maxn"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:r14",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 20,
+      "statement_fp": "2712015e9290e85ea304e14d64c86b9e6cb3715aebb841d959c23451ada314e8",
+      "statement_uses": [
+        "def:maxn"
+      ],
+      "uses": [
+        "def:maxn"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:r23",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 21,
+      "statement_fp": "0d56de5076b81b3e155485cde5f95de927ce958d834fddc20579958bb13aedf1",
+      "statement_uses": [
+        "def:maxn"
+      ],
+      "uses": [
+        "def:maxn"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:r24",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 22,
+      "statement_fp": "d1a730ba905e7d3f57f6e2a1f47bc7aa2110f65db7093109401f26fc10f827f3",
+      "statement_uses": [
+        "def:maxn"
+      ],
+      "uses": [
+        "def:maxn"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:m-function",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 23,
+      "statement_fp": "f7865d129e4f0529444ed1d46b777601dd047f566324b363b7dbc69917c081ef",
+      "statement_uses": [
+        "def:p1",
+        "def:p2",
+        "def:p3",
+        "def:p4",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23",
+        "def:r24"
+      ],
+      "uses": [
+        "def:p1",
+        "def:p2",
+        "def:p3",
+        "def:p4",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23",
+        "def:r24"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:nine-terms-two-hidden",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:relu-network",
+        "lem:max2-one-hidden"
+      ],
+      "source_order": 24,
+      "statement_fp": "7d008be185bcc94a0699c978158d9c2d44133b3c3cf6f7de1d1ddc31db324f21",
+      "statement_uses": [
+        "def:p1",
+        "def:p2",
+        "def:p3",
+        "def:p4",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23",
+        "def:r24",
+        "lem:max2-one-hidden"
+      ],
+      "uses": [
+        "def:p1",
+        "def:p2",
+        "def:p3",
+        "def:p4",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23",
+        "def:r24",
+        "def:relu-network",
+        "lem:max2-one-hidden"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:m-symmetries",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:m-function",
+        "def:p1",
+        "def:p2",
+        "def:p3",
+        "def:p4",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23",
+        "def:r24"
+      ],
+      "source_order": 25,
+      "statement_fp": "3def15a5e686dedab1f43671784348403b0c8731c6a17a086fabe88bb508bed9",
+      "statement_uses": [
+        "def:m-function"
+      ],
+      "uses": [
+        "def:m-function",
+        "def:p1",
+        "def:p2",
+        "def:p3",
+        "def:p4",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23",
+        "def:r24"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:m-x5-largest",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:m-function",
+        "def:p1",
+        "def:p2",
+        "def:p3",
+        "def:p4",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23",
+        "def:r24"
+      ],
+      "source_order": 26,
+      "statement_fp": "9611dfb6c332198ba940b589f637e5b9bf35e407cb4fde353a90d8984b8d016b",
+      "statement_uses": [
+        "def:m-function",
+        "def:maxn"
+      ],
+      "uses": [
+        "def:m-function",
+        "def:maxn",
+        "def:p1",
+        "def:p2",
+        "def:p3",
+        "def:p4",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23",
+        "def:r24"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:m-x1-largest",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:m-function",
+        "def:p1",
+        "def:p2",
+        "def:p3",
+        "def:p4",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23",
+        "def:r24"
+      ],
+      "source_order": 27,
+      "statement_fp": "351759bbc7fdef64ee992b35857c800b9b3d9d78ab3ec504365bf64e4a21eb76",
+      "statement_uses": [
+        "def:m-function",
+        "def:maxn"
+      ],
+      "uses": [
+        "def:m-function",
+        "def:maxn",
+        "def:p1",
+        "def:p2",
+        "def:p3",
+        "def:p4",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23",
+        "def:r24"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:max5-equals-m",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "lem:m-symmetries",
+        "lem:m-x1-largest",
+        "lem:m-x5-largest"
+      ],
+      "source_order": 28,
+      "statement_fp": "923d0330191e7a94224f5a8bed0f002569dae5bbee970e54aaecf61dce4ab222",
+      "statement_uses": [
+        "def:m-function",
+        "def:maxn"
+      ],
+      "uses": [
+        "def:m-function",
+        "def:maxn",
+        "lem:m-symmetries",
+        "lem:m-x1-largest",
+        "lem:m-x5-largest"
+      ]
+    },
+    {
+      "kind": "proposition",
+      "label": "prop:max5-depth-two",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "lem:max3-depth-lower-bound",
+        "lem:max5-equals-m",
+        "lem:nine-terms-two-hidden"
+      ],
+      "source_order": 29,
+      "statement_fp": "ef1df1e30fc3498e4c1a82ffd8f339b0832fe47ef9198c90d77d93e748c35654",
+      "statement_uses": [
+        "lem:max3-depth-lower-bound",
+        "lem:max5-equals-m",
+        "lem:nine-terms-two-hidden"
+      ],
+      "uses": [
+        "lem:max3-depth-lower-bound",
+        "lem:max5-equals-m",
+        "lem:nine-terms-two-hidden"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:tab",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 30,
+      "statement_fp": "fc12fbca0d6431b16b2c4a0eea2285f33e748b98ceb7f38f7876a6f5b95c4522",
+      "statement_uses": [
+        "def:maxn"
+      ],
+      "uses": [
+        "def:maxn"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:calT",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 31,
+      "statement_fp": "c8afbd4ce87ed4f217c163cce51e46b6f10b8a3c375de3ff006172a58efef16d",
+      "statement_uses": [
+        "def:affine-map",
+        "def:tab"
+      ],
+      "uses": [
+        "def:affine-map",
+        "def:tab"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:tab-plus-four-rewrite",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:tab"
+      ],
+      "source_order": 32,
+      "statement_fp": "be9736ad91493928749ffd6f8757cebafbb0a5a7acf95f25fb6a193c654dadc2",
+      "statement_uses": [
+        "def:tab"
+      ],
+      "uses": [
+        "def:tab"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:p-terms-calT",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:calT",
+        "def:tab"
+      ],
+      "source_order": 33,
+      "statement_fp": "1d95498906e6bad57dc67505f0344c46e844d5b8d9e6235e62e6d111929b5ede",
+      "statement_uses": [
+        "def:calT",
+        "def:p1",
+        "def:p2",
+        "def:p3",
+        "def:p4"
+      ],
+      "uses": [
+        "def:calT",
+        "def:p1",
+        "def:p2",
+        "def:p3",
+        "def:p4",
+        "def:tab"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:q-r-terms-calT",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:calT",
+        "def:tab"
+      ],
+      "source_order": 34,
+      "statement_fp": "32e074608c5d4774ba14bcd66c4a1c871656ce48839a6f9aa30558e710440ae2",
+      "statement_uses": [
+        "def:calT",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23",
+        "def:r24"
+      ],
+      "uses": [
+        "def:calT",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23",
+        "def:r24",
+        "def:tab"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:calT-padding",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:binary-max",
+        "def:calT",
+        "def:tab"
+      ],
+      "source_order": 35,
+      "statement_fp": "a57b990b09937d93b02c81aca45019c85163fc27d2749635e71ab65afa2a0025",
+      "statement_uses": [
+        "def:calT",
+        "def:tab"
+      ],
+      "uses": [
+        "def:binary-max",
+        "def:calT",
+        "def:tab"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:claim5",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "lem:calT-padding",
+        "lem:max5-equals-m",
+        "lem:p-terms-calT",
+        "lem:q-r-terms-calT",
+        "lem:tab-plus-four-rewrite"
+      ],
+      "source_order": 36,
+      "statement_fp": "519aa866db7b423638a37e6a08c1312d49be6d96f25825036a40ae7f489504d5",
+      "statement_uses": [
+        "def:calT",
+        "lem:tab-plus-four-rewrite"
+      ],
+      "uses": [
+        "def:calT",
+        "lem:calT-padding",
+        "lem:max5-equals-m",
+        "lem:p-terms-calT",
+        "lem:q-r-terms-calT",
+        "lem:tab-plus-four-rewrite"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:claim6",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "lem:claim5"
+      ],
+      "source_order": 37,
+      "statement_fp": "79cf72af183fc44c9640e5651ad8903e1cbee118bc0f481dbd69d460fe25c273",
+      "statement_uses": [
+        "def:tab",
+        "lem:claim5"
+      ],
+      "uses": [
+        "def:tab",
+        "lem:claim5"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:claim7",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:tab",
+        "lem:max2-one-hidden"
+      ],
+      "source_order": 38,
+      "statement_fp": "192997259e5395057a7f9aa63ebbae6a2c3a9bf83ab667125158e3cef16bc7fc",
+      "statement_uses": [
+        "def:tab",
+        "lem:max2-one-hidden"
+      ],
+      "uses": [
+        "def:tab",
+        "lem:max2-one-hidden"
+      ]
+    },
+    {
+      "kind": "theorem",
+      "label": "thm:max-3n-plus-2",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:tab",
+        "lem:claim6",
+        "lem:claim7",
+        "prop:max5-depth-two"
+      ],
+      "source_order": 39,
+      "statement_fp": "5a5fde38d01389407ca9498d60f7bc2e89d224449eb67b90a453a3ded5af9e21",
+      "statement_uses": [
+        "def:cpwl-reluset",
+        "def:maxn"
+      ],
+      "uses": [
+        "def:cpwl-reluset",
+        "def:maxn",
+        "def:tab",
+        "lem:claim6",
+        "lem:claim7",
+        "prop:max5-depth-two"
+      ]
+    },
+    {
+      "kind": "corollary",
+      "label": "cor:max-arbitrary-depth",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "thm:max-3n-plus-2"
+      ],
+      "source_order": 40,
+      "statement_fp": "152bf01739163d1dd8acdf0450dbe530565b422f54132a4f4d2191070815af9e",
+      "statement_uses": [
+        "def:maxn",
+        "thm:max-3n-plus-2"
+      ],
+      "uses": [
+        "def:maxn",
+        "thm:max-3n-plus-2"
+      ]
+    },
+    {
+      "kind": "theorem",
+      "label": "thm:cpwl-improved-bound",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "cor:max-arbitrary-depth",
+        "lem:relu-network-cpwl",
+        "thm:wang-sun-representation"
+      ],
+      "source_order": 41,
+      "statement_fp": "096a88088a41bda6a9cefec072970c74e699ba7386a7d4b31a5528d1f08e81ba",
+      "statement_uses": [
+        "def:cpwl-reluset"
+      ],
+      "uses": [
+        "cor:max-arbitrary-depth",
+        "def:cpwl-reluset",
+        "lem:relu-network-cpwl",
+        "thm:wang-sun-representation"
+      ]
+    },
+    {
+      "kind": "remark",
+      "label": "rem:binary-fraction-weights",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "lem:claim7",
+        "lem:p-terms-calT",
+        "lem:q-r-terms-calT"
+      ],
+      "source_order": 42,
+      "statement_fp": "1815476723015ccc94e4859ce76c2bf8f48dbf03db867c612b10ba61e8fb29cf",
+      "statement_uses": [
+        "lem:claim5",
+        "lem:claim7",
+        "thm:max-3n-plus-2"
+      ],
+      "uses": [
+        "lem:claim5",
+        "lem:claim7",
+        "lem:p-terms-calT",
+        "lem:q-r-terms-calT",
+        "thm:max-3n-plus-2"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:ahm-lower-bound",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 43,
+      "statement_fp": "ccfe1a94eab8a1ddbdf70f4a11eefcfd3cd1bf945da9d656283ddd0e4483f361",
+      "statement_uses": [
+        "def:maxn",
+        "def:relu-network"
+      ],
+      "uses": [
+        "def:maxn",
+        "def:relu-network"
+      ]
+    },
+    {
+      "kind": "corollary",
+      "label": "cor:near-tight-decimal",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "cor:max-arbitrary-depth",
+        "lem:ahm-lower-bound",
+        "rem:binary-fraction-weights"
+      ],
+      "source_order": 44,
+      "statement_fp": "5a99bd25290400feae5f959cea4f8674596cefbaae72e63a0051d9c817091526",
+      "statement_uses": [
+        "cor:max-arbitrary-depth",
+        "lem:ahm-lower-bound",
+        "rem:binary-fraction-weights"
+      ],
+      "uses": [
+        "cor:max-arbitrary-depth",
+        "lem:ahm-lower-bound",
+        "rem:binary-fraction-weights"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:convex-hull",
+      "lean_decl": "convexHull",
+      "mathlibok": true,
+      "proof_uses": [],
+      "source_order": 45,
+      "statement_fp": "169ddd26b92bd89fceddf9fbae3142fbc309da5fd5b35bf012c85ca7c103371f",
+      "statement_uses": [],
+      "uses": []
+    },
+    {
+      "kind": "definition",
+      "label": "def:polytope",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 46,
+      "statement_fp": "10470c2244cbc894901c545da676d44511767664f8aa06ceb78ae4d62aba43ac",
+      "statement_uses": [
+        "def:convex-hull"
+      ],
+      "uses": [
+        "def:convex-hull"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:support-newton",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 47,
+      "statement_fp": "69fa424e388e1b7f442c1b8c31fb2a52d2845567e068881547a4d3ca44da42b3",
+      "statement_uses": [
+        "def:polytope"
+      ],
+      "uses": [
+        "def:polytope"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:support-polytope-equivalence",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 48,
+      "statement_fp": "60c558c26c9a004c9e63d3296e70cb431f096a8ba156fdf94b2239f2df40337c",
+      "statement_uses": [
+        "def:cpwl",
+        "def:support-newton"
+      ],
+      "uses": [
+        "def:cpwl",
+        "def:support-newton"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:newton-max-simplex",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:convex-hull",
+        "def:maxn",
+        "def:support-newton"
+      ],
+      "source_order": 49,
+      "statement_fp": "5a3f4c1ece24100b9f365e8eba58e059be8822ccab046c13b817f8fd95c72797",
+      "statement_uses": [
+        "def:convex-hull",
+        "def:maxn",
+        "def:support-newton"
+      ],
+      "uses": [
+        "def:convex-hull",
+        "def:maxn",
+        "def:support-newton"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:minkowski-join",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 50,
+      "statement_fp": "f4377ccbca5af29ee8cd901dac25a4a15edecdcb8918bed74b0c24cc57319082",
+      "statement_uses": [
+        "def:convex-hull"
+      ],
+      "uses": [
+        "def:convex-hull"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:Pk",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 51,
+      "statement_fp": "30fa9d22bcc67d33c1ab9789060cbaea82cf2c4df85269ff91c383e38a134c9e",
+      "statement_uses": [
+        "def:minkowski-join",
+        "def:polytope"
+      ],
+      "uses": [
+        "def:minkowski-join",
+        "def:polytope"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:Pk-sum-closed",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:Pk"
+      ],
+      "source_order": 52,
+      "statement_fp": "3ce9c906ed17d203e4143ee9c2fa6214fd7c6064ca859ad08c350dab971aa4f7",
+      "statement_uses": [
+        "def:Pk",
+        "def:minkowski-join"
+      ],
+      "uses": [
+        "def:Pk",
+        "def:minkowski-join"
+      ]
+    },
+    {
+      "kind": "definition",
+      "label": "def:formal-difference",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 53,
+      "statement_fp": "4cc1d5fc3cc7e945ad723df719000671b27fe2e080ba675858da12d409aa310e",
+      "statement_uses": [
+        "def:minkowski-join"
+      ],
+      "uses": [
+        "def:minkowski-join"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:relu-depth-formal-difference",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 54,
+      "statement_fp": "958cda57508773d3ddee5dd926ea1057b8989d2588971abf10cab5d675efe222",
+      "statement_uses": [
+        "def:Pk",
+        "def:formal-difference",
+        "def:support-newton"
+      ],
+      "uses": [
+        "def:Pk",
+        "def:formal-difference",
+        "def:support-newton"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:valuation-identity",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:minkowski-join",
+        "def:support-newton"
+      ],
+      "source_order": 55,
+      "statement_fp": "d13dd9fed46fccf36268f89eef77b3c8b3137187b936c85d96897ff031c78f02",
+      "statement_uses": [
+        "def:minkowski-join"
+      ],
+      "uses": [
+        "def:minkowski-join",
+        "def:support-newton"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:full-additivity",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 56,
+      "statement_fp": "a6d75616cba6c61af63240e5ffba47a5a2a1ae16f3724b540383823fe9a90b2b",
+      "statement_uses": [
+        "def:minkowski-join",
+        "def:polytope"
+      ],
+      "uses": [
+        "def:minkowski-join",
+        "def:polytope"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:subdivision-upper-bound",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "lem:Pk-sum-closed",
+        "lem:full-additivity",
+        "lem:newton-max-simplex",
+        "lem:relu-depth-formal-difference"
+      ],
+      "source_order": 57,
+      "statement_fp": "ee00e78c715cbf895a9ff64bcff1c0c4ce232a39240b0d5577b2a8d0cfd97697",
+      "statement_uses": [
+        "lem:Pk-sum-closed",
+        "lem:full-additivity",
+        "lem:newton-max-simplex",
+        "lem:relu-depth-formal-difference"
+      ],
+      "uses": [
+        "lem:Pk-sum-closed",
+        "lem:full-additivity",
+        "lem:newton-max-simplex",
+        "lem:relu-depth-formal-difference"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:faces-preserve-Pk",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:Pk"
+      ],
+      "source_order": 58,
+      "statement_fp": "139b2d622b3dbc57120ac71566874f3b3c994c9f3b9b0abb496602850d9be946",
+      "statement_uses": [
+        "def:Pk"
+      ],
+      "uses": [
+        "def:Pk"
+      ]
+    },
+    {
+      "kind": "construction",
+      "label": "constr:delta3-rhombic",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "def:Pk",
+        "def:convex-hull",
+        "def:minkowski-join"
+      ],
+      "source_order": 59,
+      "statement_fp": "3f82da2a7526893f5cf98cdb3589ae1cd9870f28eb09fcadd4580483a9067518",
+      "statement_uses": [
+        "def:minkowski-join",
+        "def:polytope"
+      ],
+      "uses": [
+        "def:Pk",
+        "def:convex-hull",
+        "def:minkowski-join",
+        "def:polytope"
+      ]
+    },
+    {
+      "kind": "construction",
+      "label": "constr:delta4-P2",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "constr:delta3-rhombic",
+        "def:Pk"
+      ],
+      "source_order": 60,
+      "statement_fp": "1aa859aebd25ea567608c8022516d644cc35364c1b962478c51d917f0f77d2de",
+      "statement_uses": [
+        "constr:delta3-rhombic",
+        "def:Pk"
+      ],
+      "uses": [
+        "constr:delta3-rhombic",
+        "def:Pk"
+      ]
+    },
+    {
+      "kind": "lemma",
+      "label": "lem:delta4-subdivision-to-M",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "constr:delta4-P2",
+        "def:p1",
+        "def:p2",
+        "def:p3",
+        "def:p4",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23",
+        "def:r24",
+        "lem:full-additivity"
+      ],
+      "source_order": 61,
+      "statement_fp": "c30e870a56ecdf9f3fe6c1c4ed42100e2d1c0982f9ac61d3ada4a2c1be6bdb3d",
+      "statement_uses": [
+        "constr:delta4-P2",
+        "def:m-function",
+        "lem:subdivision-upper-bound"
+      ],
+      "uses": [
+        "constr:delta4-P2",
+        "def:m-function",
+        "def:p1",
+        "def:p2",
+        "def:p3",
+        "def:p4",
+        "def:q",
+        "def:r13",
+        "def:r14",
+        "def:r23",
+        "def:r24",
+        "lem:full-additivity",
+        "lem:subdivision-upper-bound"
+      ]
+    },
+    {
+      "kind": "remark",
+      "label": "rem:higher-dimensional-intuition",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [
+        "constr:delta3-rhombic",
+        "lem:claim5",
+        "thm:max-3n-plus-2"
+      ],
+      "source_order": 62,
+      "statement_fp": "0804bd511760117d1b3f18d3fad0bee419a5cb71dd082b10c97a69e6cc754d67",
+      "statement_uses": [
+        "constr:delta3-rhombic",
+        "lem:claim5",
+        "thm:max-3n-plus-2"
+      ],
+      "uses": [
+        "constr:delta3-rhombic",
+        "lem:claim5",
+        "thm:max-3n-plus-2"
+      ]
+    },
+    {
+      "kind": "conjecture",
+      "label": "conj:constant-depth-max",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 63,
+      "statement_fp": "452e7d44d8be801b49ca86f3f962206ab17b8f55adb56eb20c340ab9dca86445",
+      "statement_uses": [
+        "cor:max-arbitrary-depth",
+        "def:maxn"
+      ],
+      "uses": [
+        "cor:max-arbitrary-depth",
+        "def:maxn"
+      ]
+    },
+    {
+      "kind": "conjecture",
+      "label": "conj:max6-two-layers",
+      "lean_decl": null,
+      "mathlibok": false,
+      "proof_uses": [],
+      "source_order": 64,
+      "statement_fp": "1f36fd375d2c805aff7ff732af9c016472a07d248172b62f27c619f0b20dc10e",
+      "statement_uses": [
+        "def:maxn",
+        "prop:max5-depth-two"
+      ],
+      "uses": [
+        "def:maxn",
+        "prop:max5-depth-two"
+      ]
+    }
+  ],
+  "schema_version": 1
+}

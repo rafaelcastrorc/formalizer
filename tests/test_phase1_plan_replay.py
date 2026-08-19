@@ -12,7 +12,6 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from replay_phase1_plans import (  # noqa: E402
     FIXTURE_RUNS_DIR,
-    _context,
     _replay_run,
 )
 
@@ -23,15 +22,16 @@ class PhaseOneHistoricalReplayTests(unittest.TestCase):
     def test_committed_plans_retain_initial_frontier_progress(self) -> None:
         run_files = sorted(FIXTURE_RUNS_DIR.glob("*.jsonl"))
         self.assertEqual(len(run_files), 10)
-        ctx, ordered, frontier = _context("simplex")
-
         for run_file in run_files:
             prefix = run_file.name[:15]
             with self.subTest(run=prefix):
-                rows = _replay_run(ctx, ordered, frontier, prefix)
+                rows = _replay_run("simplex", prefix)
                 selected = [row for row in rows if row["selected"]]
                 self.assertEqual(len(selected), 1)
-                self.assertEqual(selected[0]["parsed_contracts"], len(ordered))
+                self.assertEqual(
+                    selected[0]["parsed_contracts"],
+                    selected[0]["target_contracts"],
+                )
                 self.assertTrue(selected[0]["eligible_initial_frontier"])
 
     def test_committed_response_hashes_match_telemetry_metadata(self) -> None:
