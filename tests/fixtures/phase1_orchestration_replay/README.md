@@ -5,6 +5,13 @@ Phase 1 runs that exposed retry and scheduling regressions. They are committed
 test resources: the tests do not need local `.auto-blueprint/` telemetry, R2,
 network access, or a model account.
 
+`blueprint_direct_candidate_epoch.json` records the Simplex transition where
+an ordinary-plan declaration exhausted compiler correction, activated
+blueprint-direct generation, and was then incorrectly persisted as reusable
+under the new strategy epoch. The regression requires the old candidate to
+remain diagnostic evidence only; blueprint-direct generation must produce new
+code before another compiler-correction lifecycle can begin.
+
 `semantic_compiler_feedback_handoff.json` captures a statement-audit rejection
 followed by several compiler-only declaration patches. It protects the
 invariant that a compiler correction cannot forget an unresolved semantic
@@ -130,6 +137,16 @@ base and escalated compiler failures to use the same bounded lifecycle as
 statement-audit failures, switch once to blueprint-direct generation, and route
 only exhaustion of that direct lifecycle to scoped decomposition.
 
+`simplex_precompile_deterministic_failure_lifecycle.json` preserves the
+`remark:geometric-recursion-gap` loop from `run-20260813-235136`. A
+pre-compilation deterministic rejection bypassed that same lifecycle and
+restarted ordinary generation from retries 28 through at least 57. The paired
+regression requires deterministic generation failures to escalate once,
+switch once to blueprint-direct generation, and route only exhaustion of that
+direct lifecycle to scoped decomposition. A separate executable check protects
+the immediate root cause: canonical blueprint target names are exempt from the
+helper-name placeholder heuristic.
+
 `parallel_retry_state.json` preserves the three-worker Phase 1 overlap from
 `run-20260801-041251`. Three generation calls began together at `+1051s`, while
 another call entered the same wave at `+1070s`. Those workers share retained
@@ -180,6 +197,13 @@ shadowing while retaining the earlier downstream bare-alias behavior.
 The fixtures contain hashes, outcomes, durations, timestamps, and minimal
 synthetic compiler inputs needed by the policy tests. They do not contain paper
 text, model prompts, or full generated formalizations.
+
+`blueprint_direct_sibling_evidence.json` preserves the circuit-breaker state
+corruption from Simplex `run-20260814-235036`. One unchanged statement acquired
+audit findings owned by two sibling nodes, so unrelated sibling corrections
+changed its plan fingerprint and discarded its retained candidate. The paired
+regression requires blueprint-direct evidence and fingerprints to remain
+declaration-owned while still allowing each sibling's own evidence to evolve.
 
 `integration_gate_reuse.json` preserves the 699-second boundary between the
 last frozen Phase 1 contract and Phase 2 in the Simplex snapshot

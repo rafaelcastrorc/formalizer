@@ -101,6 +101,7 @@ from refine_blueprint_with_lean import (
     LEAN_IDIOM_CHEATSHEET,
     FORBIDDEN_ASSUMPTIONS,
     FORBIDDEN_BLUEPRINT_STUBS,
+    LeanAttempt,
     PLACEHOLDER_NAME_RE,
     TeeStream,
     _alignment_failure_kind,
@@ -170,11 +171,31 @@ PHASE2_PROOF_ORDER = "top-down"
 # attempts after the contract changes. The old 6-round nested retry maze
 # burned 7+ model calls per stuck node and still ended in the same repair.
 SKELETON_GENERATION_ATTEMPTS = 2
+PHASE1_EXCHANGE_SAMPLE_LIMIT = 3
 # One declaration-local patch is allowed at each model tier. A second failure
 # moves to the escalation tier or blueprint repair instead of looping inside
 # the same anchored generation session.
 TARGETED_DECL_PATCH_ROUNDS = 1
 COMPILER_CORRECTION_ROUNDS = 3
+# Translation candidates are disposable working files, not the final accepted
+# aggregate.  A candidate that cannot elaborate within this wall-clock budget
+# is too expensive to publish and should be corrected before the full final
+# integration check.  The final checks retain ``LEAN_CHECK_TIMEOUT`` below.
+CANDIDATE_LEAN_CHECK_TIMEOUT = 90
+# ``lean -o`` is an acceptance gate, but it is also a usability test for the
+# public interface.  Historical measurements showed ordinary generated
+# modules finish in seconds, while one deeply dependent public statement took
+# 500-600s and repeatedly timed out even when its proof was replaced by
+# ``sorry``.  Waiting the old hard-coded 600s and calling the model to rewrite
+# the proof cannot fix that class of failure.
+OBJECT_COMPILE_USABILITY_TIMEOUT = 90
+OBJECT_INTERFACE_FAILURE_PREFIX = "Lean public-interface usability gate failed"
+OBJECT_IMPLEMENTATION_FAILURE_PREFIX = "Lean implementation object-generation gate failed"
+# A complete-node correction starts from compiling/audited evidence and is a
+# narrower task than generating a node from scratch.  Do not let the fallback
+# inherit a very large hard-node timeout and recreate the historical 600-second
+# full-regeneration loop.
+PHASE2_COMPLETE_CORRECTION_TIMEOUT = 300
 
 
 def _requires_initial_declaration_pass(refinement_order: str) -> bool:
@@ -1749,6 +1770,7 @@ def _realize_typed_contracts_from_candidate(
     target_by_name = {_lean_name(label): label for label in requested}
     owner_by_index = dict(canonical.owner_by_index)
     realized: set[str] = set()
+    changed: set[str] = set()
     for label in requested:
         previous = entries.get(label) or {}
         # Preserve a resumed legacy contract. Only contracts created at this
@@ -1798,7 +1820,7 @@ def _realize_typed_contracts_from_candidate(
             for key in _PLAN_ENTRY_PROGRESS_KEYS
             if key in previous
         }
-        entries[label] = {
+        replacement = {
             "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
             "statement_fp": ctx.stmt_fps[label],
             "target_signature": _decl_interface_text(target),
@@ -1807,9 +1829,19 @@ def _realize_typed_contracts_from_candidate(
             "origin": "phase1_candidate",
             **progress,
         }
+        if replacement != previous:
+            changed.add(label)
+        entries[label] = replacement
         realized.add(label)
     if realized:
-        _sync_design_plan(ctx)
+        if changed:
+            _transition_phase1_generation_epoch(
+                ctx,
+                changed,
+                reason="typed_contract_realized_from_candidate",
+            )
+        else:
+            _sync_design_plan(ctx)
         _record(
             ctx.telemetry,
             "phase1_typed_contract_realized",
@@ -2074,6 +2106,24 @@ def _check_lean(path: Path, lean_command: list[str], *, timeout: int = LEAN_CHEC
     return proc.returncode == 0, combined
 
 
+_MISSING_LEAN_SURFACE_RE = re.compile(
+    r"\b(?:unknown identifier|unknown constant|unknown namespace)\b",
+    re.IGNORECASE,
+)
+
+
+def _lean_failure_may_be_fixed_by_broad_mathlib(output: str) -> bool:
+    """Whether adding ``import Mathlib`` can plausibly change this failure.
+
+    Broad-import diagnosis used to run after every failed candidate, including
+    type mismatches, unfinished tactics, and heartbeat exhaustion. Those errors
+    cannot be fixed by importing more declarations, so compiling the identical
+    bad candidate a second time only adds latency. Keep the fallback for the
+    missing-name class it was designed to diagnose.
+    """
+    return bool(_MISSING_LEAN_SURFACE_RE.search(output))
+
+
 def _skeleton_code_findings(
     code: str,
     target_kinds: dict[str, str],
@@ -2249,7 +2299,12 @@ def _skeleton_code_findings(
         )
     for decl in parsed.decls:
         name = decl.name or ""
-        if PLACEHOLDER_NAME_RE.search(name):
+        # Blueprint labels own their canonical Lean names. A legitimate label
+        # such as ``remark:geometric-recursion-gap`` must not become an
+        # unfixable deterministic rejection merely because its required name
+        # contains a placeholder-like word. Keep applying the heuristic to
+        # every helper name, including helpers explicitly proposed by a plan.
+        if name not in target_names and PLACEHOLDER_NAME_RE.search(name):
             findings.append(decl_finding(name, f"placeholder declaration name `{name}`"))
         if decl.kind in {"def", "abbrev"} and re.search(r":\s*Prop\s*:=\s*True\b", decl.text):
             findings.append(decl_finding(name, f"`{name}` defines a proposition as `True`"))
@@ -2273,6 +2328,8 @@ def _format_skeleton_findings(findings: list[SkeletonFinding]) -> str:
         elif finding.lean_name:
             prefix = f"`{finding.lean_name}`: "
         lines.append(prefix + finding.message)
+    if not lines:
+        return ""
     return "Deterministic skeleton audit rejected the file:\n- " + "\n- ".join(lines)
 
 
@@ -2479,6 +2536,9 @@ class RepairRequest(Exception):
         required_dependencies: dict[str, set[str]] | None = None,
         model_repair_labels: Iterable[str] | None = None,
         evidence_by_label: Mapping[str, str] | None = None,
+        implementation_prerequisites: Iterable[str] | None = None,
+        scheduling_only: bool = False,
+        retry_attempted_tier: str = "",
     ):
         super().__init__(evidence[:500])
         self.evidence = evidence
@@ -2512,6 +2572,23 @@ class RepairRequest(Exception):
             for label, value in (evidence_by_label or {}).items()
             if str(label) in labels and str(value).strip()
         }
+        # A top-down Phase-2 proof can use deferred theorem statements, but it
+        # cannot unfold a definition whose body is still ``sorry``. Such a
+        # finding changes scheduling only: implement the named dependency body
+        # first, then retry the original node without editing the blueprint or
+        # consuming a blueprint-repair trial.
+        self.implementation_prerequisites = list(
+            dict.fromkeys(str(label) for label in implementation_prerequisites or [])
+        )
+        self.scheduling_only = bool(scheduling_only)
+        # Generation workers report the tier that produced a deterministic
+        # pre-compilation rejection. The coordinator owns retry transitions so
+        # parallel workers never mutate shared plan/lifecycle state.
+        self.retry_attempted_tier = (
+            retry_attempted_tier
+            if retry_attempted_tier in {"base", "escalation"}
+            else ""
+        )
         # Some authorized requests can be completed deterministically by adding
         # missing dependency edges; others require the repair model to change or
         # decompose blueprint contracts. Keep those scopes separate so combining
@@ -2702,6 +2779,32 @@ def _aggregate_authorized_repair_requests(
     )
 
 
+def _combine_deferred_phase1_requests(
+    requests: Iterable[RepairRequest],
+) -> RepairRequest:
+    """Select the next safe outer action after draining independent branches.
+
+    Model-authored blueprint edits remain serialized. Exact generation and
+    deterministic dependency-edge failures can be aggregated because their
+    candidates and evidence are already persisted per label. If one request
+    authorizes a model edit, unrelated non-editing failures stay persisted and
+    resume after that scoped transaction instead of being widened into it.
+    """
+    ordered = list(requests)
+    if not ordered:
+        raise ValueError("cannot combine an empty Phase-1 request list")
+    model_repairs = [
+        request for request in ordered if request.authorizes_blueprint_repair
+    ]
+    if model_repairs:
+        if len(model_repairs) == 1:
+            return model_repairs[0]
+        return _aggregate_authorized_repair_requests(model_repairs)
+    if len(ordered) == 1:
+        return ordered[0]
+    return _aggregate_retry_requests(ordered)
+
+
 def _failure_route_to_payload(route: FailureScopeDecision) -> dict[str, Any]:
     return {
         "action": route.action,
@@ -2739,6 +2842,7 @@ def _phase2_repair_request_payload(
     identity = {
         "labels": labels,
         "statement_fps": statement_fps,
+        "context_fp": _phase2_repair_context_fingerprint(ctx, labels),
         "model_repair_labels": list(request.model_repair_labels),
         "required_dependencies": {
             label: sorted(dependencies)
@@ -2756,6 +2860,7 @@ def _phase2_repair_request_payload(
         "request_id": request_id,
         "labels": labels,
         "statement_fps": statement_fps,
+        "context_fp": identity["context_fp"],
         "evidence": request.evidence[-24000:],
         "decomposition_helpers": list(request.decomposition_helpers),
         "section_labels": list(request.section_labels),
@@ -2775,11 +2880,390 @@ def _phase2_repair_request_payload(
     }
 
 
+def _phase2_repair_context_fingerprint(ctx: "Ctx", labels: Iterable[str]) -> str:
+    """Hash the exact blueprint dependency environment behind repair evidence.
+
+    A queued diagnosis is reusable only while its target statements and their
+    transitive statement/proof dependency graph remain unchanged. This is a
+    deterministic graph walk; it adds no model call to the repair path.
+    """
+    nodes = getattr(ctx, "nodes", {})
+    stmt_fps = getattr(ctx, "stmt_fps", {})
+    roots = sorted({str(label) for label in labels if str(label) in nodes})
+    closure: set[str] = set()
+    stack = list(reversed(roots))
+    while stack:
+        label = stack.pop()
+        if label in closure or label not in nodes:
+            continue
+        closure.add(label)
+        current = nodes[label]
+        dependencies = {
+            str(dep)
+            for dep in (
+                set(getattr(current, "uses", set()) or set())
+                | set(getattr(current, "statement_uses", set()) or set())
+                | set(getattr(current, "proof_uses", set()) or set())
+            )
+            if str(dep) in nodes and str(dep) != label
+        }
+        stack.extend(sorted(dependencies - closure, reverse=True))
+    payload = {
+        "roots": roots,
+        "nodes": {
+            label: {
+                "statement_fp": str(stmt_fps.get(label) or ""),
+                "uses": sorted(
+                    str(dep)
+                    for dep in set(getattr(nodes[label], "uses", set()) or set())
+                    if str(dep) in nodes and str(dep) != label
+                ),
+                "statement_uses": sorted(
+                    str(dep)
+                    for dep in set(
+                        getattr(nodes[label], "statement_uses", set()) or set()
+                    )
+                    if str(dep) in nodes and str(dep) != label
+                ),
+                "proof_uses": sorted(
+                    str(dep)
+                    for dep in set(
+                        getattr(nodes[label], "proof_uses", set()) or set()
+                    )
+                    if str(dep) in nodes and str(dep) != label
+                ),
+            }
+            for label in sorted(closure)
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _phase2_repair_transaction_dir(name: str, request_id: str) -> Path:
+    """Durable rollback point for one unpublished Phase-2 graph edit."""
+    return SCRATCH_DIR / name / "phase2-repair-transactions" / request_id
+
+
+def _replace_tree_from_snapshot(source: Path, destination: Path) -> None:
+    """Replace an optional directory with its exact snapshotted contents."""
+    if destination.exists():
+        shutil.rmtree(destination)
+    if source.is_dir():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, destination)
+
+
+def _begin_phase2_repair_transaction(ctx: "Ctx", request_id: str) -> None:
+    """Persist the exact blueprint, Lean, and scheduler state before an edit.
+
+    The repair model is allowed to add explicit blueprint helper nodes, but
+    those nodes are provisional until their complete Lean declarations pass.
+    This snapshot prevents a rejected provisional component from becoming the
+    input to another repair or surviving an interrupted process.
+    """
+    if not request_id:
+        return
+    destination = _phase2_repair_transaction_dir(ctx.name, request_id)
+    if (destination / "manifest.json").is_file():
+        return
+    if destination.exists():
+        shutil.rmtree(destination)
+    root = destination.parent
+    root.mkdir(parents=True, exist_ok=True)
+    pending = root / f".{request_id}.pending"
+    if pending.exists():
+        shutil.rmtree(pending)
+    pending.mkdir(parents=True)
+    draft = Path(ctx.blueprint_dir)
+    generated = _generated_module_dir(ctx.name)
+    lake_generated = _generated_lake_module_dir(ctx.name)
+    state = _state_path(ctx.name)
+    if not state.is_file():
+        raise RuntimeError(
+            "cannot begin Phase 2 blueprint transaction without persisted state"
+        )
+    shutil.copytree(draft, pending / "blueprint-draft")
+    if generated.is_dir():
+        shutil.copytree(generated, pending / "generated")
+    if lake_generated.is_dir():
+        shutil.copytree(lake_generated, pending / "lake-generated")
+    shutil.copy2(state, pending / "skeleton_state.json")
+    (pending / "manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "request_id": request_id,
+                "blueprint_sha256": hashlib.sha256(
+                    ctx.content_path.read_bytes()
+                ).hexdigest(),
+                "generated_present": generated.is_dir(),
+                "lake_generated_present": lake_generated.is_dir(),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.replace(pending, destination)
+    telemetry = getattr(ctx, "telemetry", None)
+    if telemetry is not None:
+        _record(
+            telemetry,
+            "phase2_repair_transaction_snapshot",
+            request_id=request_id,
+            labels=list(
+                (getattr(ctx, "phase2_repair_active", {}) or {}).get("labels")
+                or []
+            ),
+            blueprint_sha256=hashlib.sha256(
+                ctx.content_path.read_bytes()
+            ).hexdigest(),
+        )
+
+
+def _restore_phase2_repair_transaction_files(
+    ctx: "Ctx", request_id: str
+) -> None:
+    """Restore the complete pre-edit filesystem state for one repair."""
+    source = _phase2_repair_transaction_dir(ctx.name, request_id)
+    if not (source / "manifest.json").is_file():
+        raise RuntimeError(
+            "active Phase 2 blueprint repair has no pre-edit transaction snapshot; "
+            "start a fresh run rather than extending unverified blueprint edits"
+        )
+    _replace_tree_from_snapshot(source / "blueprint-draft", ctx.blueprint_dir)
+    _replace_tree_from_snapshot(source / "generated", _generated_module_dir(ctx.name))
+    _replace_tree_from_snapshot(
+        source / "lake-generated", _generated_lake_module_dir(ctx.name)
+    )
+    state = _state_path(ctx.name)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source / "skeleton_state.json", state)
+
+
+def _discard_phase2_repair_transaction(name: str, request_id: str) -> None:
+    """Delete a rollback point only after its replacement Lean is accepted."""
+    if request_id:
+        shutil.rmtree(
+            _phase2_repair_transaction_dir(name, request_id),
+            ignore_errors=True,
+        )
+
+
+def _restore_interrupted_phase2_repair(
+    name: str, blueprint_dir: Path
+) -> str:
+    """Undo an edit interrupted before it reached the verification stage.
+
+    The state file is persisted before the repair model may write. A process
+    killed during that write therefore resumes with stage ``repair``; restoring
+    here happens before blueprint validation can observe a partial model edit.
+    A persisted ``verify`` stage is intentionally retained for continuation.
+    """
+    state = _state_path(name)
+    try:
+        payload = json.loads(state.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    active = (
+        (payload.get("scheduler") or {}).get("phase2_repair_active") or {}
+    )
+    request_id = str(active.get("request_id") or "")
+    if not request_id or str(active.get("stage") or "repair") != "repair":
+        return ""
+    source = _phase2_repair_transaction_dir(name, request_id)
+    if not (source / "manifest.json").is_file():
+        return ""
+    _replace_tree_from_snapshot(source / "blueprint-draft", blueprint_dir)
+    _replace_tree_from_snapshot(source / "generated", _generated_module_dir(name))
+    _replace_tree_from_snapshot(
+        source / "lake-generated", _generated_lake_module_dir(name)
+    )
+    return request_id
+
+
+def _merge_phase2_repair_followup(
+    ctx: "Ctx", request_id: str, followup: RepairRequest
+) -> RepairRequest:
+    """Rebase new verification evidence onto the original repair component.
+
+    The staged helper labels may no longer exist after rollback. They therefore
+    remain diagnostic evidence, while edit authority returns to the original
+    blueprint roots. The next repair must produce one complete replacement
+    component from that clean graph rather than extending rejected helpers.
+    """
+    payload = next(
+        (
+            item
+            for item in getattr(ctx, "phase2_repair_queue", [])
+            if str(item.get("request_id") or "") == request_id
+        ),
+        None,
+    )
+    if payload is None:
+        raise RuntimeError(f"Phase 2 repair queue lost active request {request_id}")
+    original_labels = [
+        str(label)
+        for label in payload.get("labels") or []
+        if str(label) in ctx.nodes
+    ]
+    if not original_labels:
+        raise RuntimeError(
+            "Phase 2 repair rollback lost every original repair root"
+        )
+    followup_note = (
+        "The previous provisional blueprint component was discarded because "
+        "its complete Lean verification exposed this additional blueprint "
+        "defect. Replace the original component from its clean pre-edit graph; "
+        "do not extend or refer to discarded provisional helper nodes.\n\n"
+        + followup.evidence[-12000:]
+    )
+    original_evidence = str(payload.get("evidence") or "")[-12000:]
+    payload["evidence"] = (
+        original_evidence + "\n\n== Provisional component rejection ==\n" + followup_note
+    )[-24000:]
+    payload["decomposition_helpers"] = list(
+        dict.fromkeys(
+            [
+                *[str(item) for item in payload.get("decomposition_helpers") or []],
+                *[str(item) for item in followup.decomposition_helpers],
+            ]
+        )
+    )
+    evidence_by_label = {
+        str(label): str(value)
+        for label, value in (payload.get("evidence_by_label") or {}).items()
+        if str(label) in original_labels
+    }
+    for label in original_labels:
+        previous = evidence_by_label.get(label, "")[-6000:]
+        evidence_by_label[label] = (
+            previous + "\n\n" + followup_note
+        ).strip()[-12000:]
+    payload["evidence_by_label"] = evidence_by_label
+    payload["statement_fps"] = {
+        label: str(ctx.stmt_fps.get(label) or "") for label in original_labels
+    }
+    payload["context_fp"] = _phase2_repair_context_fingerprint(
+        ctx, original_labels
+    )
+    payload["model_repair_labels"] = list(
+        dict.fromkeys(
+            [
+                *[str(label) for label in payload.get("model_repair_labels") or []],
+                *original_labels,
+            ]
+        )
+    )
+    ctx.phase2_repair_active = {
+        "request_id": request_id,
+        "stage": "repair",
+        "labels": original_labels,
+        "verification_labels": [],
+    }
+    request = _pending_phase2_repair_request(ctx)
+    if request is None:
+        raise RuntimeError(
+            "rolled-back Phase 2 repair did not return to the repair queue"
+        )
+    return request
+
+
+def _restart_active_phase2_repair(
+    ctx: "Ctx", sections: list["Section"], followup: RepairRequest
+) -> tuple[list["Section"], RepairRequest]:
+    """Roll back a rejected staged component and retry its original roots."""
+    active = getattr(ctx, "phase2_repair_active", {}) or {}
+    request_id = str(active.get("request_id") or "")
+    if not request_id or str(active.get("stage") or "") != "verify":
+        return sections, followup
+    carried_queue = copy.deepcopy(getattr(ctx, "phase2_repair_queue", []))
+    carried_active_payload = next(
+        (
+            payload
+            for payload in carried_queue
+            if str(payload.get("request_id") or "") == request_id
+        ),
+        None,
+    )
+    staged_labels = set(getattr(ctx, "nodes", {}))
+    _restore_phase2_repair_transaction_files(ctx, request_id)
+    validation = _validate_draft(ctx)
+    if not validation.ok:
+        raise RuntimeError(
+            "pre-edit Phase 2 transaction snapshot no longer validates"
+        )
+    ctx.refresh_nodes(validation.nodes)
+    restored_sections = _load_state(ctx, ctx.lean_command)
+    restored_active_payload = next(
+        (
+            payload
+            for payload in getattr(ctx, "phase2_repair_queue", [])
+            if str(payload.get("request_id") or "") == request_id
+        ),
+        None,
+    )
+    if carried_active_payload is not None and restored_active_payload is not None:
+        # The snapshot owns the clean graph/files. The live queue owns evidence
+        # learned after earlier rejected provisional components.
+        for key in (
+            "evidence",
+            "decomposition_helpers",
+            "failure_routes",
+            "plan_revision_required",
+            "required_dependencies",
+            "model_repair_labels",
+            "evidence_by_label",
+        ):
+            restored_active_payload[key] = copy.deepcopy(
+                carried_active_payload.get(key)
+            )
+    existing_ids = {
+        str(payload.get("request_id") or "")
+        for payload in getattr(ctx, "phase2_repair_queue", [])
+    }
+    for payload in carried_queue:
+        queued_id = str(payload.get("request_id") or "")
+        labels = [str(label) for label in payload.get("labels") or []]
+        if (
+            queued_id
+            and queued_id not in existing_ids
+            and labels
+            and all(label in ctx.nodes for label in labels)
+        ):
+            ctx.phase2_repair_queue.append(payload)
+            existing_ids.add(queued_id)
+    request = _merge_phase2_repair_followup(ctx, request_id, followup)
+    _save_ctx_state(ctx, restored_sections)
+    restored_labels = set(ctx.nodes)
+    _record(
+        ctx.telemetry,
+        "phase2_repair_transaction_restarted",
+        request_id=request_id,
+        original_labels=list(request.labels),
+        discarded_provisional_labels=sorted(staged_labels - restored_labels),
+        followup_labels=list(followup.labels),
+        followup_helpers=list(followup.decomposition_helpers),
+    )
+    _log(
+        "==> Rejected provisional Phase 2 blueprint component rolled back; "
+        "retrying the original component with exact verification evidence"
+    )
+    return restored_sections, request
+
+
 def _prune_stale_phase2_repair_queue(ctx: "Ctx") -> None:
-    """Drop queued evidence only when its exact blueprint statement changed."""
+    """Drop evidence whose target or dependency context has already changed."""
     current_fps = getattr(ctx, "stmt_fps", {})
     current_nodes = getattr(ctx, "nodes", {})
+    active_id = str(
+        (getattr(ctx, "phase2_repair_active", {}) or {}).get("request_id") or ""
+    )
     retained: list[dict[str, Any]] = []
+    superseded: list[dict[str, Any]] = []
     seen: set[str] = set()
     for payload in getattr(ctx, "phase2_repair_queue", []):
         if not isinstance(payload, dict):
@@ -2787,21 +3271,45 @@ def _prune_stale_phase2_repair_queue(ctx: "Ctx") -> None:
         request_id = str(payload.get("request_id") or "")
         labels = [str(label) for label in payload.get("labels") or []]
         statement_fps = payload.get("statement_fps") or {}
-        if (
+        invalid_identity = (
             not request_id
             or request_id in seen
             or not labels
             or any(label not in current_nodes for label in labels)
-            or any(
+        )
+        statement_changed = any(
                 str(statement_fps.get(label) or "")
                 and str(statement_fps.get(label) or "") != current_fps.get(label)
                 for label in labels
-            )
-        ):
+        )
+        expected_context = str(payload.get("context_fp") or "")
+        current_context = _phase2_repair_context_fingerprint(ctx, labels)
+        context_changed = bool(expected_context and expected_context != current_context)
+        if invalid_identity:
             continue
+        # The active transaction is expected to change its own context. Keep
+        # its authorization until the replacement Lean has been verified.
+        if request_id != active_id and (statement_changed or context_changed):
+            superseded.append(payload)
+            continue
+        if not expected_context:
+            # State schema migration: establish a baseline without discarding
+            # an older, otherwise valid persisted diagnosis.
+            payload["context_fp"] = current_context
         retained.append(payload)
         seen.add(request_id)
     ctx.phase2_repair_queue = retained
+    telemetry = getattr(ctx, "telemetry", None)
+    if telemetry is not None:
+        for payload in superseded:
+            _record(
+                telemetry,
+                "phase2_repair_queue_superseded",
+                request_id=str(payload.get("request_id") or ""),
+                labels=[str(label) for label in payload.get("labels") or []],
+                reason="dependency_context_changed",
+                queue_size=len(retained),
+            )
 
 
 def _enqueue_phase2_repair_requests(
@@ -2846,7 +3354,21 @@ def _pending_phase2_repair_request(ctx: "Ctx") -> RepairRequest | None:
     _prune_stale_phase2_repair_queue(ctx)
     if not ctx.phase2_repair_queue:
         return None
-    payload = ctx.phase2_repair_queue[0]
+    active = getattr(ctx, "phase2_repair_active", {}) or {}
+    active_id = str(active.get("request_id") or "")
+    if active_id and str(active.get("stage") or "repair") == "verify":
+        return None
+    payload = next(
+        (
+            item
+            for item in ctx.phase2_repair_queue
+            if not active_id or str(item.get("request_id") or "") == active_id
+        ),
+        None,
+    )
+    if payload is None:
+        ctx.phase2_repair_active = {}
+        payload = ctx.phase2_repair_queue[0]
     routes = [
         _failure_route_from_payload(route)
         for route in payload.get("failure_routes") or []
@@ -2887,14 +3409,107 @@ def _pending_phase2_repair_request(ctx: "Ctx") -> RepairRequest | None:
     return request
 
 
+def _activate_phase2_repair_request(ctx: "Ctx", request_id: str) -> None:
+    """Persist the single Phase-2 blueprint writer before it edits anything."""
+    if not request_id:
+        return
+    active = getattr(ctx, "phase2_repair_active", {}) or {}
+    active_id = str(active.get("request_id") or "")
+    if active_id:
+        if active_id != request_id:
+            raise RuntimeError(
+                "cannot activate a second Phase 2 blueprint repair before the "
+                "current repair is verified"
+            )
+        return
+    payload = next(
+        (
+            item
+            for item in getattr(ctx, "phase2_repair_queue", [])
+            if str(item.get("request_id") or "") == request_id
+        ),
+        None,
+    )
+    if payload is None:
+        raise RuntimeError(f"Phase 2 repair queue lost request {request_id}")
+    ctx.phase2_repair_active = {
+        "request_id": request_id,
+        "stage": "repair",
+        "labels": [str(label) for label in payload.get("labels") or []],
+        "verification_labels": [],
+    }
+    telemetry = getattr(ctx, "telemetry", None)
+    if telemetry is not None:
+        _record(
+            telemetry,
+            "phase2_repair_queue_activated",
+            request_id=request_id,
+            labels=list(ctx.phase2_repair_active["labels"]),
+            queue_size=len(getattr(ctx, "phase2_repair_queue", [])),
+        )
+
+
+def _start_phase2_repair_transaction(
+    ctx: "Ctx",
+    sections: list["Section"],
+    request: RepairRequest,
+) -> str:
+    """Activate one queued repair and persist its rollback point before edits.
+
+    Phase 2 repair requests can arrive either from the persisted queue at the
+    start of an orchestration iteration or directly from the proof frontier
+    that diagnosed them. Both paths must cross this single transaction gate
+    before any model or deterministic repair mutates the unpublished draft.
+    """
+    request_id = str(getattr(request, "queue_id", "") or "")
+    if not request_id:
+        raise RuntimeError(
+            "Phase 2 blueprint repair reached the mutation boundary without "
+            "a persisted queue identity"
+        )
+    _activate_phase2_repair_request(ctx, request_id)
+    _save_ctx_state(ctx, sections)
+    _begin_phase2_repair_transaction(ctx, request_id)
+    return request_id
+
+
+def _mark_phase2_repair_verifying(
+    ctx: "Ctx", request_id: str, labels: Iterable[str]
+) -> None:
+    """Block later blueprint edits until this repair's Lean is accepted."""
+    if not request_id:
+        return
+    _activate_phase2_repair_request(ctx, request_id)
+    active = ctx.phase2_repair_active
+    active["stage"] = "verify"
+    active["verification_labels"] = sorted(
+        {str(label) for label in labels if str(label) in getattr(ctx, "nodes", {})}
+    )
+    telemetry = getattr(ctx, "telemetry", None)
+    if telemetry is not None:
+        _record(
+            telemetry,
+            "phase2_repair_verification_started",
+            request_id=request_id,
+            labels=list(active["verification_labels"]),
+            queue_size=len(getattr(ctx, "phase2_repair_queue", [])),
+        )
+
+
 def _complete_phase2_repair_request(ctx: "Ctx", request_id: str) -> None:
-    """Acknowledge exactly one successful queued repair transaction."""
+    """Acknowledge a queued repair only after its replacement Lean verifies."""
     before = len(getattr(ctx, "phase2_repair_queue", []))
     ctx.phase2_repair_queue = [
         payload
         for payload in getattr(ctx, "phase2_repair_queue", [])
         if str(payload.get("request_id") or "") != request_id
     ]
+    active = getattr(ctx, "phase2_repair_active", {}) or {}
+    if str(active.get("request_id") or "") == request_id:
+        ctx.phase2_repair_active = {}
+    _prune_stale_phase2_repair_queue(ctx)
+    if getattr(ctx, "name", ""):
+        _discard_phase2_repair_transaction(ctx.name, request_id)
     telemetry = getattr(ctx, "telemetry", None)
     if telemetry is not None and len(ctx.phase2_repair_queue) != before:
         _record(
@@ -2903,6 +3518,36 @@ def _complete_phase2_repair_request(ctx: "Ctx", request_id: str) -> None:
             request_id=request_id,
             queue_size=len(ctx.phase2_repair_queue),
         )
+
+
+def _complete_verified_phase2_repair(
+    ctx: "Ctx", sections: list[Section]
+) -> bool:
+    """Complete an active repair once every replacement declaration is real."""
+    active = getattr(ctx, "phase2_repair_active", {}) or {}
+    if str(active.get("stage") or "") != "verify":
+        return False
+    request_id = str(active.get("request_id") or "")
+    labels = {
+        str(label)
+        for label in active.get("verification_labels") or []
+        if str(label) in ctx.nodes
+    }
+    if not request_id or not labels:
+        return False
+    frozen = _frozen_labels(sections)
+    implemented, body_required = _phase2_body_progress(ctx, sections)
+    complete = labels <= frozen and (labels & body_required) <= implemented
+    if not complete:
+        return False
+    _complete_phase2_repair_request(ctx, request_id)
+    _record(
+        ctx.telemetry,
+        "phase2_repair_verified",
+        request_id=request_id,
+        labels=sorted(labels),
+    )
+    return True
 
 
 @dataclass
@@ -2977,11 +3622,24 @@ class Ctx:
     # byte-identical response to the same correction context from being paid
     # for, compiled, and audited again after a transaction boundary resets.
     phase1_exchange_history: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Best-effort model conversation handles captured on timeout. These are
+    # keyed by the exact model-call context, not just the label, so an outer
+    # retry can resume useful work without carrying a stale session across a
+    # changed statement/plan/prompt/model epoch. Backends without resume
+    # support ignore the id safely.
+    model_resume_sessions: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Rejected Phase-1 declarations are retained as revision inputs instead of
     # being regenerated from an empty file. Entries are statement-fingerprinted
     # for the same reason as feedback: a blueprint edit must invalidate the old
     # Lean candidate automatically.
     generation_candidates: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Complete Phase-2 declaration candidates survive outer retries and
+    # ``--continue``.  This is deliberately separate from Phase-1 candidate
+    # state: Phase 1 permits a terminal target ``sorry`` while every entry here
+    # contains the statement and its real body as one atomic node.
+    phase2_node_candidates: dict[str, dict[str, Any]] = field(
+        default_factory=dict
+    )
     # Per-node retry provenance survives batching, outer-loop retries, and
     # continuation.  An audit may judge many declarations in one call, but it
     # must not collapse independently generated singleton histories back into
@@ -3049,6 +3707,15 @@ class Ctx:
     # transaction; unioning them gives one model accidental authority over a
     # large, unrelated part of the graph.
     phase2_repair_queue: list[dict[str, Any]] = field(default_factory=list)
+    # Exactly one queued repair may own the mutable blueprint at a time. The
+    # `verify` stage survives interruption and prevents later queued evidence
+    # from editing the graph before this repair's complete Lean is accepted.
+    phase2_repair_active: dict[str, Any] = field(default_factory=dict)
+    # Local dependency-first exceptions to the normal top-down Phase-2 order.
+    # These are created only from concrete evidence that a consumer must unfold
+    # a still-deferred definition body. Once the prerequisites compile, normal
+    # top-down scheduling resumes automatically.
+    phase2_prerequisite_labels: set[str] = field(default_factory=set)
     # Phase 1 is a one-way workflow milestone. Once the complete initial
     # skeleton freezes, later blueprint edits belong to Phase 2 and are
     # formalized as complete statement+body declarations in one transaction.
@@ -3074,6 +3741,7 @@ class Ctx:
         _prune_stale_local_group_partitions(self)
         _prune_stale_generation_feedback(self)
         _prune_stale_generation_candidates(self)
+        _prune_stale_phase2_node_candidates(self)
         _prune_stale_retry_lifecycle(self)
         _prune_stale_design_plan(self)
 
@@ -3225,12 +3893,14 @@ def _quarantine_labels(ctx: Ctx, labels: Iterable[str], failure_class: str) -> N
 def _release_quarantine(
     ctx: Ctx, labels: Iterable[str], *, reason: str = "statement_frozen"
 ) -> None:
+    quarantine = getattr(ctx, "quarantine", {})
+    quarantined_labels = getattr(ctx, "quarantined_labels", set())
     released: dict[str, dict[str, str]] = {}
     for label in labels:
-        if label in ctx.quarantine:
-            released[label] = dict(ctx.quarantine[label])
-        ctx.quarantined_labels.discard(label)
-        ctx.quarantine.pop(label, None)
+        if label in quarantine:
+            released[label] = dict(quarantine[label])
+        quarantined_labels.discard(label)
+        quarantine.pop(label, None)
     telemetry = getattr(ctx, "telemetry", None)
     if released and telemetry is not None:
         _record(
@@ -3640,7 +4310,14 @@ def _phase1_exchange_start(
     purpose: str,
     tier: str,
 ) -> str:
-    """Record one exact Phase-1 model-call context before launching it."""
+    """Reserve one sample for an exact Phase-1 model-call context.
+
+    The existing local correction allowance is three stochastic samples.  The
+    reservation is persisted so an outer retry, process restart, or
+    ``--continue`` cannot silently reset that allowance.  An empty return value
+    means the exact statement/plan/model/prompt epoch is exhausted and the
+    caller must route the retained evidence without launching another model.
+    """
     ordered = list(dict.fromkeys(labels))
     statement_fps = getattr(ctx, "stmt_fps", {}) or {}
     payload = {
@@ -3656,6 +4333,11 @@ def _phase1_exchange_start(
         ).hexdigest(),
         "purpose": purpose,
         "tier": tier,
+        "runner_spec": str(
+            getattr(ctx, "escalation_runner_spec", "")
+            if tier == "escalation"
+            else getattr(ctx, "runner_spec", "")
+        ),
         "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
     }
     key = hashlib.sha256(
@@ -3667,9 +4349,12 @@ def _phase1_exchange_start(
             history = {}
             ctx.phase1_exchange_history = history
         previous = history.get(key) or {}
+        launches = int(previous.get("launches") or 0)
+        if launches >= PHASE1_EXCHANGE_SAMPLE_LIMIT:
+            return ""
         history[key] = {
             **payload,
-            "launches": int(previous.get("launches") or 0) + 1,
+            "launches": launches + 1,
             "response_sha256s": list(previous.get("response_sha256s") or [])[-3:],
             "statuses": list(previous.get("statuses") or [])[-3:],
         }
@@ -3705,6 +4390,107 @@ def _phase1_exchange_finish(
     return duplicate
 
 
+def _model_resume_session_key(
+    ctx: Ctx,
+    *,
+    purpose: str,
+    labels: Iterable[str],
+    prompt: str,
+    runner_spec: str,
+) -> str:
+    """Stable key for carrying a captured model session across retries."""
+    ordered = list(dict.fromkeys(labels))
+    statement_fps = getattr(ctx, "stmt_fps", {}) or {}
+    payload = {
+        "purpose": purpose,
+        "labels": ordered,
+        "statement_fps": {
+            label: statement_fps.get(label, "") for label in ordered
+        },
+        "plan_fps": {
+            label: _candidate_plan_fingerprint(ctx, label) for label in ordered
+        },
+        "runner_spec": runner_spec,
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _get_model_resume_session(
+    ctx: Ctx, key: str, runner_spec: str
+) -> str | None:
+    with _STATE_LOCK:
+        entry = getattr(ctx, "model_resume_sessions", {}).get(key)
+        if not isinstance(entry, dict):
+            return None
+        if str(entry.get("runner_spec") or "") != runner_spec:
+            return None
+        session_id = str(entry.get("session_id") or "")
+        return session_id or None
+
+
+def _set_model_resume_session(
+    ctx: Ctx,
+    key: str,
+    runner_spec: str,
+    session_id: str,
+    *,
+    labels: Iterable[str],
+    prompt: str,
+) -> None:
+    if not session_id:
+        return
+    ordered = list(dict.fromkeys(labels))
+    statement_fps = getattr(ctx, "stmt_fps", {}) or {}
+    with _STATE_LOCK:
+        store = getattr(ctx, "model_resume_sessions", None)
+        if store is None:
+            store = {}
+            ctx.model_resume_sessions = store
+        store[key] = {
+            "runner_spec": runner_spec,
+            "session_id": session_id,
+            "purpose": "model_call_resume",
+            "labels": ordered,
+            "statement_fps": {
+                label: statement_fps.get(label, "") for label in ordered
+            },
+            "plan_fps": {
+                label: _candidate_plan_fingerprint(ctx, label) for label in ordered
+            },
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        }
+
+
+def _clear_model_resume_session(ctx: Ctx, key: str) -> None:
+    with _STATE_LOCK:
+        getattr(ctx, "model_resume_sessions", {}).pop(key, None)
+
+
+def _prune_stale_model_resume_sessions(ctx: Ctx) -> set[str]:
+    """Discard captured sessions whose statement/plan/prompt epoch changed."""
+    with _STATE_LOCK:
+        store = getattr(ctx, "model_resume_sessions", {})
+        stale = {
+            key
+            for key, entry in store.items()
+            if not isinstance(entry, dict)
+            or any(
+                label not in ctx.nodes
+                or str((entry.get("statement_fps") or {}).get(label) or "")
+                != ctx.stmt_fps.get(label, "")
+                or str((entry.get("plan_fps") or {}).get(label) or "")
+                != _candidate_plan_fingerprint(ctx, label)
+                for label in entry.get("labels") or []
+            )
+        }
+        for key in stale:
+            store.pop(key, None)
+    return stale
+
+
 def _prune_stale_phase1_exchange_history(ctx: Ctx) -> set[str]:
     """Discard exchanges whose statement or accepted-plan epoch has changed."""
     with _STATE_LOCK:
@@ -3725,6 +4511,22 @@ def _prune_stale_phase1_exchange_history(ctx: Ctx) -> set[str]:
         for key in stale:
             history.pop(key, None)
     return stale
+
+
+def _clear_phase1_exchange_history(ctx: Ctx, labels: Iterable[str]) -> set[str]:
+    """Forget model-exchange reservations involving a changed plan epoch."""
+    wanted = set(labels)
+    with _STATE_LOCK:
+        history = getattr(ctx, "phase1_exchange_history", {})
+        removed = {
+            key
+            for key, entry in history.items()
+            if isinstance(entry, dict)
+            and wanted.intersection(entry.get("labels") or [])
+        }
+        for key in removed:
+            history.pop(key, None)
+    return removed
 
 
 def _prune_stale_generation_candidates(ctx: Ctx) -> set[str]:
@@ -3783,6 +4585,25 @@ def _candidate_plan_fingerprint(ctx: Ctx, label: str) -> str:
     ).hexdigest()
 
 
+def _design_plan_public_surface_fingerprint(entry: Mapping[str, Any] | None) -> str:
+    """Fingerprint the public Lean surface exposed by one plan entry.
+
+    Decisions and prose are deliberately excluded. Downstream nodes can depend
+    only on declaration headers, helper declarations, and typed helper members.
+    """
+    if not isinstance(entry, Mapping):
+        return ""
+    try:
+        fragments = _design_plan_public_interface_fragments(dict(entry))
+    except (TypeError, ValueError):
+        return ""
+    if not fragments:
+        return ""
+    return hashlib.sha256(
+        json.dumps(fragments, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
 def _candidate_is_reusable_uncompiled(entry: dict[str, Any]) -> bool:
     """Recognize candidates that completed every deterministic generation gate.
 
@@ -3808,6 +4629,149 @@ def _candidate_is_reusable_uncompiled(entry: dict[str, Any]) -> bool:
 
 def _candidate_hash(code: str) -> str:
     return hashlib.sha256(code.strip().encode("utf-8")).hexdigest()
+
+
+def _phase2_node_candidate_epoch(ctx: Ctx, label: str) -> str:
+    """Fingerprint the complete blueprint/dependency contract for one node."""
+    material = {
+        "label": label,
+        "statement_fp": str(getattr(ctx, "stmt_fps", {}).get(label) or ""),
+        "contract_fp": str(getattr(ctx, "contract_fps", {}).get(label) or ""),
+        "dependency_context_fp": _phase2_repair_context_fingerprint(
+            ctx, [label]
+        ),
+    }
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def _prune_stale_phase2_node_candidates(ctx: Ctx) -> set[str]:
+    """Discard complete-node candidates after their blueprint epoch changes."""
+    with _STATE_LOCK:
+        candidates = getattr(ctx, "phase2_node_candidates", {})
+        stale = {
+            label
+            for label, entry in candidates.items()
+            if label not in getattr(ctx, "nodes", {})
+            or str(entry.get("epoch") or "")
+            != _phase2_node_candidate_epoch(ctx, label)
+        }
+        for label in stale:
+            candidates.pop(label, None)
+    telemetry = getattr(ctx, "telemetry", None)
+    if stale and telemetry is not None:
+        _record(
+            telemetry,
+            "phase2_complete_candidate_invalidated",
+            labels=sorted(stale),
+            reason="blueprint_or_dependency_contract_changed",
+        )
+    return stale
+
+
+def _phase2_node_candidate(ctx: Ctx, label: str) -> dict[str, Any] | None:
+    """Return a copy of the current complete-node correction seed."""
+    _prune_stale_phase2_node_candidates(ctx)
+    with _STATE_LOCK:
+        entry = copy.deepcopy(
+            getattr(ctx, "phase2_node_candidates", {}).get(label)
+        )
+    return entry if isinstance(entry, dict) else None
+
+
+def _store_phase2_node_candidate(
+    ctx: Ctx,
+    label: str,
+    code: str,
+    *,
+    evidence: str,
+    failure_kind: str,
+    tier: str,
+    source: str,
+) -> dict[str, Any]:
+    """Persist one exact statement+body candidate and its current rejection.
+
+    The latest candidate is correction state, not accepted Lean.  Previously
+    seen candidate/failure pairs remain as compact fingerprints so a later
+    outer retry cannot pay for the same no-progress exchange again.
+    """
+    candidate_hash = _candidate_hash(code)
+    evidence = evidence.strip()[-12000:]
+    failure_hash = hashlib.sha256(
+        (failure_kind + "\0" + evidence).encode("utf-8")
+    ).hexdigest()
+    with _STATE_LOCK:
+        candidates = getattr(ctx, "phase2_node_candidates", None)
+        if candidates is None:
+            candidates = {}
+            ctx.phase2_node_candidates = candidates
+        previous = candidates.get(label) or {}
+        seen = [
+            str(item)
+            for item in previous.get("seen_states") or []
+            if str(item)
+        ]
+        state_hash = hashlib.sha256(
+            (candidate_hash + "\0" + failure_hash).encode("utf-8")
+        ).hexdigest()
+        repeated = state_hash in seen
+        if not repeated:
+            seen.append(state_hash)
+        entry = {
+            "epoch": _phase2_node_candidate_epoch(ctx, label),
+            "code": code[:60000],
+            "candidate_hash": candidate_hash,
+            "evidence": evidence,
+            "failure_kind": failure_kind,
+            "failure_hash": failure_hash,
+            "tier": tier,
+            "source": source,
+            "revision": int(previous.get("revision") or 0) + 1,
+            "seen_states": seen[-24:],
+            "attempted_corrections": [
+                str(item)
+                for item in previous.get("attempted_corrections") or []
+                if str(item)
+            ][-24:],
+            "repeated_state": repeated,
+        }
+        candidates[label] = entry
+    _record(
+        ctx.telemetry,
+        "phase2_complete_candidate_saved",
+        label=label,
+        source=source,
+        tier=tier,
+        failure_kind=failure_kind,
+        candidate_sha256=candidate_hash,
+        failure_sha256=failure_hash,
+        revision=entry["revision"],
+        repeated_state=repeated,
+    )
+    return copy.deepcopy(entry)
+
+
+def _note_phase2_candidate_correction(
+    ctx: Ctx, label: str, correction_fingerprint: str
+) -> None:
+    with _STATE_LOCK:
+        entry = getattr(ctx, "phase2_node_candidates", {}).get(label)
+        if not isinstance(entry, dict):
+            return
+        attempted = [
+            str(item) for item in entry.get("attempted_corrections") or []
+        ]
+        if correction_fingerprint not in attempted:
+            attempted.append(correction_fingerprint)
+        entry["attempted_corrections"] = attempted[-24:]
+
+
+def _clear_phase2_node_candidate(ctx: Ctx, label: str) -> None:
+    with _STATE_LOCK:
+        getattr(ctx, "phase2_node_candidates", {}).pop(label, None)
 
 
 def _finding_obligation_ids(finding: SkeletonFinding) -> set[str]:
@@ -4113,6 +5077,7 @@ def _store_generation_candidates(
     lean_output: str = "",
     semantic_status: str = "unknown",
     semantic_evidence: str = "",
+    expected_plan_fps: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Retain only monotonic candidate improvements for the current epoch.
 
@@ -4161,6 +5126,31 @@ def _store_generation_candidates(
         if not component <= requested_set:
             continue
         component_labels = [item for item in all_label_list if item in component]
+        stale_epoch = {
+            component_label: {
+                "generated": str(
+                    (expected_plan_fps or {}).get(component_label) or ""
+                ),
+                "current": _candidate_plan_fingerprint(ctx, component_label),
+            }
+            for component_label in component_labels
+            if expected_plan_fps is not None
+            and str((expected_plan_fps or {}).get(component_label) or "")
+            != _candidate_plan_fingerprint(ctx, component_label)
+        }
+        if stale_epoch:
+            handled.update(component_labels)
+            telemetry = getattr(ctx, "telemetry", None)
+            if telemetry is not None:
+                _record(
+                    telemetry,
+                    "phase1_retry_candidate_epoch_rejected",
+                    labels=component_labels,
+                    source=source,
+                    plan_fps=stale_epoch,
+                    reason="strategy_or_contract_changed_after_generation",
+                )
+            continue
         pieces = _delivered_decl_texts(
             parsed, component_labels, target_names, helper_owners
         )
@@ -4520,6 +5510,10 @@ def _reusable_uncompiled_candidate(
         import_modules=_sections_for_deps(ctx, labels, sections),
         generation_tier=tier,
         sessions={},
+        plan_fps={
+            label: str((entry or {}).get("plan_fp") or "")
+            for label, entry in zip(labels, entries)
+        },
     )
     target_kinds = _phase1_target_kinds(ctx, labels)
     label_by_name = {_lean_name(label): label for label in labels}
@@ -4817,12 +5811,37 @@ def _generation_candidates_for(ctx: Ctx, labels: Iterable[str]) -> str:
     return text
 
 
-def _clear_generation_candidates(ctx: Ctx, labels: Iterable[str]) -> None:
-    """Forget candidate Lean only after acceptance of the exact statement."""
+def _clear_generation_candidates(
+    ctx: Ctx,
+    labels: Iterable[str],
+    *,
+    reason: str = "statement_accepted",
+    include_shared_components: bool = False,
+) -> set[str]:
+    """Forget candidate Lean owned by the requested labels.
+
+    Accepted statements normally clear only their own candidate. An interface
+    epoch transition can additionally clear every candidate that shares helper
+    code with a changed label, because that stored code is one atomic unit.
+    """
+    wanted = set(labels)
     cleared: list[str] = []
     with _STATE_LOCK:
         candidates = getattr(ctx, "generation_candidates", {})
-        for label in labels:
+        if include_shared_components:
+            wanted.update(
+                label
+                for label, entry in candidates.items()
+                if wanted.intersection(
+                    (
+                        entry.get("component_labels")
+                        if isinstance(entry, dict)
+                        else None
+                    )
+                    or [label]
+                )
+            )
+        for label in wanted:
             if candidates.pop(label, None) is not None:
                 cleared.append(label)
     telemetry = getattr(ctx, "telemetry", None)
@@ -4831,8 +5850,9 @@ def _clear_generation_candidates(ctx: Ctx, labels: Iterable[str]) -> None:
             telemetry,
             "phase1_retry_candidate_cleared",
             labels=cleared,
-            reason="statement_accepted",
+            reason=reason,
         )
+    return set(cleared)
 
 
 def _retry_lifecycle_key(stage: str, label: str) -> str:
@@ -4919,12 +5939,15 @@ def _record_retry_failure(
 
 def _clear_retry_lifecycle(
     ctx: Ctx, labels: Iterable[str], *, stage: str | None = None
-) -> None:
+) -> set[str]:
     lifecycle = getattr(ctx, "retry_lifecycle", {})
     wanted = set(labels)
+    removed: set[str] = set()
     for key, entry in list(lifecycle.items()):
         if entry.get("label") in wanted and (stage is None or entry.get("stage") == stage):
             lifecycle.pop(key, None)
+            removed.add(key)
+    return removed
 
 
 def _prune_stale_retry_lifecycle(ctx: Ctx) -> set[str]:
@@ -4979,10 +6002,22 @@ def _call_model(
     """One model call. When ``sessions`` is given (a per-lifecycle dict keyed
     by runner spec), the call resumes that spec's backend session so follow-up
     calls keep the context they already built (claude-code and codex support
-    this; other backends ignore it). Successful calls update the dict; failed
-    or timed-out calls drop the session so the next call starts clean."""
+    this; other backends ignore it). Successful calls update the dict; timed-out
+    calls keep a captured session under the exact model-call fingerprint so an
+    outer retry can resume instead of restarting cold. Non-timeout failures drop
+    the session so the next call starts clean."""
     runner_spec = ctx.escalation_runner_spec if escalated else ctx.runner_spec
-    resume_session_id = sessions.get(runner_spec) if sessions is not None else None
+    resume_key = _model_resume_session_key(
+        ctx,
+        purpose=purpose,
+        labels=labels,
+        prompt=prompt,
+        runner_spec=runner_spec,
+    )
+    local_resume_session = sessions.get(runner_spec) if sessions is not None else None
+    resume_session_id = local_resume_session or _get_model_resume_session(
+        ctx, resume_key, runner_spec
+    )
     prompt_artifact = _store_text(ctx.telemetry, f"prompt_{purpose}", prompt)
     try:
         runner = _make_runner(
@@ -5043,6 +6078,7 @@ def _call_model(
         if is_environment_error(exc):
             if sessions is not None:
                 sessions.pop(runner_spec, None)
+            _clear_model_resume_session(ctx, resume_key)
             _record(
                 ctx.telemetry,
                 "model_call",
@@ -5064,6 +6100,7 @@ def _call_model(
         if status == "transport_exhausted":
             if sessions is not None:
                 sessions.pop(runner_spec, None)
+            _clear_model_resume_session(ctx, resume_key)
             _record(
                 ctx.telemetry,
                 "model_call",
@@ -5099,12 +6136,23 @@ def _call_model(
                 sessions[runner_spec] = observed
             else:
                 sessions.pop(runner_spec, None)
+        if captured_for_resume:
+            _set_model_resume_session(
+                ctx,
+                resume_key,
+                runner_spec,
+                observed,
+                labels=labels,
+                prompt=prompt,
+            )
+        else:
+            _clear_model_resume_session(ctx, resume_key)
         _record(
             ctx.telemetry,
             "model_call",
             purpose=purpose,
             labels=labels,
-            status="error",
+            status=status,
             duration_s=duration,
             timeout_s=timeout,
             effort=effort or "",
@@ -5128,6 +6176,7 @@ def _call_model(
             sessions[runner_spec] = result.session_id
         else:
             sessions.pop(runner_spec, None)
+    _clear_model_resume_session(ctx, resume_key)
     response_artifact = _store_text(ctx.telemetry, f"response_{purpose}", result.text)
     _record(
         ctx.telemetry,
@@ -5201,6 +6250,12 @@ class Phase1LayerCandidate:
     import_modules: list[str]
     generation_tier: str
     sessions: dict[str, str] = field(default_factory=dict)
+    # The contract/strategy epoch that produced these exact declarations.
+    # A concurrent failure may replace a plan or activate blueprint-direct
+    # generation before this candidate is persisted.  In that case the old
+    # code is useful evidence, but it must never be relabelled as a candidate
+    # generated under the new strategy.
+    plan_fps: dict[str, str] = field(default_factory=dict)
 
 
 def _state_path(name: str) -> Path:
@@ -5316,6 +6371,203 @@ def _discard_section_artifacts(path: Path) -> None:
     _discard_section_objects(path)
 
 
+def _statement_surface_probe_code(
+    module_code: str, target_names: set[str]
+) -> tuple[str, list[str]]:
+    """Replace only target implementation bodies by ``sorry`` for diagnosis.
+
+    This is never accepted or persisted.  It answers one operational question
+    after object generation times out: is the expensive part already present
+    in the public statement/interface, or only in the completed Phase-2 body?
+    Structures/classes/inductives are left intact because their fields *are*
+    their public interface.
+    """
+    parsed = _parse_module(module_code)
+    changed: list[str] = []
+    for decl in parsed.decls:
+        name = decl.name or ""
+        if name not in target_names or decl.kind not in {
+            "theorem",
+            "lemma",
+            "def",
+            "abbrev",
+            "instance",
+        }:
+            continue
+        original = decl.text.rstrip()
+        header = _TERMINAL_PROOF_RE.sub("", original).rstrip()
+        if header == original:
+            # The normal Phase-2 contract requires tactic bodies.  Keep the
+            # diagnostic conservative when a term-style body cannot be split
+            # without a Lean parser: do not claim that its statement was
+            # independently measured.
+            continue
+        decl.text = header + " := sorry"
+        changed.append(name)
+    probe_code, _ranges = _compose_module(
+        parsed.imports,
+        parsed.preamble,
+        [decl.text for decl in parsed.decls],
+    )
+    return probe_code, changed
+
+
+def _run_statement_surface_object_probe(
+    ctx: Ctx,
+    module_code: str,
+    labels: list[str],
+) -> tuple[Any | None, list[str]]:
+    """Compile a disposable statement-only control for a timed-out candidate."""
+    probe_code, changed = _statement_surface_probe_code(
+        module_code, {_lean_name(label) for label in labels}
+    )
+    if not changed:
+        return None, []
+    digest = hashlib.sha256(probe_code.encode("utf-8")).hexdigest()[:16]
+    probe_dir = SCRATCH_DIR / ctx.name / "object-probes"
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    probe_path = probe_dir / (
+        f"StatementSurface-{digest}-{threading.get_ident()}-{time.time_ns()}.lean"
+    )
+    probe_path.write_text(probe_code, encoding="utf-8")
+    try:
+        attempt = _compile_module_olean(
+            probe_path,
+            ctx.lean_command,
+            timeout=OBJECT_COMPILE_USABILITY_TIMEOUT,
+        )
+        return attempt, changed
+    finally:
+        _discard_section_artifacts(probe_path)
+
+
+def _object_gate_evidence(
+    ctx: Ctx,
+    labels: list[str],
+    module_code: str,
+    object_attempt: Any,
+    *,
+    complete_bodies: bool,
+) -> tuple[str, str]:
+    """Classify an object-build failure without asking a model to guess.
+
+    Returns ``(failure_class, evidence)``.  A completed Phase-2 node gets one
+    statement-only control compile after a timeout.  Phase-1 candidates already
+    contain deferred bodies, so their timed-out object is itself the control.
+    """
+    if getattr(object_attempt, "kind", "") != "object-timeout":
+        return (
+            "object_compile",
+            "Lean object compilation rejected delivered statements:\n"
+            + str(getattr(object_attempt, "output", ""))[-12000:],
+        )
+
+    timeout_s = OBJECT_COMPILE_USABILITY_TIMEOUT
+    canonical_duration = float(getattr(object_attempt, "duration_s", timeout_s))
+    if not complete_bodies:
+        evidence = (
+            f"{OBJECT_INTERFACE_FAILURE_PREFIX}:\n"
+            f"- Plain Lean validation passed, but `lean -o` did not finish within "
+            f"{timeout_s}s ({canonical_duration:.1f}s measured).\n"
+            "- This candidate already contains deferred bodies, so changing a "
+            "proof cannot fix the timeout.\n"
+            "- Preserve the exact blueprint mathematics, but revise this node's "
+            "Lean interface plan to use a bounded named representation (for "
+            "example, a same-node structure with named fields) instead of deeply "
+            "nested dependent products, repeated casts, or long projection chains.\n"
+            "- This is an interface-plan correction, not authorization to edit or "
+            "weaken the blueprint."
+        )
+        return "interface_usability", evidence
+
+    probe_attempt, changed = _run_statement_surface_object_probe(
+        ctx, module_code, labels
+    )
+    if probe_attempt is not None and getattr(probe_attempt, "ok", False):
+        evidence = (
+            f"{OBJECT_IMPLEMENTATION_FAILURE_PREFIX}:\n"
+            f"- The complete node exceeded the {timeout_s}s object-build budget "
+            f"({canonical_duration:.1f}s measured).\n"
+            f"- A statement-only control for {', '.join(changed)} compiled in "
+            f"{float(getattr(probe_attempt, 'duration_s', 0.0)):.1f}s.\n"
+            "- Preserve the public statement and interface exactly. Simplify only "
+            "the implementation/proof term so object generation remains bounded."
+        )
+        return "implementation_object", evidence
+    if probe_attempt is not None and getattr(probe_attempt, "kind", "") == "object-timeout":
+        probe_duration = float(getattr(probe_attempt, "duration_s", timeout_s))
+        evidence = (
+            f"{OBJECT_INTERFACE_FAILURE_PREFIX}:\n"
+            f"- The complete node exceeded the {timeout_s}s object-build budget "
+            f"({canonical_duration:.1f}s measured).\n"
+            f"- Replacing only the target body by `sorry` still exceeded the same "
+            f"budget ({probe_duration:.1f}s), so proof regeneration cannot fix it.\n"
+            "- Preserve the exact blueprint statement and proof semantics, but "
+            "refactor this node's Lean public representation using bounded named "
+            "structures/fields or simpler equivalent indices instead of deeply "
+            "nested dependent products, repeated casts, or projection chains.\n"
+            "- Return the complete statement and body together; this is not "
+            "authorization to edit or weaken the blueprint."
+        )
+        return "interface_usability", evidence
+
+    diagnostic = (
+        str(getattr(probe_attempt, "output", ""))[-4000:]
+        if probe_attempt is not None
+        else "The target body could not be separated conservatively for a control compile."
+    )
+    return (
+        "object_compile",
+        "Lean object compilation timed out, but the statement-only diagnostic "
+        "was inconclusive. Preserve the exact blueprint statement and complete "
+        "body while correcting the generated Lean module.\n\nDiagnostic:\n"
+        + diagnostic,
+    )
+
+
+def _compile_fast_candidate_object(
+    ctx: Ctx,
+    path: Path,
+    module_code: str,
+    labels: list[str],
+    *,
+    complete_bodies: bool,
+) -> tuple[Any, str, str]:
+    """Run the fast pipeline's bounded object gate and return exact evidence."""
+    attempt = _compile_module_olean(
+        path,
+        ctx.lean_command,
+        timeout=OBJECT_COMPILE_USABILITY_TIMEOUT,
+    )
+    _record(
+        ctx.telemetry,
+        "lean_object_compilation",
+        labels=labels,
+        owner_phase="phase2" if complete_bodies else "phase1",
+        status="passed" if attempt.ok else getattr(attempt, "kind", "failed"),
+        timeout_s=OBJECT_COMPILE_USABILITY_TIMEOUT,
+        duration_s=float(getattr(attempt, "duration_s", 0.0)),
+    )
+    if attempt.ok:
+        return attempt, "", ""
+    failure_class, evidence = _object_gate_evidence(
+        ctx,
+        labels,
+        module_code,
+        attempt,
+        complete_bodies=complete_bodies,
+    )
+    _record(
+        ctx.telemetry,
+        "lean_object_usability_gate",
+        labels=labels,
+        owner_phase="phase2" if complete_bodies else "phase1",
+        classification=failure_class,
+        evidence=evidence[-4000:],
+    )
+    return attempt, failure_class, evidence
+
+
 def _save_state(
     name: str,
     sections: list[Section],
@@ -5327,7 +6579,9 @@ def _save_state(
     local_group_partitions: dict[str, dict[str, Any]] | None = None,
     generation_feedback: dict[str, dict[str, str]] | None = None,
     generation_candidates: dict[str, dict[str, Any]] | None = None,
+    phase2_node_candidates: dict[str, dict[str, Any]] | None = None,
     phase1_exchange_history: dict[str, dict[str, Any]] | None = None,
+    model_resume_sessions: dict[str, dict[str, Any]] | None = None,
     retry_lifecycle: dict[str, dict[str, Any]] | None = None,
     design_plan_entries: dict[str, dict[str, Any]] | None = None,
     semantic_plan_entries: dict[str, dict[str, Any]] | None = None,
@@ -5335,6 +6589,8 @@ def _save_state(
     blueprint_direct_generation: dict[str, dict[str, Any]] | None = None,
     repair_boundary_pending: dict[str, Any] | None = None,
     phase2_repair_queue: list[dict[str, Any]] | None = None,
+    phase2_repair_active: dict[str, Any] | None = None,
+    phase2_prerequisite_labels: set[str] | None = None,
     phase2_started: bool = False,
     phase1_baseline_labels: set[str] | None = None,
     effective_section_size: int = 0,
@@ -5434,6 +6690,7 @@ def _save_state(
             "candidate_sha256": str(entry.get("candidate_sha256") or ""),
             "purpose": str(entry.get("purpose") or "")[:100],
             "tier": str(entry.get("tier") or "base")[:40],
+            "runner_spec": str(entry.get("runner_spec") or "")[:200],
             "prompt_sha256": str(entry.get("prompt_sha256") or ""),
             "launches": max(1, int(entry.get("launches") or 1)),
             "response_sha256s": [
@@ -5445,6 +6702,32 @@ def _save_state(
         }
         for key, entry in list((phase1_exchange_history or {}).items())[-512:]
         if isinstance(entry, dict)
+        and entry.get("labels")
+        and all(
+            str(label) in stmt_fps
+            and str((entry.get("statement_fps") or {}).get(str(label)) or "")
+            == stmt_fps.get(str(label))
+            for label in entry.get("labels") or []
+        )
+    }
+    resume_payload = {
+        str(key): {
+            "runner_spec": str(entry.get("runner_spec") or "")[:200],
+            "session_id": str(entry.get("session_id") or "")[:500],
+            "labels": [str(label) for label in entry.get("labels") or []],
+            "statement_fps": {
+                str(label): str(fp)
+                for label, fp in (entry.get("statement_fps") or {}).items()
+            },
+            "plan_fps": {
+                str(label): str(fp)
+                for label, fp in (entry.get("plan_fps") or {}).items()
+            },
+            "prompt_sha256": str(entry.get("prompt_sha256") or ""),
+        }
+        for key, entry in list((model_resume_sessions or {}).items())[-256:]
+        if isinstance(entry, dict)
+        and str(entry.get("session_id") or "")
         and entry.get("labels")
         and all(
             str(label) in stmt_fps
@@ -5539,6 +6822,31 @@ def _save_state(
         for label, entry in (generation_candidates or {}).items()
         if label in stmt_fps
         and str(entry.get("statement_fp") or "") == stmt_fps.get(label)
+        and str(entry.get("code") or "").strip()
+    }
+    phase2_candidate_payload = {
+        str(label): {
+            "epoch": str(entry.get("epoch") or ""),
+            "code": str(entry.get("code") or "")[:60000],
+            "candidate_hash": str(entry.get("candidate_hash") or ""),
+            "evidence": str(entry.get("evidence") or "")[-12000:],
+            "failure_kind": str(entry.get("failure_kind") or "unknown"),
+            "failure_hash": str(entry.get("failure_hash") or ""),
+            "tier": str(entry.get("tier") or "base"),
+            "source": str(entry.get("source") or "unknown"),
+            "revision": int(entry.get("revision") or 1),
+            "seen_states": [
+                str(item) for item in (entry.get("seen_states") or [])[-24:]
+            ],
+            "attempted_corrections": [
+                str(item)
+                for item in (entry.get("attempted_corrections") or [])[-24:]
+            ],
+            "repeated_state": bool(entry.get("repeated_state")),
+        }
+        for label, entry in (phase2_node_candidates or {}).items()
+        if label in stmt_fps
+        and str(entry.get("epoch") or "")
         and str(entry.get("code") or "").strip()
     }
     lifecycle_payload = {
@@ -5663,6 +6971,12 @@ def _save_state(
             "source": str(entry.get("source") or "unknown")[:200],
             "evidence": str(entry.get("evidence") or "")[-12000:],
             "activations": max(1, int(entry.get("activations") or 1)),
+            "previous_interface_fp": str(
+                entry.get("previous_interface_fp") or ""
+            ),
+            "accepted_interface_fp": str(
+                entry.get("accepted_interface_fp") or ""
+            ),
         }
         for label, entry in (blueprint_direct_generation or {}).items()
         if label in stmt_fps
@@ -5731,29 +7045,63 @@ def _save_state(
         if boundary_labels
         else {}
     )
+    active_repair = copy.deepcopy(phase2_repair_active or {})
+    active_repair_id = str(active_repair.get("request_id") or "")
     phase2_queue_payload = [
         copy.deepcopy(payload)
         for payload in (phase2_repair_queue or [])
         if isinstance(payload, dict)
         and payload.get("request_id")
         and payload.get("labels")
-        and all(
-            str(label) in stmt_fps
-            and (
-                not str((payload.get("statement_fps") or {}).get(str(label)) or "")
-                or str((payload.get("statement_fps") or {}).get(str(label)) or "")
-                == stmt_fps.get(str(label))
+        and (
+            str(payload.get("request_id") or "") == active_repair_id
+            or all(
+                str(label) in stmt_fps
+                and (
+                    not str(
+                        (payload.get("statement_fps") or {}).get(str(label)) or ""
+                    )
+                    or str(
+                        (payload.get("statement_fps") or {}).get(str(label)) or ""
+                    )
+                    == stmt_fps.get(str(label))
+                )
+                for label in payload.get("labels") or []
             )
-            for label in payload.get("labels") or []
         )
     ]
+    persisted_queue_ids = {
+        str(payload.get("request_id") or "") for payload in phase2_queue_payload
+    }
+    active_repair_payload = (
+        {
+            "request_id": active_repair_id,
+            "stage": (
+                "verify"
+                if str(active_repair.get("stage") or "repair") == "verify"
+                else "repair"
+            ),
+            "labels": [
+                str(label)
+                for label in active_repair.get("labels") or []
+                if str(label) in stmt_fps
+            ],
+            "verification_labels": [
+                str(label)
+                for label in active_repair.get("verification_labels") or []
+                if str(label) in stmt_fps
+            ],
+        }
+        if active_repair_id in persisted_queue_ids
+        else {}
+    )
 
     path = _state_path(name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
-                "version": 25,
+                "version": 28,
                 "refinement_order": refinement_order,
                 "conjecture_policy": conjecture_policy,
                 "sections": entries,
@@ -5775,9 +7123,16 @@ def _save_state(
                         label: candidate_payload[label]
                         for label in sorted(candidate_payload)
                     },
+                    "phase2_node_candidates": {
+                        label: phase2_candidate_payload[label]
+                        for label in sorted(phase2_candidate_payload)
+                    },
                     "phase1_exchange_history": {
                         key: exchange_payload[key]
                         for key in sorted(exchange_payload)
+                    },
+                    "model_resume_sessions": {
+                        key: resume_payload[key] for key in sorted(resume_payload)
                     },
                     "retry_lifecycle": {
                         key: lifecycle_payload[key]
@@ -5801,10 +7156,16 @@ def _save_state(
                     },
                     "repair_boundary_pending": boundary_payload,
                     "phase2_repair_queue": phase2_queue_payload,
+                    "phase2_repair_active": active_repair_payload,
                     "workflow": {
                         "phase2_started": bool(phase2_started),
                         "phase1_baseline_labels": sorted(
                             phase1_baseline_labels or set()
+                        ),
+                        "phase2_prerequisite_labels": sorted(
+                            label
+                            for label in phase2_prerequisite_labels or set()
+                            if label in stmt_fps
                         ),
                     },
                 },
@@ -5827,8 +7188,14 @@ def _save_ctx_state(ctx: Ctx, sections: list[Section]) -> None:
         generation_candidates = copy.deepcopy(
             getattr(ctx, "generation_candidates", {})
         )
+        phase2_node_candidates = copy.deepcopy(
+            getattr(ctx, "phase2_node_candidates", {})
+        )
         phase1_exchange_history = copy.deepcopy(
             getattr(ctx, "phase1_exchange_history", {})
+        )
+        model_resume_sessions = copy.deepcopy(
+            getattr(ctx, "model_resume_sessions", {})
         )
     _save_state(
         ctx.name,
@@ -5840,7 +7207,9 @@ def _save_ctx_state(ctx: Ctx, sections: list[Section]) -> None:
         local_group_partitions=getattr(ctx, "local_group_partitions", {}),
         generation_feedback=generation_feedback,
         generation_candidates=generation_candidates,
+        phase2_node_candidates=phase2_node_candidates,
         phase1_exchange_history=phase1_exchange_history,
+        model_resume_sessions=model_resume_sessions,
         retry_lifecycle=getattr(ctx, "retry_lifecycle", {}),
         design_plan_entries=getattr(ctx, "design_plan_entries", {}),
         semantic_plan_entries=getattr(ctx, "semantic_plan_entries", {}),
@@ -5850,6 +7219,10 @@ def _save_ctx_state(ctx: Ctx, sections: list[Section]) -> None:
         ),
         repair_boundary_pending=getattr(ctx, "repair_boundary_pending", {}),
         phase2_repair_queue=getattr(ctx, "phase2_repair_queue", []),
+        phase2_repair_active=getattr(ctx, "phase2_repair_active", {}),
+        phase2_prerequisite_labels=set(
+            getattr(ctx, "phase2_prerequisite_labels", set())
+        ),
         phase2_started=bool(getattr(ctx, "phase2_started", False)),
         phase1_baseline_labels=set(
             getattr(ctx, "phase1_baseline_labels", set())
@@ -5909,6 +7282,11 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
     ctx.phase1_baseline_labels = {
         str(label)
         for label in workflow.get("phase1_baseline_labels") or []
+    }
+    ctx.phase2_prerequisite_labels = {
+        str(label)
+        for label in workflow.get("phase2_prerequisite_labels") or []
+        if str(label) in ctx.nodes
     }
     raw_quarantine = scheduler.get("quarantine") or {}
     ctx.quarantine = {
@@ -6026,6 +7404,34 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
         and str(entry.get("statement_fp") or "") == ctx.stmt_fps.get(str(label))
         and str(entry.get("code") or "").strip()
     }
+    raw_phase2_candidates = scheduler.get("phase2_node_candidates") or {}
+    ctx.phase2_node_candidates = {
+        str(label): {
+            "epoch": str(entry.get("epoch") or ""),
+            "code": str(entry.get("code") or "")[:60000],
+            "candidate_hash": str(entry.get("candidate_hash") or ""),
+            "evidence": str(entry.get("evidence") or "")[-12000:],
+            "failure_kind": str(entry.get("failure_kind") or "unknown"),
+            "failure_hash": str(entry.get("failure_hash") or ""),
+            "tier": str(entry.get("tier") or "base"),
+            "source": str(entry.get("source") or "unknown"),
+            "revision": int(entry.get("revision") or 1),
+            "seen_states": [
+                str(item) for item in (entry.get("seen_states") or [])[-24:]
+            ],
+            "attempted_corrections": [
+                str(item)
+                for item in (entry.get("attempted_corrections") or [])[-24:]
+            ],
+            "repeated_state": bool(entry.get("repeated_state")),
+        }
+        for label, entry in raw_phase2_candidates.items()
+        if isinstance(entry, dict)
+        and str(label) in ctx.nodes
+        and str(entry.get("epoch") or "")
+        == _phase2_node_candidate_epoch(ctx, str(label))
+        and str(entry.get("code") or "").strip()
+    }
     raw_lifecycle = scheduler.get("retry_lifecycle") or {}
     ctx.retry_lifecycle = {
         str(key): {
@@ -6113,6 +7519,34 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
         for payload in raw_phase2_queue
         if isinstance(payload, dict)
     ]
+    raw_phase2_active = scheduler.get("phase2_repair_active") or {}
+    active_id = str(raw_phase2_active.get("request_id") or "")
+    queued_ids = {
+        str(payload.get("request_id") or "")
+        for payload in ctx.phase2_repair_queue
+    }
+    ctx.phase2_repair_active = (
+        {
+            "request_id": active_id,
+            "stage": (
+                "verify"
+                if str(raw_phase2_active.get("stage") or "repair") == "verify"
+                else "repair"
+            ),
+            "labels": [
+                str(label)
+                for label in raw_phase2_active.get("labels") or []
+                if str(label) in ctx.nodes
+            ],
+            "verification_labels": [
+                str(label)
+                for label in raw_phase2_active.get("verification_labels") or []
+                if str(label) in ctx.nodes
+            ],
+        }
+        if active_id and active_id in queued_ids
+        else {}
+    )
     _prune_stale_phase2_repair_queue(ctx)
     raw_plan = scheduler.get("design_plan_entries") or {}
     ctx.design_plan_entries = {
@@ -6250,6 +7684,12 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
             "source": str(entry.get("source") or "unknown")[:200],
             "evidence": str(entry.get("evidence") or "")[-12000:],
             "activations": max(1, int(entry.get("activations") or 1)),
+            "previous_interface_fp": str(
+                entry.get("previous_interface_fp") or ""
+            ),
+            "accepted_interface_fp": str(
+                entry.get("accepted_interface_fp") or ""
+            ),
         }
         for label, entry in raw_direct_generation.items()
         if isinstance(entry, dict)
@@ -6273,6 +7713,7 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
             "candidate_sha256": str(entry.get("candidate_sha256") or ""),
             "purpose": str(entry.get("purpose") or ""),
             "tier": str(entry.get("tier") or "base"),
+            "runner_spec": str(entry.get("runner_spec") or ""),
             "prompt_sha256": str(entry.get("prompt_sha256") or ""),
             "launches": max(1, int(entry.get("launches") or 1)),
             "response_sha256s": [
@@ -6287,6 +7728,28 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
         and entry.get("labels")
     }
     _prune_stale_phase1_exchange_history(ctx)
+    raw_resume_sessions = scheduler.get("model_resume_sessions") or {}
+    ctx.model_resume_sessions = {
+        str(key): {
+            "runner_spec": str(entry.get("runner_spec") or ""),
+            "session_id": str(entry.get("session_id") or ""),
+            "labels": [str(label) for label in entry.get("labels") or []],
+            "statement_fps": {
+                str(label): str(fp)
+                for label, fp in (entry.get("statement_fps") or {}).items()
+            },
+            "plan_fps": {
+                str(label): str(fp)
+                for label, fp in (entry.get("plan_fps") or {}).items()
+            },
+            "prompt_sha256": str(entry.get("prompt_sha256") or ""),
+        }
+        for key, entry in raw_resume_sessions.items()
+        if isinstance(entry, dict)
+        and str(entry.get("session_id") or "")
+        and entry.get("labels")
+    }
+    _prune_stale_model_resume_sessions(ctx)
     legacy_quarantine = {
         str(label)
         for label in scheduler.get("quarantined_labels") or []
@@ -6775,6 +8238,36 @@ def _decomposition_orientation_findings(
                 f"any repaired target ({', '.join(sorted(root_set))})"
             )
     return findings
+
+
+def _decomposition_orientation_dependency_edges(
+    before: dict[str, Node],
+    after: dict[str, Node],
+    roots: Iterable[str],
+) -> dict[str, set[str]]:
+    """Return safe deterministic root->helper edges for orientation defects.
+
+    This is deliberately narrower than ``_decomposition_orientation_findings``.
+    If a decomposition repair introduces helper nodes for a single repaired
+    root but forgets to add the public ``\\uses`` edge from that root, the graph
+    direction can be fixed mechanically and then validated.  Multi-root repairs
+    and reverse edges remain model/validator failures, because guessing the
+    owner or closing a cycle would change the proof graph.
+    """
+    root_set = {label for label in roots if label in after}
+    added = set(after) - set(before)
+    if len(root_set) != 1 or not added:
+        return {}
+    root = next(iter(root_set))
+    root_closure = _transitive_dependencies(after, root)
+    dependencies: set[str] = set()
+    for helper in sorted(added):
+        if helper in root_closure:
+            continue
+        if root in _transitive_dependencies(after, helper):
+            continue
+        dependencies.add(helper)
+    return {root: dependencies} if dependencies else {}
 
 
 def _invalid_mathlib_refusal_mappings(ctx: Ctx, refusal: dict) -> dict[str, str]:
@@ -7288,6 +8781,10 @@ Conjecture policy (`record`) for: {listed}
   `def <required_name> ... : Prop := <the exact proposition>`.
 - Do not emit a theorem, proof, `sorry`, axiom, or placeholder for it. Recording
   the proposition is not claiming that the conjecture has been proved.
+- When the blueprint says "it remains open whether P", the recorded proposition
+  is P itself. The fact that P is open is pipeline metadata; do not encode that
+  status as a tautological `P or not P`, a contradictory wrapper, an
+  `OpenQuestion` wrapper, or a second blueprint statement.
 - Only statement-scoped dependencies may appear in this public proposition;
   proof-only dependencies remain unavailable because no proof is attempted.
 """
@@ -7658,6 +9155,23 @@ def _targeted_skeleton_patch_prompt(
         "contract, not a Phase-2 implementation."
     )
     planned_helpers = _planned_helper_specs(ctx, patch_labels)
+    parsed_current = _parse_module(module_code)
+    patch_names = {_lean_name(label) for label in patch_labels}
+    helper_names = {
+        str(helper.get("name") or "")
+        for _owner, helper in planned_helpers
+        if str(helper.get("name") or "")
+    }
+    focused_decls = [
+        decl.text
+        for decl in parsed_current.decls
+        if decl.name in patch_names | helper_names
+    ]
+    focused_code, _focused_ranges = _compose_module(
+        parsed_current.imports,
+        parsed_current.preamble,
+        focused_decls,
+    )
     persisted_feedback = _generation_feedback_for(
         ctx,
         patch_labels,
@@ -7749,9 +9263,10 @@ Deterministic audit findings to fix:
 {_format_skeleton_findings(relevant)[-10000:]}
 ```
 
-Current section file:
+Current declarations owned by the repair targets (the complete dependency
+interface is provided above):
 ```lean
-{module_code[:50000]}
+{focused_code[:24000]}
 ```
 
 Target blueprint nodes to patch:
@@ -7976,6 +9491,20 @@ def _targeted_patch_skeleton_decls(
         purpose="skeleton_declaration_patch",
         tier=tier,
     )
+    if not exchange_key:
+        _record(
+            ctx.telemetry,
+            "phase1_exchange_sample_limit",
+            purpose="skeleton_declaration_patch",
+            labels=patch_labels,
+            tier=tier,
+            limit=PHASE1_EXCHANGE_SAMPLE_LIMIT,
+        )
+        return None, (
+            "targeted declaration patch exhausted the persisted three-sample "
+            "allowance for this exact statement, plan, model, candidate, and "
+            "prompt; routing the retained evidence without another model call"
+        )
     result = _call_model(
         ctx,
         prompt,
@@ -8007,6 +9536,21 @@ def _targeted_patch_skeleton_decls(
             purpose="skeleton_declaration_patch",
             tier="escalation",
         )
+        if not exchange_key:
+            _record(
+                ctx.telemetry,
+                "phase1_exchange_sample_limit",
+                purpose="skeleton_declaration_patch",
+                labels=patch_labels,
+                tier="escalation",
+                limit=PHASE1_EXCHANGE_SAMPLE_LIMIT,
+            )
+            return None, (
+                "targeted declaration patch exhausted the persisted "
+                "three-sample escalation allowance for this exact statement, "
+                "plan, model, candidate, and prompt; routing the retained "
+                "evidence without another model call"
+            )
         result = _call_model(
             ctx,
             prompt,
@@ -8504,6 +10048,77 @@ def _skeleton_deterministic_audit(code: str, ctx: Ctx, labels: list[str]) -> lis
     return [finding.message for finding in _skeleton_deterministic_findings(code, ctx, labels)]
 
 
+_AUDIT_DECOMPOSITION_VERBS = (
+    "does not formalize",
+    "does not encode",
+    "does not state",
+    "does not expose",
+    "omits",
+    "erases",
+    "hides",
+    "missing",
+)
+_AUDIT_DECOMPOSITION_OBJECT_NOUNS = (
+    "term",
+    "terms",
+    "object",
+    "objects",
+    "construction",
+    "formula",
+    "formulas",
+    "operation",
+    "relation",
+    "interface",
+    "obligation",
+    "obligations",
+)
+_AUDIT_DECOMPOSITION_OBJECT_MODIFIERS = (
+    "actual",
+    "concrete",
+    "named",
+    "lifted",
+    "resulting",
+    "displayed",
+    "bundled",
+    "separate",
+    "explicit",
+)
+
+
+def _audit_issue_has_missing_named_object_evidence(
+    issue_line: str, issue: object
+) -> bool:
+    """Detect audit evidence that belongs on the decomposition route.
+
+    This is intentionally narrower than generic semantic failure routing.  It
+    does not treat every mistranslated statement as a blueprint edit.  It only
+    covers the historical slow class where the audit says a Phase-1 statement
+    cannot faithfully expose concrete mathematical objects/formulas because the
+    blueprint node bundles them instead of naming them as declaration-level
+    interfaces.  That is the exact condition the existing decomposition route
+    was built for.
+    """
+    if not isinstance(issue, dict):
+        return False
+    if str(issue.get("severity", "reject")).lower() != "reject":
+        return False
+    evidence_parts = [issue_line, str(issue.get("reason") or "")]
+    evidence_parts.extend(
+        str(item)
+        for key in ("missing_helpers", "interface_defects")
+        for item in (issue.get(key) or [])
+    )
+    evidence = "\n".join(evidence_parts).lower()
+    if not evidence.strip():
+        return False
+    if not any(verb in evidence for verb in _AUDIT_DECOMPOSITION_VERBS):
+        return False
+    if not any(noun in evidence for noun in _AUDIT_DECOMPOSITION_OBJECT_NOUNS):
+        return False
+    if not any(modifier in evidence for modifier in _AUDIT_DECOMPOSITION_OBJECT_MODIFIERS):
+        return False
+    return True
+
 def _model_alignment_audit(
     ctx: Ctx,
     labels: list[str],
@@ -8596,7 +10211,13 @@ def _model_alignment_audit(
             "claimed as proved theorems: "
             + ", ".join(recorded_conjectures)
             + ". Audit whether each proposition exactly matches its blueprint "
-            "claim. Do not reject it merely because it has no proof.\n"
+            "claim. In wording such as 'it remains open whether P', the `def` "
+            "must define P itself: defining a proposition does not assert or "
+            "prove it. The open status is tracked separately by the pipeline "
+            "and must not be encoded inside the proposition. Do not reject the "
+            "positive proposition P merely because the blueprint says its truth "
+            "is open; reject only when the defined P differs from the mathematical "
+            "question in the blueprint.\n"
         )
     prompt += (
         "\nExisting blueprint labels available for `required_dependencies` "
@@ -8655,10 +10276,62 @@ def _model_alignment_audit(
             [],
         )
     issues = payload.get("issues") or []
-    accepted = bool(payload.get("accepted")) and not any(
+    deferred_body_obligations: dict[str, list[str]] = {}
+    effective_issues: list[object] = []
+    deferred_rejections: set[str] = set()
+    for raw_issue in issues if isinstance(issues, list) else []:
+        if not isinstance(raw_issue, dict):
+            effective_issues.append(raw_issue)
+            continue
+        issue = dict(raw_issue)
+        label = str(issue.get("node") or "")
+        decl = decls.get(_lean_name(label))
+        node = nodes.get(label)
+        is_deferred_definition = bool(
+            node is not None
+            and node.kind in DEFINITION_LIKE_KINDS
+            and decl is not None
+            and decl.kind in {"def", "abbrev"}
+            and _has_terminal_sorry(decl.text)
+        )
+        interface_defects = issue.get("interface_defects")
+        obligations = [
+            str(item).strip()
+            for item in issue.get("deferred_body_obligations") or []
+            if str(item).strip()
+        ]
+        if (
+            is_deferred_definition
+            and str(issue.get("severity", "reject")).lower() == "reject"
+            and isinstance(interface_defects, list)
+            and not any(str(item).strip() for item in interface_defects)
+            and obligations
+            and not any(
+                str(item).strip()
+                for key in (
+                    "missing_blueprint_information",
+                    "required_dependencies",
+                    "missing_helpers",
+                )
+                for item in issue.get(key) or []
+            )
+        ):
+            # Phase 1 owns only the public header of a deferred definition.
+            # A critic may record missing body semantics, but that evidence
+            # cannot turn implementation work into a different result type.
+            issue["severity"] = "defer"
+            deferred_rejections.add(label)
+        if is_deferred_definition and obligations:
+            deferred_body_obligations.setdefault(label, []).extend(obligations)
+        effective_issues.append(issue)
+    issues = effective_issues
+    blocking_rejection = any(
         str(issue.get("severity", "")).lower() == "reject"
         for issue in issues
         if isinstance(issue, dict)
+    )
+    accepted = not blocking_rejection and (
+        bool(payload.get("accepted")) or bool(deferred_rejections)
     )
     _record(
         ctx.telemetry,
@@ -8667,6 +10340,10 @@ def _model_alignment_audit(
         source="model",
         accepted=accepted,
         classification=str(payload.get("classification") or ""),
+        deferred_body_obligations={
+            label: list(dict.fromkeys(values))
+            for label, values in sorted(deferred_body_obligations.items())
+        },
     )
     if accepted:
         cache.update(keys[label] for label in audit_labels)
@@ -8702,6 +10379,14 @@ def _model_alignment_audit(
                 issue_kind, missing_info = _authorized_alignment_failure_kind(
                     issue_classification, [issue_line], [issue]
                 )
+                if (
+                    issue_kind == "lean-generation"
+                    and _audit_issue_has_missing_named_object_evidence(
+                        issue_line, issue
+                    )
+                ):
+                    issue_kind = "decomposition"
+                    missing_info = []
             # More specific blueprint/decomposition evidence must not be lost
             # when a critic reports several findings for the same node.
             priority = {"lean-generation": 0, "decomposition": 1, "blueprint": 2}
@@ -8900,6 +10585,136 @@ def _sync_design_plan(ctx: Ctx) -> None:
     )
 
 
+def _transition_phase1_generation_epoch(
+    ctx: Ctx,
+    labels: Iterable[str],
+    *,
+    reason: str,
+) -> None:
+    """Atomically discard scheduler state owned by an obsolete interface epoch.
+
+    A Phase-1 plan replacement, plan deletion, or switch to blueprint-direct
+    generation changes which prompt/candidate contract is authoritative for a
+    node.  Every such mutation must invalidate the same state in one place.
+    Exact failure feedback is deliberately retained so the next generation
+    call still sees why the prior epoch failed.
+    """
+    ordered = list(dict.fromkeys(str(label) for label in labels))
+    if not ordered:
+        _sync_design_plan(ctx)
+        return
+    with _STATE_LOCK:
+        removed_candidates = _clear_generation_candidates(
+            ctx,
+            ordered,
+            reason=reason,
+            include_shared_components=True,
+        )
+        removed_retries = _clear_retry_lifecycle(
+            ctx, ordered, stage="phase1_statement"
+        )
+        removed_exchanges = _clear_phase1_exchange_history(ctx, ordered)
+        _release_quarantine(ctx, ordered, reason=reason)
+        _release_local_group_partitions(ctx, ordered, reason=reason)
+        _sync_design_plan(ctx)
+    telemetry = getattr(ctx, "telemetry", None)
+    if telemetry is not None:
+        _record(
+            telemetry,
+            "phase1_generation_epoch_transition",
+            labels=ordered,
+            reason=reason,
+            removed_candidates=sorted(removed_candidates),
+            removed_retry_entries=len(removed_retries),
+            removed_exchange_entries=len(removed_exchanges),
+            feedback_preserved=True,
+        )
+
+
+def _invalidate_descendant_design_plans_for_changed_interfaces(
+    ctx: Ctx,
+    labels: Iterable[str],
+    *,
+    reason: str,
+) -> set[str]:
+    """Drop downstream Phase-1 plans after a provider interface becomes untrusted.
+
+    The global/semantic plan is only guidance. If a dependency's candidate-owned
+    surface is rejected and that dependency switches to blueprint-direct
+    generation, descendants planned against the old surface are no longer
+    authoritative even though their own blueprint statement text did not change.
+    Keep the regenerated provider as the source of truth by forcing descendants
+    to re-plan/re-generate against the new dependency contract.
+    """
+    roots = {str(label) for label in labels if str(label) in ctx.nodes}
+    descendants = _dependency_descendants(ctx.nodes, roots) - roots
+    affected = {
+        label
+        for label in descendants
+        if label in getattr(ctx, "design_plan_entries", {})
+        or label in getattr(ctx, "design_plan_alternates", {})
+        or label in getattr(ctx, "generation_candidates", {})
+        or any(
+            entry.get("label") == label
+            for entry in getattr(ctx, "retry_lifecycle", {}).values()
+        )
+    }
+    if not affected:
+        return set()
+
+    for label in affected:
+        getattr(ctx, "design_plan_entries", {}).pop(label, None)
+        getattr(ctx, "design_plan_alternates", {}).pop(label, None)
+    _transition_phase1_generation_epoch(ctx, sorted(affected), reason=reason)
+    _record(
+        ctx.telemetry,
+        "phase1_descendant_plan_invalidated",
+        labels=sorted(affected),
+        roots=sorted(roots),
+        reason=reason,
+    )
+    return affected
+
+
+def _invalidate_blueprint_direct_descendants_after_freeze(
+    ctx: Ctx, labels: Iterable[str]
+) -> set[str]:
+    """Invalidate descendants only if blueprint-direct changed public surface."""
+    direct = getattr(ctx, "blueprint_direct_generation", {}) or {}
+    changed_roots: set[str] = set()
+    for label in labels:
+        entry = direct.get(label)
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("statement_fp") or "") != ctx.stmt_fps.get(label, ""):
+            continue
+        previous_fp = str(entry.get("previous_interface_fp") or "")
+        current_fp = _design_plan_public_surface_fingerprint(
+            (getattr(ctx, "design_plan_entries", {}) or {}).get(label)
+        )
+        if not current_fp:
+            continue
+        if str(entry.get("accepted_interface_fp") or "") == current_fp:
+            continue
+        entry["accepted_interface_fp"] = current_fp
+        if previous_fp and previous_fp != current_fp:
+            changed_roots.add(label)
+            _record(
+                ctx.telemetry,
+                "phase1_blueprint_direct_interface_changed",
+                label=label,
+                previous_interface_fp=previous_fp,
+                accepted_interface_fp=current_fp,
+            )
+    if not changed_roots:
+        return set()
+    return _invalidate_descendant_design_plans_for_changed_interfaces(
+        ctx,
+        changed_roots,
+        reason="blueprint_direct_interface_changed",
+    )
+
+
 _PLAN_ENTRY_PROGRESS_KEYS = ("semantic_revision_count",)
 
 
@@ -8918,6 +10733,8 @@ def _activate_blueprint_direct_generation(
     evidence: str,
     *,
     source: str,
+    evidence_by_label: Mapping[str, str] | None = None,
+    shared_evidence: bool = False,
 ) -> set[str]:
     """Bound the damage from an unusable global-plan component.
 
@@ -8926,30 +10743,55 @@ def _activate_blueprint_direct_generation(
     failure evidence instead. This transition costs no model call and is
     monotonic until the blueprint statement changes.
     """
+    ordered = list(dict.fromkeys(labels))
+    scoped_evidence = (
+        {
+            label: str(value).strip()[-12000:]
+            for label, value in evidence_by_label.items()
+            if label in ordered and str(value).strip()
+        }
+        if evidence_by_label is not None
+        else _explicit_generation_evidence_by_label(ordered, evidence)
+    )
+    if shared_evidence and evidence.strip():
+        shared = evidence.strip()[-12000:]
+        for label in ordered:
+            scoped_evidence.setdefault(label, shared)
+
     direct = getattr(ctx, "blueprint_direct_generation", {})
     ctx.blueprint_direct_generation = direct
     activated: set[str] = set()
-    for label in dict.fromkeys(labels):
+    for label in ordered:
         statement_fp = ctx.stmt_fps.get(label, "")
         if not statement_fp:
             continue
         previous = direct.get(label) or {}
+        previous_interface_fp = str(
+            previous.get("previous_interface_fp") or ""
+        ) or _design_plan_public_surface_fingerprint(
+            getattr(ctx, "design_plan_entries", {}).get(label)
+        )
         previous_evidence = (
             str(previous.get("evidence") or "")
             if str(previous.get("statement_fp") or "") == statement_fp
             else ""
         )
+        label_evidence = scoped_evidence.get(label, "")
         combined = previous_evidence
-        if evidence and evidence not in combined:
+        if label_evidence and label_evidence not in combined:
             combined = (
                 (combined + f"\n\nLater evidence ({source}):\n" if combined else "")
-                + evidence
+                + label_evidence
             )[-12000:]
         direct[label] = {
             "statement_fp": statement_fp,
             "source": source,
             "evidence": combined,
             "activations": int(previous.get("activations") or 0) + 1,
+            "previous_interface_fp": previous_interface_fp,
+            "accepted_interface_fp": str(
+                previous.get("accepted_interface_fp") or ""
+            ),
         }
         activated.add(label)
     if not activated:
@@ -8971,17 +10813,36 @@ def _activate_blueprint_direct_generation(
                 "closure_wave_id",
             ):
                 entry.pop(key, None)
-    _store_generation_feedback(ctx, activated, evidence, source=source)
-    _clear_retry_lifecycle(ctx, activated, stage="phase1_statement")
-    _prune_stale_generation_candidates(ctx)
-    _sync_design_plan(ctx)
+    _store_generation_feedback(
+        ctx,
+        activated,
+        evidence,
+        source=source,
+        evidence_by_label=scoped_evidence,
+    )
+    _transition_phase1_generation_epoch(
+        ctx,
+        activated,
+        reason=f"blueprint_direct:{source}",
+    )
     _record(
         ctx.telemetry,
         "phase1_blueprint_direct_generation_activated",
         labels=sorted(activated),
         source=source,
         avoided_route="repeated_interface_plan_correction",
-        evidence=evidence[-4000:],
+        evidence_sha256_by_label={
+            label: hashlib.sha256(
+                scoped_evidence.get(label, "").encode("utf-8")
+            ).hexdigest()
+            for label in sorted(activated)
+            if scoped_evidence.get(label)
+        },
+        evidence_chars_by_label={
+            label: len(scoped_evidence.get(label, ""))
+            for label in sorted(activated)
+            if scoped_evidence.get(label)
+        },
     )
     _log(
         "  interface plan circuit breaker activated; generating directly from "
@@ -8991,7 +10852,7 @@ def _activate_blueprint_direct_generation(
 
 
 def _prune_stale_blueprint_direct_generation(ctx: Ctx) -> set[str]:
-    """Discard circuit-breaker state when the blueprint statement changes."""
+    """Discard stale state and repair pre-v8 sibling-evidence contamination."""
     direct = getattr(ctx, "blueprint_direct_generation", {})
     stale = {
         label
@@ -9001,6 +10862,37 @@ def _prune_stale_blueprint_direct_generation(ctx: Ctx) -> set[str]:
     }
     for label in stale:
         direct.pop(label, None)
+
+    # Older runs copied one complete multi-node audit into every activated
+    # entry.  Repair that persisted state on continuation before its evidence
+    # participates in candidate plan fingerprints.  Free-form singleton and
+    # genuinely shared operational evidence has no declaration marker and is
+    # left untouched.
+    repaired: dict[str, tuple[int, int]] = {}
+    known_labels = list(ctx.nodes)
+    for label, entry in direct.items():
+        evidence = str(entry.get("evidence") or "").strip()
+        if not evidence:
+            continue
+        parsed = _explicit_generation_evidence_by_label(known_labels, evidence)
+        if not parsed:
+            continue
+        own_evidence = parsed.get(label, "")
+        if own_evidence == evidence:
+            continue
+        repaired[label] = (len(evidence), len(own_evidence))
+        entry["evidence"] = own_evidence
+    if repaired:
+        _record(
+            ctx.telemetry,
+            "phase1_blueprint_direct_evidence_migrated",
+            labels=sorted(repaired),
+            evidence_chars={
+                label: {"before": before, "after": after}
+                for label, (before, after) in repaired.items()
+            },
+            reason="remove_sibling_owned_audit_findings",
+        )
     return stale
 
 
@@ -9069,7 +10961,15 @@ def _prune_stale_design_plan(ctx: Ctx) -> set[str]:
     }
     for label in stale_semantic:
         semantic_entries.pop(label, None)
-    _sync_design_plan(ctx)
+    invalidated_epoch = stale | stale_direct
+    if invalidated_epoch:
+        _transition_phase1_generation_epoch(
+            ctx,
+            invalidated_epoch,
+            reason="stale_plan_or_strategy_pruned",
+        )
+    else:
+        _sync_design_plan(ctx)
     telemetry = getattr(ctx, "telemetry", None)
     if stale and telemetry is not None:
         _record(
@@ -10212,6 +12112,82 @@ def _revise_audit_reported_plan_defects(
     return revised
 
 
+def _activate_audit_reported_candidate_plan_defects(
+    ctx: Ctx,
+    audit: AlignmentAuditResult,
+    *,
+    layer_no: int,
+    source: str,
+) -> set[str]:
+    """Route candidate-owned plan omissions to blueprint-direct generation.
+
+    ``origin == phase1_candidate`` means the typed contract was derived from a
+    generated Lean candidate rather than from the global design-plan table.
+    There is therefore no independent plan object for
+    ``_revise_exhausted_phase1_contracts`` to repair. If the audit gives
+    concrete blueprint requirements missing from that candidate-owned contract,
+    regenerating under the same candidate provenance is stale work; switch this
+    exact statement fingerprint to the existing blueprint-direct path instead.
+    """
+    eligible = (
+        audit.labels_for("lean-generation")
+        & audit.labels_for_origin("plan", "both")
+    )
+    eligible = {
+        label
+        for label in eligible
+        if (
+            (getattr(ctx, "design_plan_entries", {}).get(label) or {}).get(
+                "origin"
+            )
+            == "phase1_candidate"
+        )
+        and audit.plan_requirements_by_label.get(label)
+    }
+    if not eligible:
+        return set()
+
+    evidence_by_label = {}
+    for label in sorted(eligible):
+        evidence = audit.reason_for([label])
+        requirements = audit.plan_requirements_by_label.get(label, [])
+        if requirements:
+            evidence += "\nBlueprint requirements absent from the candidate-owned contract:\n- "
+            evidence += "\n- ".join(requirements)
+        evidence_by_label[label] = evidence
+
+    activated = _activate_blueprint_direct_generation(
+        ctx,
+        eligible,
+        audit.reason_for(sorted(eligible)),
+        source=f"{source}_candidate_plan_defect",
+        evidence_by_label=evidence_by_label,
+    )
+    if activated:
+        _record(
+            ctx.telemetry,
+            "phase1_audit_origin_candidate_plan_direct",
+            layer=layer_no,
+            source=source,
+            labels=sorted(activated),
+            failure_origins={
+                label: audit.origins_by_label.get(label, "lean")
+                for label in sorted(activated)
+            },
+            missing_plan_requirements={
+                label: audit.plan_requirements_by_label.get(label, [])
+                for label in sorted(activated)
+            },
+            avoided_route="candidate_owned_stale_generation_retry",
+        )
+        _log(
+            "  statement audit located the mismatch in a candidate-owned "
+            "contract; switching to blueprint-direct generation for: "
+            + ", ".join(sorted(activated))
+        )
+    return activated
+
+
 def _audit_plan_revision_request(
     ctx: Ctx,
     audit: AlignmentAuditResult,
@@ -11252,7 +13228,11 @@ def _try_alternate_design_plan_component(
         return False
     for label in labels:
         entries[label] = trial_entries[label]
-    _sync_design_plan(ctx)
+    _transition_phase1_generation_epoch(
+        ctx,
+        labels,
+        reason="retained_alternate_plan_applied",
+    )
     _log(
         "  reused retained alternate plan component before model correction: "
         + ", ".join(labels)
@@ -11268,6 +13248,7 @@ def _correct_phase1_design_plan(
     escalated: bool = False,
     try_alternate: bool = True,
     context_labels: Iterable[str] | None = None,
+    transition_generation_epoch: bool = True,
 ) -> bool:
     """Revise one connected set of interface contracts using exact evidence."""
     if try_alternate and _try_alternate_design_plan_component(ctx, labels, evidence):
@@ -11431,7 +13412,14 @@ Critic evidence:
             tier="escalation" if escalated else "base",
         )
         return False
-    _sync_design_plan(ctx)
+    if transition_generation_epoch:
+        _transition_phase1_generation_epoch(
+            ctx,
+            labels,
+            reason="interface_plan_correction_applied",
+        )
+    else:
+        _sync_design_plan(ctx)
     _record(
         ctx.telemetry,
         "phase1_design_plan_correction",
@@ -11498,7 +13486,11 @@ def _phase1_frontier_plan_gateway(
         for label in invalidated:
             entries.pop(label, None)
             alternates.pop(label, None)
-        _sync_design_plan(ctx)
+        _transition_phase1_generation_epoch(
+            ctx,
+            invalidated,
+            reason=reason,
+        )
         _record(
             ctx.telemetry,
             "phase1_frontier_plan_invalidated",
@@ -11762,8 +13754,6 @@ def _phase1_frontier_plan_gateway(
             plan_revision_required=True,
         )
 
-    _clear_retry_lifecycle(ctx, rejected_ordered, stage="phase1_statement")
-    _prune_stale_generation_candidates(ctx)
     _record(
         ctx.telemetry,
         "phase1_frontier_plan_gateway",
@@ -11918,6 +13908,7 @@ def _correct_plan_closure_component_from_snapshot(
         escalated=False,
         try_alternate=False,
         context_labels=[*component, *providers],
+        transition_generation_epoch=False,
     )
     if corrected:
         candidate = _evaluate_design_plan_candidate(
@@ -12124,7 +14115,14 @@ def _repair_phase1_design_plan_closure(
         merged_labels.update(result.entries)
     ctx.design_plan_entries = merged_entries
     entries = ctx.design_plan_entries
-    _sync_design_plan(ctx)
+    if merged_labels:
+        _transition_phase1_generation_epoch(
+            ctx,
+            merged_labels,
+            reason="contract_closure_wave_merged",
+        )
+    else:
+        _sync_design_plan(ctx)
     validated = _validate_design_plan_contract_closure(ctx, ordered)
     remaining = (
         _closure_findings_for_scope(ctx, validated, scope)
@@ -12171,7 +14169,11 @@ def _repair_phase1_design_plan_closure(
         if label in entries and label in merged_labels:
             alternates[label] = copy.deepcopy(entries[label])
         entries.pop(label, None)
-    _sync_design_plan(ctx)
+    _transition_phase1_generation_epoch(
+        ctx,
+        failed,
+        reason="contract_closure_correction_exhausted",
+    )
     _record(
         ctx.telemetry,
         "phase1_design_plan_invalidated",
@@ -13020,7 +15022,11 @@ def _ensure_phase1_design_plan(
             for label, entry in alternate.entries.items()
             if label in entries and entry != entries[label]
         }
-        _sync_design_plan(ctx)
+        _transition_phase1_generation_epoch(
+            ctx,
+            selected.entries,
+            reason="initial_plan_tournament_selected",
+        )
         _record(
             ctx.telemetry,
             "phase1_design_plan_result",
@@ -13047,6 +15053,7 @@ def _ensure_phase1_design_plan(
                 "statements directly from the blueprint instead of paying "
                 "another global planning call.",
                 source="initial_plan_missing_contract",
+                shared_evidence=True,
             )
             missing = []
 
@@ -13096,7 +15103,14 @@ def _ensure_phase1_design_plan(
 
         parsed = _parse_design_plan_entries(ctx, plan_labels, result.text)
         entries.update(parsed)
-        _sync_design_plan(ctx)
+        if parsed:
+            _transition_phase1_generation_epoch(
+                ctx,
+                parsed,
+                reason="scoped_plan_entries_created",
+            )
+        else:
+            _sync_design_plan(ctx)
         missing_from_reply = sorted(set(plan_labels) - set(parsed))
         response_status = "ok" if parsed else "invalid_empty_contracts"
         _record(
@@ -13151,6 +15165,7 @@ def _ensure_phase1_design_plan(
             "their exact statements directly from the blueprint and frozen "
             "dependency interfaces.",
             source="scoped_plan_missing_contract",
+            shared_evidence=True,
         )
     closure_findings = _validate_design_plan_contract_closure(ctx, ordered)
     if closure_findings:
@@ -13381,6 +15396,8 @@ def _freeze_section_from_code(
     failure_candidate_code: list[str] | None = None,
     route_plan_defects: bool = False,
     complete_bodies: bool = False,
+    lean_timeout: int = CANDIDATE_LEAN_CHECK_TIMEOUT,
+    defer_object_gate: bool = False,
 ) -> list[Section] | None:
     """Try to freeze one section from declarations the model already delivered
     (a design-pass chunk, or the healthy remainder beside a refusal/compile
@@ -13401,7 +15418,7 @@ def _freeze_section_from_code(
     module, path = _section_module(ctx.name, next_number)
     path.parent.mkdir(parents=True, exist_ok=True)
     section_kind = (
-        "Phase 2 repaired node"
+        "Phase 2 complete-node candidate"
         if complete_bodies
         else "Initial declaration section"
         if initial_only
@@ -13418,6 +15435,26 @@ def _freeze_section_from_code(
     all_imports = [f"import {m}" for m in import_modules] + imports
     module_code, _ranges = _compose_module(all_imports, preamble, decl_texts)
     parsed = _parse_module(module_code)
+    helper_owner_by_name = _planned_helper_owner_by_name(ctx, labels)
+    if complete_bodies:
+        # Phase 2 may atomically replace a pathological anonymous public
+        # representation by a same-node structure/class/inductive.  In that
+        # transaction the helper is intentionally newer than the Phase-1 plan,
+        # so infer its owner from the canonical declaration group. Executable
+        # helpers remain forbidden by the ordinary skeleton audit below.
+        inferred = _declaration_owner_map(
+            parsed, label_by_lean_name, helper_owner_by_name
+        )
+        for index, decl in enumerate(parsed.decls):
+            if (
+                decl.name
+                and decl.name not in label_by_lean_name
+                and decl.kind in {"structure", "class", "inductive"}
+                and inferred.get(index) in set(labels)
+            ):
+                helper_owner_by_name.setdefault(
+                    decl.name, inferred[index]
+                )
     if not complete_bodies:
         for decl in parsed.decls:
             if _may_defer_target_body(decl, target_kinds.get(decl.name or "")):
@@ -13433,7 +15470,7 @@ def _freeze_section_from_code(
         module_code,
         target_kinds,
         label_by_lean_name,
-        _planned_helper_owner_by_name(ctx, labels),
+        helper_owner_by_name,
         allow_deferred_bodies=not complete_bodies,
     )
     defer_alignment = bool(getattr(ctx, "defer_phase1_alignment", False))
@@ -13463,7 +15500,7 @@ def _freeze_section_from_code(
                 module_code,
                 target_kinds,
                 label_by_lean_name,
-                _planned_helper_owner_by_name(ctx, labels),
+                helper_owner_by_name,
                 allow_deferred_bodies=not complete_bodies,
             )
             if not initial_only:
@@ -13486,8 +15523,8 @@ def _freeze_section_from_code(
         _discard_section_artifacts(path)
         return None
     path.write_text(module_code, encoding="utf-8")
-    ok, output = _check_lean(path, ctx.lean_command)
-    if not ok:
+    ok, output = _check_lean(path, ctx.lean_command, timeout=lean_timeout)
+    if not ok and _lean_failure_may_be_fixed_by_broad_mathlib(output):
         # Diagnose import/environment failures with the identical declarations
         # before paying a model to rewrite them. The broad environment is kept
         # only when it makes the unchanged candidate compile.
@@ -13501,7 +15538,9 @@ def _freeze_section_from_code(
             [decl.text for decl in parsed.decls],
         )
         path.write_text(broad_code, encoding="utf-8")
-        broad_ok, broad_output = _check_lean(path, ctx.lean_command)
+        broad_ok, broad_output = _check_lean(
+            path, ctx.lean_command, timeout=lean_timeout
+        )
         if broad_ok:
             parsed.imports = list(
                 dict.fromkeys(["import Mathlib"] + list(parsed.imports))
@@ -13566,7 +15605,7 @@ def _freeze_section_from_code(
                 _ranges,
                 output,
                 path.name,
-                _planned_helper_owner_by_name(ctx, labels),
+                helper_owner_by_name,
             )
             pending_findings = []
             if not _patchable_skeleton_labels(compile_findings, labels):
@@ -13606,7 +15645,7 @@ def _freeze_section_from_code(
                 module_code,
                 target_kinds,
                 label_by_lean_name,
-                _planned_helper_owner_by_name(ctx, labels),
+                helper_owner_by_name,
                 allow_deferred_bodies=not complete_bodies,
             )
             if not initial_only:
@@ -13636,7 +15675,7 @@ def _freeze_section_from_code(
                         module_code,
                         target_kinds,
                         label_by_lean_name,
-                        _planned_helper_owner_by_name(ctx, labels),
+                        helper_owner_by_name,
                         allow_deferred_bodies=not complete_bodies,
                     )
                     post += _skeleton_deterministic_findings(
@@ -13647,7 +15686,9 @@ def _freeze_section_from_code(
                 output = _format_skeleton_findings(post)
                 continue
             path.write_text(module_code, encoding="utf-8")
-            ok, output = _check_lean(path, ctx.lean_command)
+            ok, output = _check_lean(
+                path, ctx.lean_command, timeout=lean_timeout
+            )
             if (
                 not ok
                 and route_plan_defects
@@ -13716,25 +15757,39 @@ def _freeze_section_from_code(
             _record(ctx.telemetry, "delivered_code_reuse", labels=labels, status="audit_rejected")
             _discard_section_artifacts(path)
             return None
-    object_attempt = _compile_module_olean(path, ctx.lean_command)
-    if not object_attempt.ok:
-        if failure_candidate_code is not None:
-            failure_candidate_code.append(module_code)
-        if failure_evidence is not None:
-            failure_evidence.append(
-                "Lean object compilation rejected delivered statements:\n"
-                + object_attempt.output[-12000:]
+    if not defer_object_gate:
+        object_attempt, object_failure_class, object_evidence = (
+            _compile_fast_candidate_object(
+                ctx,
+                path,
+                module_code,
+                labels,
+                complete_bodies=complete_bodies,
             )
-        _record(ctx.telemetry, "delivered_code_reuse", labels=labels, status="olean_failed")
-        _discard_section_artifacts(path)
-        return None
+        )
+        if not object_attempt.ok:
+            if failure_candidate_code is not None:
+                failure_candidate_code.append(module_code)
+            if failure_evidence is not None:
+                failure_evidence.append(object_evidence)
+            _record(
+                ctx.telemetry,
+                "delivered_code_reuse",
+                labels=labels,
+                status="olean_failed",
+                failure_class=object_failure_class,
+            )
+            _discard_section_artifacts(path)
+            return None
     state_word = (
         "provisioned"
         if initial_only
         else "verified whole node"
         if complete_bodies
         else "compiled candidate"
-        if defer_alignment
+        if defer_alignment and not defer_object_gate
+        else "typechecked candidate"
+        if defer_object_gate
         else "frozen"
     )
     _log(
@@ -13748,14 +15803,16 @@ def _freeze_section_from_code(
         else "initial_declaration_section"
         if initial_only
         else "skeleton_section_candidate"
-        if defer_alignment
+        if defer_alignment and not defer_object_gate
+        else "skeleton_section_typechecked"
+        if defer_object_gate
         else "skeleton_section_frozen",
         section=next_number,
         labels=labels,
         decls=len(parsed.decls),
         source="delivered",
     )
-    if not initial_only and not defer_alignment:
+    if not initial_only and not defer_alignment and not defer_object_gate:
         if complete_bodies:
             _clear_retry_lifecycle(ctx, labels, stage="phase2_body")
             _clear_retry_lifecycle(ctx, labels, stage="phase2_whole_node")
@@ -13767,10 +15824,15 @@ def _freeze_section_from_code(
         path=path,
         module=module,
         import_modules=import_modules,
-        refined_labels=set() if initial_only or defer_alignment else None,
+        refined_labels=(
+            set()
+            if initial_only or defer_alignment or defer_object_gate
+            else None
+        ),
         generation_tier=generation_tier,
     )
-    _mark_section_compiled(section, ctx.lean_command, sections)
+    if not defer_object_gate:
+        _mark_section_compiled(section, ctx.lean_command, sections)
     return [section]
 
 
@@ -14257,6 +16319,7 @@ def _note_frozen_section(ctx: Ctx, labels: list[str]) -> None:
     _clear_generation_feedback(ctx, labels)
     _clear_generation_candidates(ctx, labels)
     _clear_retry_lifecycle(ctx, labels, stage="phase1_statement")
+    _invalidate_blueprint_direct_descendants_after_freeze(ctx, labels)
     for label in labels:
         entry = getattr(ctx, "design_plan_entries", {}).get(label) or {}
         wave_id = str(entry.pop("closure_wave_id", ""))
@@ -14461,6 +16524,32 @@ def _freeze_section(
                 purpose=purpose,
                 tier=result_tier,
             )
+            if not exchange_key:
+                evidence = (
+                    "The persisted three-sample allowance is exhausted for "
+                    "this exact statement, plan, model, candidate, and prompt. "
+                    "No additional model call was launched."
+                )
+                if feedback:
+                    evidence += "\n\nRetained correction evidence:\n" + feedback[-10000:]
+                _record(
+                    ctx.telemetry,
+                    "phase1_exchange_sample_limit",
+                    purpose=purpose,
+                    labels=labels,
+                    tier=result_tier,
+                    limit=PHASE1_EXCHANGE_SAMPLE_LIMIT,
+                )
+                route = _route_lean_generation_failure(labels)
+                raise RepairRequest(
+                    evidence,
+                    list(route.failed_labels),
+                    section_labels=labels,
+                    authorizes_blueprint_repair=False,
+                    failure_route=route,
+                    retry_attempted_tier=result_tier,
+                    evidence_by_label={label: evidence for label in labels},
+                )
             result = _call_model(
                 ctx,
                 prompt,
@@ -14597,6 +16686,31 @@ def _freeze_section(
                     purpose=purpose,
                     tier=result_tier,
                 )
+                if not exchange_key:
+                    evidence = (
+                        "The persisted three-sample escalation allowance is "
+                        "exhausted for this exact statement, plan, model, "
+                        "candidate, and prompt. No additional model call was "
+                        "launched."
+                    )
+                    _record(
+                        ctx.telemetry,
+                        "phase1_exchange_sample_limit",
+                        purpose=purpose,
+                        labels=labels,
+                        tier=result_tier,
+                        limit=PHASE1_EXCHANGE_SAMPLE_LIMIT,
+                    )
+                    route = _route_lean_generation_failure(labels)
+                    raise RepairRequest(
+                        evidence,
+                        list(route.failed_labels),
+                        section_labels=labels,
+                        authorizes_blueprint_repair=False,
+                        failure_route=route,
+                        retry_attempted_tier=result_tier,
+                        evidence_by_label={label: evidence for label in labels},
+                    )
                 result = _call_model(
                     ctx,
                     prompt,
@@ -14944,10 +17058,6 @@ def _freeze_section(
                         reason="deterministic_contract_closure",
                     )
                     if corrected:
-                        _clear_retry_lifecycle(
-                            ctx, plan_labels, stage="phase1_statement"
-                        )
-                        _prune_stale_generation_candidates(ctx)
                         raise RepairRequest(
                             "Phase 1 outline plan was not closed over its "
                             "generated declarations and was corrected; regenerate "
@@ -15550,10 +17660,35 @@ def _freeze_section(
                         section_labels=labels,
                     )
 
-            object_attempt = _compile_module_olean(path, ctx.lean_command)
+            object_attempt, object_failure_class, object_evidence = (
+                _compile_fast_candidate_object(
+                    ctx,
+                    path,
+                    module_code,
+                    labels,
+                    complete_bodies=False,
+                )
+            )
             if not object_attempt.ok:
-                feedback = f".olean compilation failed:\n{object_attempt.output[-8000:]}"
+                feedback = object_evidence
                 previous_code = module_code
+                if (
+                    object_failure_class == "interface_usability"
+                    and not initial_only
+                ):
+                    _revise_unusable_interface_plan(ctx, labels, feedback)
+                    raise RepairRequest(
+                        "The exact Phase-1 statement compiled normally but its "
+                        "public Lean interface exceeded the object-generation "
+                        "usability budget. The blueprint is unchanged; regenerate "
+                        "these contracts from a revised interface plan.\n\n"
+                        + feedback[-12000:],
+                        labels,
+                        section_labels=labels,
+                        authorizes_blueprint_repair=False,
+                        plan_revision_required=True,
+                        evidence_by_label={label: feedback for label in labels},
+                    )
                 if attempt < attempt_limit:
                     continue
                 raise RepairRequest(
@@ -16063,6 +18198,9 @@ def _subset_phase1_candidate(
         import_modules=list(candidate.import_modules),
         generation_tier=candidate.generation_tier,
         sessions=candidate.sessions,
+        plan_fps={
+            label: candidate.plan_fps.get(label, "") for label in wanted
+        },
     )
 
 
@@ -16078,6 +18216,9 @@ def _generate_uncompiled_phase1_candidate(
     reused = _reusable_uncompiled_candidate(ctx, labels, sections)
     if reused is not None:
         return reused
+    generation_plan_fps = {
+        label: _candidate_plan_fingerprint(ctx, label) for label in labels
+    }
     import_modules = _sections_for_deps(ctx, labels, sections)
     placeholders = ParsedModule(
         imports=[],
@@ -16130,6 +18271,7 @@ def _generate_uncompiled_phase1_candidate(
         import_modules=import_modules,
         generation_tier=tier[-1] if tier else "base",
         sessions=sessions,
+        plan_fps=generation_plan_fps,
     )
     code = _phase1_layer_candidate_code(candidate)
     findings = _skeleton_code_findings(
@@ -16202,6 +18344,12 @@ def _generate_uncompiled_phase1_candidate(
                 authorizes_blueprint_repair=False,
                 failure_route=route,
                 plan_revision_required=plan_revision_required,
+                retry_attempted_tier=(
+                    "" if plan_revision_required else candidate.generation_tier
+                ),
+                evidence_by_label=_generation_evidence_from_findings(
+                    route.failed_labels, findings
+                ),
             )
     _record(
         ctx.telemetry,
@@ -16345,6 +18493,59 @@ def _revise_semantic_candidates(
     return revisions
 
 
+def _revise_unusable_interface_plan(
+    ctx: Ctx, labels: Iterable[str], evidence: str
+) -> bool:
+    """Change strategy once when an exact interface cannot build efficiently.
+
+    The failure is operational evidence about the Lean representation, not
+    mathematical evidence against the blueprint.  Prefer the retained
+    alternate, then one focused base-tier correction.  If neither changes the
+    plan, invalidate only these entries so the next frontier obtains a fresh
+    scoped plan instead of regenerating forever under the same interface.
+    """
+    targets = list(dict.fromkeys(label for label in labels if label in ctx.nodes))
+    if not targets:
+        return False
+    corrected = _correct_phase1_design_plan(
+        ctx,
+        targets,
+        evidence,
+        escalated=False,
+        try_alternate=True,
+    )
+    if corrected:
+        _record(
+            ctx.telemetry,
+            "phase1_interface_usability_plan",
+            labels=targets,
+            status="revised",
+            next_action="regenerate_exact_statements",
+        )
+        return True
+
+    entries = getattr(ctx, "design_plan_entries", {})
+    alternates = getattr(ctx, "design_plan_alternates", {})
+    invalidated = [label for label in targets if label in entries]
+    for label in invalidated:
+        entries.pop(label, None)
+        alternates.pop(label, None)
+    if invalidated:
+        _transition_phase1_generation_epoch(
+            ctx,
+            invalidated,
+            reason="interface_usability_plan_invalidated",
+        )
+    _record(
+        ctx.telemetry,
+        "phase1_interface_usability_plan",
+        labels=targets,
+        status="invalidated" if invalidated else "unavailable",
+        next_action="fresh_scoped_planning",
+    )
+    return bool(invalidated)
+
+
 def _route_phase1_compile_failure(
     ctx: Ctx,
     failed: Phase1LayerCandidate,
@@ -16361,6 +18562,43 @@ def _route_phase1_compile_failure(
     overlap plan correction/retry bookkeeping with those still-running workers
     without changing any of the existing failure classification rules.
     """
+    if evidence.startswith(OBJECT_INTERFACE_FAILURE_PREFIX):
+        # Persist the failure only in the strategy epoch that produced it.
+        # Revising the plan below prunes this candidate.  Storing afterward
+        # would incorrectly stamp the old Lean declaration with the revised
+        # plan fingerprint and make it eligible for a zero-call retry.
+        _store_generation_candidates(
+            ctx,
+            failed.labels,
+            failed_code,
+            source="phase1_interface_usability_gate",
+            all_labels=failed.labels,
+            lean_status="passed",
+            lean_output=evidence,
+            expected_plan_fps=failed.plan_fps,
+        )
+        _store_generation_feedback(
+            ctx,
+            failed.labels,
+            evidence,
+            source="phase1_interface_usability_gate",
+        )
+        _revise_unusable_interface_plan(ctx, failed.labels, evidence)
+        return RepairRequest(
+            "The exact Phase-1 statement compiled normally but its public Lean "
+            "interface exceeded the object-generation usability budget. The "
+            "blueprint is unchanged; regenerate only these contracts from the "
+            "revised interface plan.\n\n"
+            + evidence[-12000:],
+            failed.labels,
+            section_labels=failed.labels,
+            authorizes_blueprint_repair=False,
+            # Even when the retained alternate/correction call returned no
+            # usable entry, the old plan was invalidated and must not affect
+            # scheduler capacity or quarantine this as a mathematical defect.
+            plan_revision_required=True,
+            evidence_by_label={label: evidence for label in failed.labels},
+        )
     plan_defects = _phase1_compile_plan_defects(
         ctx, failed.labels, failed_code, evidence
     )
@@ -16444,6 +18682,7 @@ def _route_phase1_compile_failure(
                     layer_no=layer_no,
                     source="integrated_compile",
                     failure_kind="compile",
+                    evidence_by_label=scoped_evidence,
                 )
             )
             if decomposition:
@@ -16560,6 +18799,154 @@ def _route_phase1_compile_failure(
     )
 
 
+def _finalize_phase1_accepted_sections(
+    ctx: Ctx,
+    layer_no: int,
+    candidates: list[Section],
+    existing_sections: list[Section] | None = None,
+) -> list[Section]:
+    """Build objects and run the import gate only after semantic acceptance.
+
+    Ordinary Lean checking happens before the statement audit.  Object
+    generation is a second, materially more expensive compiler operation and
+    is not evidence used by that audit.  Delaying it until acceptance prevents
+    rejected candidates from consuming the object-build budget while retaining
+    the exact same object and integrated-import gates for every frozen section.
+    """
+    if not candidates:
+        return []
+    all_sections = list(existing_sections or []) + list(candidates)
+    failures: list[RepairRequest] = []
+    accepted: list[Section] = []
+    worker_count = max(1, min(getattr(ctx, "workers", 1), len(candidates)))
+
+    def build_one(section: Section) -> tuple[Section, str, str, str]:
+        code = section.path.read_text(encoding="utf-8")
+        expected = _section_compile_fingerprint(
+            section, ctx.lean_command, all_sections
+        )
+        if (
+            section.compile_fingerprint == expected
+            and _section_objects_exist(section)
+        ):
+            return section, code, "", ""
+        attempt, failure_class, evidence = _compile_fast_candidate_object(
+            ctx,
+            section.path,
+            code,
+            section.labels,
+            complete_bodies=False,
+        )
+        if attempt.ok:
+            _mark_section_compiled(section, ctx.lean_command, all_sections)
+            return section, code, "", ""
+        section.compile_fingerprint = ""
+        return section, code, failure_class, evidence
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
+        futures = [pool.submit(build_one, section) for section in candidates]
+        for future in concurrent.futures.as_completed(futures):
+            section, code, failure_class, evidence = future.result()
+            if not failure_class:
+                accepted.append(section)
+                continue
+            parsed = _parse_module(code)
+            failed = Phase1LayerCandidate(
+                labels=list(section.labels),
+                parsed=parsed,
+                import_modules=list(section.import_modules),
+                generation_tier=section.generation_tier,
+            )
+            failures.append(
+                _route_phase1_compile_failure(
+                    ctx,
+                    failed,
+                    evidence,
+                    code,
+                    layer_no=layer_no,
+                )
+            )
+            _discard_section_artifacts(section.path)
+
+    accepted.sort(key=lambda section: section.number)
+    if accepted:
+        gate = SCRATCH_DIR / ctx.name / f"Phase1Layer{layer_no:02d}Gate.lean"
+        gate.parent.mkdir(parents=True, exist_ok=True)
+        gate.write_text(
+            "\n".join(f"import {section.module}" for section in accepted)
+            + "\n\nset_option autoImplicit false\n\n"
+            "theorem phase1_layer_gate : True := by trivial\n",
+            encoding="utf-8",
+        )
+        try:
+            integrated, output = _check_lean(gate, ctx.lean_command)
+        finally:
+            with contextlib.suppress(OSError):
+                gate.unlink(missing_ok=True)
+        if not integrated:
+            for section in accepted:
+                _discard_section_artifacts(section.path)
+            failures.append(
+                RepairRequest(
+                    "Semantically accepted Phase-1 candidates conflict when "
+                    "imported together:\n" + output[-12000:],
+                    [label for section in accepted for label in section.labels],
+                    section_labels=[
+                        label for section in accepted for label in section.labels
+                    ],
+                    authorizes_blueprint_repair=False,
+                )
+            )
+            accepted = []
+
+    for section in accepted:
+        section.refined_labels = set(section.labels)
+        _note_frozen_section(ctx, section.labels)
+
+    if failures:
+        raise _aggregate_retry_requests(
+            failures,
+            frozen_sections=accepted,
+        )
+    return accepted
+
+
+def _compile_semantic_phase1_candidate(
+    ctx: Ctx,
+    candidate: Phase1LayerCandidate,
+    sections: list[Section],
+    alloc: _SectionNumberAllocator,
+    *,
+    layer_no: int,
+) -> tuple[list[Section] | None, str, str]:
+    """Typecheck one generated contract candidate without auditing it."""
+    evidence: list[str] = []
+    failed_code: list[str] = []
+    result = _freeze_section_from_code(
+        ctx,
+        candidate.labels,
+        sections,
+        alloc,
+        [decl.text for decl in candidate.parsed.decls],
+        list(candidate.parsed.imports),
+        list(candidate.parsed.preamble),
+        origin=f"validated-contract layer {layer_no}",
+        allow_patch=True,
+        generation_tier=candidate.generation_tier,
+        failure_evidence=evidence,
+        failure_candidate_code=failed_code,
+        route_plan_defects=True,
+        defer_object_gate=True,
+    )
+    return (
+        result,
+        "\n\n".join(evidence) or "candidate did not compile",
+        failed_code[-1]
+        if failed_code
+        else _phase1_layer_candidate_code(candidate),
+    )
+
+
 def _compile_semantic_phase1_candidates(
     ctx: Ctx,
     candidates: list[Phase1LayerCandidate],
@@ -16568,7 +18955,7 @@ def _compile_semantic_phase1_candidates(
     *,
     layer_no: int,
 ) -> list[Section]:
-    """Compile contract-planned candidates in parallel before final auditing."""
+    """Typecheck contract candidates in parallel before final auditing."""
     if not candidates:
         return []
     worker_count = max(1, min(getattr(ctx, "workers", 1), len(candidates)))
@@ -16584,31 +18971,19 @@ def _compile_semantic_phase1_candidates(
         def compile_one(
             index: int, candidate: Phase1LayerCandidate
         ) -> tuple[int, Phase1LayerCandidate, list[Section] | None, str, str]:
-            evidence: list[str] = []
-            failed_code: list[str] = []
-            result = _freeze_section_from_code(
+            result, evidence, failed_code = _compile_semantic_phase1_candidate(
                 ctx,
-                candidate.labels,
+                candidate,
                 sections,
                 alloc,
-                [decl.text for decl in candidate.parsed.decls],
-                list(candidate.parsed.imports),
-                list(candidate.parsed.preamble),
-                origin=f"validated-contract layer {layer_no}",
-                allow_patch=True,
-                generation_tier=candidate.generation_tier,
-                failure_evidence=evidence,
-                failure_candidate_code=failed_code,
-                route_plan_defects=True,
+                layer_no=layer_no,
             )
             return (
                 index,
                 candidate,
                 result,
-                "\n\n".join(evidence) or "candidate did not compile",
-                failed_code[-1]
-                if failed_code
-                else _phase1_layer_candidate_code(candidate),
+                evidence,
+                failed_code,
             )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
@@ -16672,7 +19047,7 @@ def _compile_and_finalize_semantic_candidates(
     *,
     layer_no: int,
 ) -> list[Section]:
-    """Compile candidates, integrate their modules, and mark accepted contracts."""
+    """Typecheck, audit, object-build, and integrate accepted contracts."""
     try:
         compiled = _compile_semantic_phase1_candidates(
             ctx, candidates, sections, alloc, layer_no=layer_no
@@ -17242,41 +19617,18 @@ def _audit_phase1_layer_candidates(
     existing_sections: list[Section] | None = None,
     alloc: _SectionNumberAllocator | None = None,
 ) -> list[Section]:
-    """Integrate compiled candidates and audit only compiler-modified contracts.
+    """Audit typechecked candidates, then object-build and integrate accepted ones.
 
     Semantic-first callers have already cached a verdict for each candidate.
-    Importing every module together remains mandatory. The cache key includes
-    the target declaration and its owned helpers, so the subsequent audit call
-    is free when compilation changed nothing and judges only contracts changed
-    by a compiler-driven patch otherwise. The older compile-first callers still
-    receive the same full layer audit through this function.
+    The cache key includes the target declaration and its owned helpers, so the
+    audit call is free when compilation changed nothing and judges only
+    contracts changed by a compiler-driven patch otherwise. Every accepted
+    declaration still passes object generation and the integrated import gate
+    before it is marked frozen.
     """
     if not candidates:
         return []
     labels = [label for section in candidates for label in section.labels]
-
-    gate = SCRATCH_DIR / ctx.name / f"Phase1Layer{layer_no:02d}Gate.lean"
-    gate.parent.mkdir(parents=True, exist_ok=True)
-    gate.write_text(
-        "\n".join(f"import {section.module}" for section in candidates)
-        + "\n\nset_option autoImplicit false\n\ntheorem phase1_layer_gate : True := by trivial\n",
-        encoding="utf-8",
-    )
-    try:
-        integrated, output = _check_lean(gate, ctx.lean_command)
-    finally:
-        with contextlib.suppress(OSError):
-            gate.unlink(missing_ok=True)
-    if not integrated:
-        for section in candidates:
-            _discard_section_artifacts(section.path)
-        raise RepairRequest(
-            "Compiled Phase-1 candidates conflict when imported together:\n"
-            + output[-12000:],
-            labels,
-            section_labels=labels,
-            authorizes_blueprint_repair=False,
-        )
 
     _log(
         f"==> {_contract_work_stage(ctx)} layer {layer_no}: checking {len(labels)} integrated "
@@ -17286,21 +19638,21 @@ def _audit_phase1_layer_candidates(
         ctx, labels, _phase1_candidate_code(candidates), tag=f"layer-{layer_no}"
     )
     if audit is None:
-        for section in candidates:
-            section.refined_labels = set(section.labels)
-            _note_frozen_section(ctx, section.labels)
+        accepted = _finalize_phase1_accepted_sections(
+            ctx, layer_no, candidates, existing_sections
+        )
         _record(
             ctx.telemetry,
             "phase1_layer_frozen",
             layer=layer_no,
             labels=labels,
-            sections=len(candidates),
+            sections=len(accepted),
         )
         _log(
             f"  {_contract_work_stage(ctx)} layer {layer_no} frozen "
-            f"({len(labels)} declaration(s), {len(candidates)} section(s))"
+            f"({len(labels)} declaration(s), {len(accepted)} section(s))"
         )
-        return candidates
+        return accepted
 
     audit = _coerce_alignment_audit_result(audit)
     kind, reason, rejected, helpers = audit
@@ -17324,6 +19676,15 @@ def _audit_phase1_layer_candidates(
     if reported_plan_defects:
         plan_revised.update(reported_plan_defects)
         lean_rejected.difference_update(reported_plan_defects)
+    candidate_plan_defects = _activate_audit_reported_candidate_plan_defects(
+        ctx,
+        audit,
+        layer_no=layer_no,
+        source="integrated_alignment",
+    )
+    if candidate_plan_defects:
+        plan_revised.update(candidate_plan_defects)
+        lean_rejected.difference_update(candidate_plan_defects)
     # A compiling candidate that exactly realizes every public surface in its
     # accepted plan cannot repair a semantic omission by being regenerated
     # under that unchanged plan. Correct the plan immediately from the audit
@@ -17436,6 +19797,10 @@ def _audit_phase1_layer_candidates(
                     reason,
                     layer_no=layer_no,
                     source="integrated_alignment",
+                    evidence_by_label={
+                        label: audit.reason_for([label])
+                        for label in exhausted
+                    },
                 )
             )
             if decomposition_after_revision:
@@ -17571,14 +19936,12 @@ def _audit_phase1_layer_candidates(
                             list(parsed.imports),
                             list(parsed.preamble),
                             origin="accepted layer siblings",
+                            defer_object_gate=True,
                         )
                     finally:
                         ctx.defer_phase1_alignment = old_defer
             _discard_section_artifacts(section.path)
             if retained:
-                for kept in retained:
-                    kept.refined_labels = set(kept.labels)
-                    _note_frozen_section(ctx, kept.labels)
                 accepted.extend(retained)
                 discarded_labels.update(section_rejected)
                 _log(
@@ -17596,8 +19959,6 @@ def _audit_phase1_layer_candidates(
             else:
                 discarded_labels.update(section.labels)
             continue
-        section.refined_labels = set(section.labels)
-        _note_frozen_section(ctx, section.labels)
         accepted.append(section)
     _record(
         ctx.telemetry,
@@ -17609,7 +19970,7 @@ def _audit_phase1_layer_candidates(
         accepted_labels=[label for sec in accepted for label in sec.labels],
         classification=kind,
     )
-    raise RepairRequest(
+    semantic_request = RepairRequest(
         reason,
         sorted(request_labels),
         decomposition_helpers=helpers if kind == "decomposition" else None,
@@ -17638,6 +19999,30 @@ def _audit_phase1_layer_candidates(
             | (blueprint_rejected - set(audit_required_dependencies))
         ),
     )
+    try:
+        semantic_request.frozen_sections = _finalize_phase1_accepted_sections(
+            ctx,
+            layer_no,
+            accepted,
+            existing_sections,
+        )
+    except RepairRequest as object_request:
+        if _requires_blueprint_transaction(
+            semantic_request.authorizes_blueprint_repair,
+            semantic_request.required_dependencies,
+        ):
+            # The authorized semantic repair owns this outer transaction. The
+            # object failure has already persisted its exact candidate and
+            # evidence for the next unaffected-contract retry.
+            semantic_request.frozen_sections = list(
+                object_request.frozen_sections
+            )
+            raise semantic_request
+        raise _aggregate_retry_requests(
+            [semantic_request, object_request],
+            frozen_sections=object_request.frozen_sections,
+        )
+    raise semantic_request
 
 
 def _semantic_first_failure_request(
@@ -17670,6 +20055,15 @@ def _semantic_first_failure_request(
     if reported_plan_defects:
         plan_revised.update(reported_plan_defects)
         lean_rejected.difference_update(reported_plan_defects)
+    candidate_plan_defects = _activate_audit_reported_candidate_plan_defects(
+        ctx,
+        audit,
+        layer_no=layer_no,
+        source="semantic_first_alignment",
+    )
+    if candidate_plan_defects:
+        plan_revised.update(candidate_plan_defects)
+        lean_rejected.difference_update(candidate_plan_defects)
     repair_rejected = decomposition_rejected | blueprint_rejected
     audit_required_dependencies = getattr(
         audit, "required_dependencies", {}
@@ -17733,6 +20127,10 @@ def _semantic_first_failure_request(
                     reason,
                     layer_no=layer_no,
                     source="semantic_first_alignment",
+                    evidence_by_label={
+                        label: audit.reason_for([label])
+                        for label in exhausted
+                    },
                 )
             )
             if decomposition_after_revision:
@@ -17879,17 +20277,9 @@ def _revise_exhausted_phase1_contracts(
         label: int((entries.get(label) or {}).get("semantic_revision_count") or 0)
         for label in eligible
     }
-    if not _correct_phase1_design_plan(
-        ctx, eligible, evidence, escalated=True
-    ):
-        return set()
-
-    for label in eligible:
-        entries[label]["semantic_revision_count"] = (
-            previous_revision_counts[label] + 1
-        )
-
-    _clear_retry_lifecycle(ctx, eligible, stage="phase1_statement")
+    # Capture the rejected compiling declaration before plan correction crosses
+    # the epoch boundary and removes it. It may be reattached afterwards only
+    # as an explicit semantic-correction seed, never as reusable accepted work.
     with _STATE_LOCK:
         candidates = copy.deepcopy(getattr(ctx, "generation_candidates", {}))
     retained_seeds: list[tuple[list[str], str, str, dict[str, set[str]]]] = []
@@ -17932,13 +20322,26 @@ def _revise_exhausted_phase1_contracts(
                 },
             )
         )
-    _clear_retry_lifecycle(
-        ctx, reset_candidate_labels, stage="phase1_statement"
+
+    if not _correct_phase1_design_plan(
+        ctx,
+        eligible,
+        evidence,
+        escalated=True,
+        transition_generation_epoch=False,
+    ):
+        return set()
+
+    for label in eligible:
+        entries[label]["semantic_revision_count"] = (
+            previous_revision_counts[label] + 1
+        )
+
+    _transition_phase1_generation_epoch(
+        ctx,
+        reset_candidate_labels,
+        reason="semantic_rejection_plan_revised",
     )
-    with _STATE_LOCK:
-        live_candidates = getattr(ctx, "generation_candidates", {})
-        for label in reset_candidate_labels:
-            live_candidates.pop(label, None)
     retained: list[str] = []
     for component, code, tier, required in retained_seeds:
         retained.extend(
@@ -17955,7 +20358,6 @@ def _revise_exhausted_phase1_contracts(
                 semantic_evidence=evidence,
             )
         )
-    _release_quarantine(ctx, eligible, reason="interface_plan_revised")
     _record(
         ctx.telemetry,
         "phase1_exhausted_contract_revised",
@@ -18046,6 +20448,7 @@ def _route_exhausted_phase1_semantics(
     layer_no: int,
     source: str,
     failure_kind: str = "semantic",
+    evidence_by_label: Mapping[str, str] | None = None,
 ) -> tuple[set[str], set[str], set[str]]:
     """Route Phase-1 retry exhaustion identically for every failure source.
 
@@ -18057,6 +20460,15 @@ def _route_exhausted_phase1_semantics(
     Returns ``(decomposition, revised, unresolved)`` label sets.
     """
     exhausted = set(labels)
+    scoped_evidence = (
+        {
+            label: str(value).strip()[-12000:]
+            for label, value in evidence_by_label.items()
+            if label in exhausted and str(value).strip()
+        }
+        if evidence_by_label is not None
+        else _explicit_generation_evidence_by_label(exhausted, evidence)
+    )
     actions = {
         label: _semantic_exhaustion_policy(ctx, label)
         for label in exhausted
@@ -18066,11 +20478,10 @@ def _route_exhausted_phase1_semantics(
     }
     if decomposition:
         exhausted.difference_update(decomposition)
-        failure_description = (
-            "compiler failure"
-            if failure_kind == "compile"
-            else "semantic rejection"
-        )
+        failure_description = {
+            "compile": "compiler failure",
+            "deterministic": "deterministic rejection",
+        }.get(failure_kind, "semantic rejection")
         _log(
             f"  {failure_description} survived the blueprint-direct generation "
             "lifecycle; routing to blueprint decomposition: "
@@ -18113,6 +20524,11 @@ def _route_exhausted_phase1_semantics(
                 candidate_direct,
                 evidence,
                 source=f"candidate_{failure_kind}_exhaustion",
+                evidence_by_label={
+                    label: scoped_evidence[label]
+                    for label in candidate_direct
+                    if label in scoped_evidence
+                },
             )
         )
     if legacy_direct:
@@ -18127,6 +20543,11 @@ def _route_exhausted_phase1_semantics(
                 legacy_direct,
                 evidence,
                 source=direct_source,
+                evidence_by_label={
+                    label: scoped_evidence[label]
+                    for label in legacy_direct
+                    if label in scoped_evidence
+                },
             )
         )
     exhausted.difference_update(direct)
@@ -18135,6 +20556,150 @@ def _route_exhausted_phase1_semantics(
     )
     unresolved = exhausted - revised
     return decomposition, revised, unresolved
+
+
+def _route_phase1_precompile_deterministic_failure(
+    ctx: Ctx,
+    request: RepairRequest,
+    *,
+    layer_no: int,
+) -> list[RepairRequest]:
+    """Advance deterministic generation failures through the shared lifecycle.
+
+    This runs in the coordinator after every generation worker has settled.
+    Plan-closure failures retain their dedicated correction path; all other
+    deterministic rejections use the same bounded base/escalation/strategy
+    lifecycle as compiler and semantic failures.
+    """
+    attempted_tier = request.retry_attempted_tier
+    if request.plan_revision_required or not attempted_tier:
+        return [request]
+
+    exhausted: set[str] = set()
+    for label in request.labels:
+        evidence = request.evidence_by_label.get(label, request.evidence)
+        exhausted.update(
+            _record_retry_failure(
+                ctx,
+                [label],
+                stage="phase1_statement",
+                attempted_tier=attempted_tier,
+                evidence=evidence,
+                source=f"phase1_layer_{layer_no}_deterministic",
+            )
+        )
+
+    if not exhausted:
+        _record(
+            ctx.telemetry,
+            "phase1_deterministic_failure_routed",
+            layer=layer_no,
+            labels=request.labels,
+            classification="lean_generation",
+            attempted_tier=attempted_tier,
+        )
+        return [request]
+
+    decomposition, strategy_changed, unresolved = (
+        _route_exhausted_phase1_semantics(
+            ctx,
+            exhausted,
+            request.evidence,
+            layer_no=layer_no,
+            source="precompile_deterministic",
+            failure_kind="deterministic",
+            evidence_by_label=request.evidence_by_label,
+        )
+    )
+    routed: list[RepairRequest] = []
+
+    if decomposition:
+        labels = sorted(decomposition)
+        routed.append(
+            RepairRequest(
+                "Repeated statement generation could not produce deterministic-"
+                "valid Lean interfaces for these blueprint contracts. Decompose "
+                "only the listed contracts into explicit blueprint helper "
+                "definitions or lemmas, then regenerate their interfaces.\n\n"
+                + request.evidence[-12000:],
+                labels,
+                decomposition_helpers=[
+                    "split the failing public contract into explicit blueprint-"
+                    "owned helper definitions or lemmas whose Lean interfaces "
+                    "can be generated and validated independently"
+                ],
+                section_labels=labels,
+                authorizes_blueprint_repair=True,
+                evidence_by_label={
+                    label: request.evidence_by_label[label]
+                    for label in labels
+                    if label in request.evidence_by_label
+                },
+            )
+        )
+
+    if strategy_changed:
+        labels = sorted(strategy_changed)
+        routed.append(
+            RepairRequest(
+                "The deterministic statement-generation retry lifecycle was "
+                "exhausted, so the interface-generation strategy changed before "
+                "another candidate is attempted.\n\n"
+                + request.evidence[-12000:],
+                labels,
+                section_labels=labels,
+                authorizes_blueprint_repair=False,
+                failure_route=_route_lean_generation_failure(labels),
+                plan_revision_required=True,
+                evidence_by_label={
+                    label: request.evidence_by_label[label]
+                    for label in labels
+                    if label in request.evidence_by_label
+                },
+            )
+        )
+
+    ordinary = [
+        label
+        for label in request.labels
+        if label not in decomposition and label not in strategy_changed
+    ]
+    if ordinary:
+        route = _route_lean_generation_failure(ordinary)
+        routed.append(
+            RepairRequest(
+                request.evidence,
+                list(route.failed_labels),
+                section_labels=ordinary,
+                authorizes_blueprint_repair=False,
+                failure_route=route,
+                evidence_by_label={
+                    label: request.evidence_by_label[label]
+                    for label in route.failed_labels
+                    if label in request.evidence_by_label
+                },
+            )
+        )
+
+    _record(
+        ctx.telemetry,
+        "phase1_deterministic_failure_routed",
+        layer=layer_no,
+        labels=request.labels,
+        classification=(
+            "decomposition"
+            if decomposition
+            else "strategy_changed"
+            if strategy_changed
+            else "lean_generation"
+        ),
+        attempted_tier=attempted_tier,
+        exhausted_labels=sorted(exhausted),
+        decomposition_labels=sorted(decomposition),
+        strategy_changed_labels=sorted(strategy_changed),
+        unresolved_labels=sorted(unresolved),
+    )
+    return routed or [request]
 
 
 def _run_validated_contract_phase1_layer(
@@ -18157,25 +20722,87 @@ def _run_validated_contract_phase1_layer(
         f"candidate group(s) with {worker_count} worker(s)"
     )
     generated: list[Phase1LayerCandidate | None] = [None] * len(groups)
-    failures: list[tuple[int, RepairRequest]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
-        future_map = {
-            pool.submit(_generate_uncompiled_phase1_candidate, ctx, group, sections): index
-            for index, group in enumerate(groups)
-        }
-        for future in concurrent.futures.as_completed(future_map):
-            index = future_map[future]
+    compiled_results: list[list[Section] | None] = [None] * len(groups)
+    generation_failures: list[tuple[int, RepairRequest]] = []
+    compile_failures: list[tuple[int, RepairRequest]] = []
+    layer_started = time.monotonic()
+    old_defer = getattr(ctx, "defer_phase1_alignment", False)
+    ctx.defer_phase1_alignment = True
+    try:
+        def generate_and_compile(
+            index: int, group: list[str]
+        ) -> tuple[
+            int,
+            Phase1LayerCandidate | None,
+            list[Section] | None,
+            RepairRequest | None,
+            str,
+        ]:
             try:
-                generated[index] = future.result()
+                candidate = _generate_uncompiled_phase1_candidate(
+                    ctx, group, sections
+                )
             except RepairRequest as request:
-                failures.append((index, request))
+                return index, None, None, request, "generation"
+
+            _record(
+                ctx.telemetry,
+                "phase1_streamed_compile_started",
+                layer=layer_no,
+                labels=candidate.labels,
+                elapsed_since_layer_start_s=round(
+                    time.monotonic() - layer_started, 3
+                ),
+            )
+            result, evidence, failed_code = (
+                _compile_semantic_phase1_candidate(
+                    ctx,
+                    candidate,
+                    sections,
+                    alloc,
+                    layer_no=layer_no,
+                )
+            )
+            if result is None:
+                request = _route_phase1_compile_failure(
+                    ctx,
+                    candidate,
+                    evidence,
+                    failed_code,
+                    layer_no=layer_no,
+                )
+                return index, candidate, None, request, "compile"
+            return index, candidate, result, None, ""
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
+            futures = [
+                pool.submit(generate_and_compile, index, group)
+                for index, group in enumerate(groups)
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                index, candidate, result, request, failure_stage = future.result()
+                generated[index] = candidate
+                compiled_results[index] = result
+                if request is not None:
+                    if failure_stage == "generation":
+                        generation_failures.append((index, request))
+                    else:
+                        compile_failures.append((index, request))
+    finally:
+        ctx.defer_phase1_alignment = old_defer
     candidates = [candidate for candidate in generated if candidate is not None]
-    if failures:
+    compiled = [
+        section
+        for result in compiled_results
+        if result
+        for section in result
+    ]
+    if generation_failures or compile_failures:
         # A plan-closure finding cannot be repaired honestly by compiler
         # patching. Correct only the owning plan entries before ordinary retry.
         plan_requests = [
             request
-            for _index, request in failures
+            for _index, request in generation_failures
             if request.plan_revision_required
         ]
         plan_labels = sorted(
@@ -18200,14 +20827,17 @@ def _run_validated_contract_phase1_layer(
                 reason="deterministic_contract_closure",
             )
             if corrected:
-                _clear_retry_lifecycle(
-                    ctx, plan_labels, stage="phase1_statement"
-                )
-                _prune_stale_generation_candidates(ctx)
                 _log(
                     f"  corrected mechanically unclosed {_contract_work_stage(ctx)} outline plan: "
                     + ", ".join(plan_labels)
                 )
+        routed_failures: list[tuple[int, RepairRequest]] = []
+        for index, request in generation_failures:
+            for routed in _route_phase1_precompile_deterministic_failure(
+                ctx, request, layer_no=layer_no
+            ):
+                routed_failures.append((index, routed))
+        failures = routed_failures + compile_failures
         for candidate in candidates:
             _store_generation_candidates(
                 ctx,
@@ -18217,6 +20847,7 @@ def _run_validated_contract_phase1_layer(
                 all_labels=candidate.labels,
                 reusable_uncompiled=True,
                 generation_tier=candidate.generation_tier,
+                expected_plan_fps=candidate.plan_fps,
             )
         failures.sort(key=lambda item: item[0])
         # A failed generation group must not hold deterministically valid
@@ -18225,10 +20856,10 @@ def _run_validated_contract_phase1_layer(
         # only their accepted contracts are attached to the retry request.
         accepted: list[Section] = []
         downstream_request: RepairRequest | None = None
-        if candidates:
+        if compiled:
             try:
-                accepted = _compile_and_finalize_semantic_candidates(
-                    ctx, candidates, sections, alloc, layer_no=layer_no
+                accepted = _audit_phase1_layer_candidates(
+                    ctx, layer_no, compiled, sections, alloc
                 )
             except RepairRequest as request:
                 accepted = list(request.frozen_sections)
@@ -18272,7 +20903,14 @@ def _run_validated_contract_phase1_layer(
             generated_failure_labels=sorted(
                 {
                     label
-                    for _index, request in failures
+                    for _index, request in routed_failures
+                    for label in request.labels
+                }
+            ),
+            compile_failure_labels=sorted(
+                {
+                    label
+                    for _index, request in compile_failures
                     for label in request.labels
                 }
             ),
@@ -18294,10 +20932,10 @@ def _run_validated_contract_phase1_layer(
         layer=layer_no,
         labels=labels,
         groups=[candidate.labels for candidate in candidates],
-        stage="compile_then_final_audit",
+        stage="streamed_generate_typecheck_then_batched_audit_and_object_integration",
     )
-    return _compile_and_finalize_semantic_candidates(
-        ctx, candidates, sections, alloc, layer_no=layer_no
+    return _audit_phase1_layer_candidates(
+        ctx, layer_no, compiled, sections, alloc
     )
 
 
@@ -18349,10 +20987,33 @@ def _run_phase1(
         )
         remaining = set(pending)
         frontier_no = 0
+        deferred_requests: list[RepairRequest] = []
+        suspended: set[str] = set()
         while remaining:
             frozen = _frozen_labels(sections)
-            targets = _bottom_up_ready_frontier(ctx.nodes, remaining, frozen)
+            targets = _bottom_up_ready_frontier(
+                ctx.nodes, remaining - suspended, frozen
+            )
             if not targets:
+                if deferred_requests:
+                    _record(
+                        ctx.telemetry,
+                        "phase1_independent_branch_drain_completed",
+                        deferred_request_count=len(deferred_requests),
+                        deferred_labels=sorted(
+                            {
+                                label
+                                for request in deferred_requests
+                                for label in request.labels
+                            }
+                        ),
+                        additionally_frozen=sorted(
+                            set(pending) - remaining
+                        ),
+                    )
+                    raise _combine_deferred_phase1_requests(
+                        deferred_requests
+                    )
                 blocked_by = {
                     label: sorted(
                         dep
@@ -18462,6 +21123,47 @@ def _run_phase1(
                     )
                     request.frozen_sections = []
                     _save_ctx_state(ctx, sections)
+                frozen = _frozen_labels(sections)
+                failed_roots = {
+                    label
+                    for label in (request.context_labels or request.labels)
+                    if label in ctx.nodes
+                }
+                if not failed_roots:
+                    failed_roots = set(targets)
+                blocked = (
+                    _dependency_descendants(ctx.nodes, failed_roots)
+                    | failed_roots
+                ) & remaining
+                independent_ready = _bottom_up_ready_frontier(
+                    ctx.nodes,
+                    remaining - blocked - suspended,
+                    frozen,
+                )
+                if independent_ready:
+                    deferred_requests.append(request)
+                    suspended.update(blocked)
+                    _record(
+                        ctx.telemetry,
+                        "phase1_independent_branch_drain_started",
+                        layer=frontier_no,
+                        failed_labels=sorted(failed_roots),
+                        suspended_labels=sorted(blocked),
+                        next_ready_labels=independent_ready,
+                        blueprint_edit_deferred=True,
+                    )
+                    _log(
+                        f"  {stage} failure is local to {len(blocked)} pending "
+                        "node(s); advancing independent ready work before the "
+                        "serialized repair"
+                    )
+                    frontier_no += 1
+                    continue
+                if deferred_requests:
+                    deferred_requests.append(request)
+                    raise _combine_deferred_phase1_requests(
+                        deferred_requests
+                    )
                 raise
             sections.extend(accepted)
             accepted_labels = {
@@ -18798,39 +21500,294 @@ Complete current blueprint node, including its proof:
 """
 
 
+def _phase2_complete_node_correction_prompt(
+    ctx: Ctx,
+    label: str,
+    sections: list[Section],
+    import_modules: list[str],
+    *,
+    candidate_code: str,
+    evidence: str,
+    timeout_s: int,
+) -> str:
+    """Correct one retained complete node without reopening Phase 1.
+
+    This is intentionally not the skeleton patch prompt: the returned target
+    keeps its real body, and the statement and implementation are validated and
+    committed atomically after the call.
+    """
+    node = ctx.nodes[label]
+    signatures = _frozen_interface_digest(
+        sections, import_modules, budget=16000
+    )
+    interface_timeout = evidence.startswith(OBJECT_INTERFACE_FAILURE_PREFIX)
+    implementation_timeout = evidence.startswith(
+        OBJECT_IMPLEMENTATION_FAILURE_PREFIX
+    )
+    correction_policy = (
+        """- The statement-only object probe also timed out. You MAY change the
+  Lean representation of this node's public statement/interface, including a
+  same-node named structure with named fields, but the represented mathematical
+  statement and proof obligations must remain exactly those in the blueprint.
+- Remove deeply nested dependent products, repeated proof-bearing casts, and
+  long anonymous projection chains from the public surface. This is a Lean
+  representation correction, not permission to weaken the claim."""
+        if interface_timeout
+        else """- The statement-only object probe passed. Preserve the public
+  statement/interface byte-for-byte and simplify only the proof or definition
+  body so object generation remains bounded."""
+        if implementation_timeout
+        else "- Preserve every correct part of its public statement and implementation."
+    )
+    return f"""TASK: CORRECT-COMPLETE-PHASE2-NODE
+
+Return exactly one Lean 4 code block containing the corrected complete
+declaration for `{label}`. No commentary.
+
+The candidate below already represents one Phase-2 statement-and-body
+transaction. Correct only what the exact rejection requires:
+{correction_policy}
+- The complete current blueprint node, including its proof, remains the
+  mathematical source of truth.
+- Return the statement and its complete proof/definition body together. Never
+  return `sorry`, `admit`, an axiom, or a Phase-1 skeleton.
+- Use the public Lean name `{_lean_name(label)}`.
+- Do not weaken the claim, replace concrete objects by abstract placeholders,
+  or omit hypotheses/equations to make Lean compile.
+- A same-node structural representation may accompany the target only when it
+  concretely realizes this node. Do not invent theorem helpers without
+  blueprint nodes.
+- If the exact evidence proves that the blueprint lacks a required
+  mathematical helper, return the documented NEEDS-DECOMPOSITION response.
+- This focused correction has about {timeout_s}s. Do not re-explore the whole
+  paper or generated workspace; use the supplied interfaces and diagnostics.
+
+{_common_rules(ctx, [label])}
+
+Blueprint name: {ctx.name}
+Target: {label}
+Blueprint kind: {node.kind}
+
+Resolved dependency contracts:
+```text
+{_dependency_contract_table(ctx, [label], sections)}
+```
+
+Frozen Lean interfaces available to this node:
+```lean
+{signatures or '-- none'}
+```
+
+Complete current blueprint node, including its proof:
+```tex
+{ctx.tex_blocks.get(label, '')[:12000]}
+```
+
+Current complete Lean candidate to edit:
+```lean
+{candidate_code[:30000]}
+```
+
+Exact current rejection:
+```text
+{evidence[-12000:]}
+```
+"""
+
+
+def _phase2_complete_candidate(
+    ctx: Ctx, label: str, response_text: str
+) -> tuple[ParsedModule, list[str], str]:
+    """Canonicalize one model response into an owned complete-node module."""
+    parsed = _ingest_model_lean(ctx, [label], response_text).parsed
+    decl_texts = _delivered_decl_texts(
+        parsed,
+        [label],
+        {_lean_name(label)},
+        _planned_helper_owner_by_name(ctx, [label]),
+    )
+    if decl_texts is None:
+        raise ValueError(
+            f"response omitted `{_lean_name(label)}` or included an unowned helper"
+        )
+    code, _ranges = _compose_module(
+        parsed.imports, parsed.preamble, decl_texts
+    )
+    return parsed, decl_texts, code
+
+
+def _phase2_candidate_failure_kind(evidence: str) -> str:
+    if evidence.startswith(OBJECT_INTERFACE_FAILURE_PREFIX):
+        return "interface_usability"
+    if evidence.startswith(OBJECT_IMPLEMENTATION_FAILURE_PREFIX):
+        return "implementation_object"
+    if evidence.startswith("Deterministic checks"):
+        return "deterministic"
+    if evidence.startswith("Lean object compilation"):
+        return "object_compile"
+    if evidence.startswith("Lean rejected"):
+        return "lean_compile"
+    if evidence.startswith("Statement alignment"):
+        return "semantic_alignment"
+    return "validation"
+
+
 def _run_phase2_whole_node_transaction(
     ctx: Ctx,
     label: str,
     sections: list[Section],
     alloc: _SectionNumberAllocator,
 ) -> list[Section]:
-    """Generate, compile, audit, and freeze one repaired node atomically."""
+    """Generate/correct, validate, and freeze one repaired node atomically.
+
+    A rejected complete declaration is retained as the next correction seed.
+    Phase 1's patcher cannot be used here because it intentionally emits
+    terminal ``sorry`` bodies; this transaction instead uses a dedicated
+    complete-node correction prompt and re-runs every normal acceptance gate.
+    """
     import_modules = _sections_for_deps(ctx, [label], sections)
-    evidence = _generation_feedback_for(ctx, [label])
-    sessions: dict[str, str] = {}
-    attempts = [
-        ("base", ctx.base_timeout, ctx.base_effort),
-        ("escalation", ctx.hard_timeout, ctx.escalation_effort),
-    ]
-    last_evidence = evidence
-    for tier, timeout_s, effort in attempts:
-        prompt = _phase2_whole_node_prompt(
-            ctx,
-            label,
-            sections,
-            import_modules,
-            evidence=last_evidence,
-            timeout_s=timeout_s,
+    stored = _phase2_node_candidate(ctx, label)
+    last_evidence = (
+        str(stored.get("evidence") or "")
+        if stored
+        else _generation_feedback_for(ctx, [label])
+    )
+    candidate_code = str(stored.get("code") or "") if stored else ""
+    if (
+        stored
+        and candidate_code.strip()
+        and str(stored.get("failure_kind") or "") == "object_compile"
+        and "object compilation" in last_evidence.lower()
+        and "timed out" in last_evidence.lower()
+    ):
+        # State written before the usability gate retained the right complete
+        # candidate but mislabeled a 600s object timeout as generic proof
+        # generation. Diagnose that retained candidate once before spending a
+        # correction call, then persist the actionable classification.
+        legacy_timeout = LeanAttempt(
+            ok=False,
+            command=[],
+            reason="Legacy object compilation timed out after 600s.",
+            kind="object-timeout",
+            duration_s=600.0,
         )
+        failure_class, classified = _object_gate_evidence(
+            ctx,
+            [label],
+            candidate_code,
+            legacy_timeout,
+            complete_bodies=True,
+        )
+        last_evidence = classified
+        stored["evidence"] = classified[-12000:]
+        stored["failure_kind"] = failure_class
+        _record(
+            ctx.telemetry,
+            "phase2_legacy_object_timeout_classified",
+            label=label,
+            classification=failure_class,
+        )
+    # A repeated candidate/failure pair means focused correction already made
+    # no progress. Reseed once from the blueprint; otherwise continue directly
+    # from the retained complete declaration.
+    correction_first = bool(stored and not stored.get("repeated_state"))
+    attempts = (
+        ["correction"]
+        if correction_first
+        else ["generation", "correction"]
+    )
+    for action in attempts:
+        if action == "correction":
+            if not candidate_code.strip():
+                # No salvageable output exists (for example, the base call
+                # timed out before emitting Lean). Preserve the old two-tier
+                # availability policy, but make this a fresh full generation.
+                tier = "escalation"
+                timeout_s = ctx.hard_timeout
+                effort = ctx.escalation_effort
+                prompt = _phase2_whole_node_prompt(
+                    ctx,
+                    label,
+                    sections,
+                    import_modules,
+                    evidence=last_evidence,
+                    timeout_s=timeout_s,
+                )
+                purpose = "phase2_whole_node_repair"
+            else:
+                tier = "escalation"
+                timeout_s = min(
+                    ctx.hard_timeout, PHASE2_COMPLETE_CORRECTION_TIMEOUT
+                )
+                effort = ctx.escalation_effort
+                prompt = _phase2_complete_node_correction_prompt(
+                    ctx,
+                    label,
+                    sections,
+                    import_modules,
+                    candidate_code=candidate_code,
+                    evidence=last_evidence,
+                    timeout_s=timeout_s,
+                )
+                correction_fingerprint = hashlib.sha256(
+                    (
+                        _phase2_node_candidate_epoch(ctx, label)
+                        + "\0"
+                        + _candidate_hash(candidate_code)
+                        + "\0"
+                        + hashlib.sha256(last_evidence.encode("utf-8")).hexdigest()
+                        + "\0"
+                        + ctx.escalation_runner_spec
+                    ).encode("utf-8")
+                ).hexdigest()
+                attempted = set(
+                    (_phase2_node_candidate(ctx, label) or {}).get(
+                        "attempted_corrections", []
+                    )
+                )
+                if correction_fingerprint in attempted:
+                    _record(
+                        ctx.telemetry,
+                        "phase2_complete_correction_skipped",
+                        label=label,
+                        reason=(
+                            "identical_candidate_and_rejection_already_attempted"
+                        ),
+                        correction_sha256=correction_fingerprint,
+                    )
+                    # Reseed once from the blueprint instead of replaying the
+                    # same correction or terminating the whole run.
+                    attempts.append("generation")
+                    continue
+                _note_phase2_candidate_correction(
+                    ctx, label, correction_fingerprint
+                )
+                purpose = "phase2_complete_node_correction"
+        else:
+            tier = "base"
+            timeout_s = ctx.base_timeout
+            effort = ctx.base_effort
+            prompt = _phase2_whole_node_prompt(
+                ctx,
+                label,
+                sections,
+                import_modules,
+                evidence=last_evidence,
+                timeout_s=timeout_s,
+            )
+            purpose = "phase2_whole_node_repair"
+
+        # Complete-node corrections are self-contained. Historical telemetry
+        # shows resumed Phase-2 calls were both slower and far more likely to
+        # hit 600s than fresh calls, while Phase-1 patch sessions remain useful.
         result = _call_model(
             ctx,
             prompt,
-            purpose="phase2_whole_node_repair",
+            purpose=purpose,
             timeout=timeout_s,
             effort=effort,
             labels=[label],
             escalated=tier == "escalation",
-            sessions=sessions,
         )
         candidate_text = result.text or result.partial_text
         refusal = _parse_decomposition_refusal(
@@ -18869,27 +21826,18 @@ def _run_phase2_whole_node_transaction(
         # call; an incomplete partial response simply fails ingestion below.
         if result.status not in {"ok", "timeout"} or not candidate_text.strip():
             last_evidence = result.error or (
-                f"{tier} whole-node model call returned {result.status}"
+                f"{tier} {action} call returned {result.status}"
             )
             continue
         try:
-            parsed = _ingest_model_lean(ctx, [label], candidate_text).parsed
+            parsed, decl_texts, delivered_code = _phase2_complete_candidate(
+                ctx, label, candidate_text
+            )
         except ValueError as exc:
             last_evidence = f"Invalid complete Lean response: {exc}"
             continue
-        decl_texts = _delivered_decl_texts(
-            parsed,
-            [label],
-            {_lean_name(label)},
-            _planned_helper_owner_by_name(ctx, [label]),
-        )
-        if decl_texts is None:
-            last_evidence = (
-                f"Response omitted the complete declaration `{_lean_name(label)}` "
-                "or mixed it with an unowned helper."
-            )
-            continue
         failure_evidence: list[str] = []
+        failure_candidate_code: list[str] = []
         try:
             added = _freeze_section_from_code(
                 ctx,
@@ -18904,12 +21852,15 @@ def _run_phase2_whole_node_transaction(
                 complete_bodies=True,
                 generation_tier=tier,
                 failure_evidence=failure_evidence,
+                failure_candidate_code=failure_candidate_code,
+                lean_timeout=CANDIDATE_LEAN_CHECK_TIMEOUT,
             )
         except RepairRequest:
             # A semantic audit that identifies a blueprint defect is already
             # exact evidence for the normal Phase-2 blueprint transaction.
             raise
         if added is not None:
+            _clear_phase2_node_candidate(ctx, label)
             _record(
                 ctx.telemetry,
                 "phase2_whole_node_transaction",
@@ -18922,6 +21873,20 @@ def _run_phase2_whole_node_transaction(
             return added
         last_evidence = "\n".join(failure_evidence)[-12000:] or (
             "Complete declaration failed deterministic, Lean, or alignment gates."
+        )
+        candidate_code = (
+            failure_candidate_code[-1]
+            if failure_candidate_code
+            else delivered_code
+        )
+        stored = _store_phase2_node_candidate(
+            ctx,
+            label,
+            candidate_code,
+            evidence=last_evidence,
+            failure_kind=_phase2_candidate_failure_kind(last_evidence),
+            tier=tier,
+            source=f"phase2_{action}_validation",
         )
         _store_generation_feedback(
             ctx,
@@ -18938,11 +21903,16 @@ def _run_phase2_whole_node_transaction(
         evidence=last_evidence[-4000:],
         failure_class="lean_generation_exhausted",
         route="bounded_generation_retry",
+        retained_candidate=bool(candidate_code.strip()),
+        retained_candidate_sha256=(
+            _candidate_hash(candidate_code) if candidate_code.strip() else ""
+        ),
         blueprint_edit_authorized=False,
     )
     raise RepairRequest(
-        "Phase 2 could not generate a valid complete Lean node after base and "
-        "escalated whole-node attempts. The blueprint remains unchanged because "
+        "Phase 2 could not validate a complete Lean node within this bounded "
+        "generation/correction transaction. The latest complete candidate is "
+        "retained for the next correction. The blueprint remains unchanged because "
         "the failures provide no mathematical evidence that its contract needs "
         "repair. Retry Lean generation using the exact evidence below:\n\n"
         + last_evidence,
@@ -19037,13 +22007,22 @@ def _run_phase2_whole_node_repairs(
                 # Keep those edit scopes independent: unioning them let one
                 # repair model rewrite unrelated foundational interfaces and
                 # invalidate accepted work from other branches.
-                _enqueue_phase2_repair_requests(ctx, authorized)
+                active = getattr(ctx, "phase2_repair_active", {}) or {}
+                if str(active.get("stage") or "") == "verify":
+                    # Verification of the active repair may expose one further
+                    # helper defect. Extend that same transaction immediately;
+                    # keep independent siblings queued behind it.
+                    authorized.sort(key=lambda item: tuple(item.labels))
+                    request = authorized[0]
+                    _enqueue_phase2_repair_requests(ctx, authorized[1:])
+                else:
+                    _enqueue_phase2_repair_requests(ctx, authorized)
+                    request = _pending_phase2_repair_request(ctx)
+                    if request is None:
+                        raise RuntimeError(
+                            "authorized Phase 2 repair queue unexpectedly became empty"
+                        )
                 _save_ctx_state(ctx, sections)
-                request = _pending_phase2_repair_request(ctx)
-                if request is None:
-                    raise RuntimeError(
-                        "authorized Phase 2 repair queue unexpectedly became empty"
-                    )
             else:
                 request = _aggregate_retry_requests(
                     failures, frozen_sections=[]
@@ -19069,9 +22048,188 @@ class SectionProofOutcome:
     decomposition_evidence: dict[str, str] = field(default_factory=dict)
 
 
+def _phase2_unimplemented_body_kinds(
+    ctx: Ctx,
+    sections: Iterable[Section],
+) -> dict[str, str]:
+    """Map definition labels whose Phase-2 implementation is unavailable.
+
+    A provider can be unavailable either because its retained declaration still
+    has a deferred body or because a legitimate Phase-2 blueprint repair
+    invalidated and removed the complete declaration. Both states require the
+    same local implementation scheduling; neither is evidence that the
+    blueprint needs another edit.
+    """
+    section_list = list(sections)
+    pending: dict[str, str] = {}
+    for section in section_list:
+        if section.deferred or not section.path.is_file():
+            continue
+        try:
+            parsed = _parse_module(section.path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        by_name = {decl.name: decl for decl in parsed.decls if decl.name}
+        for label in section.labels:
+            decl = by_name.get(_lean_name(label))
+            if decl is not None and _has_terminal_sorry(decl.text):
+                pending[label] = decl.kind
+    frozen = _frozen_labels(section_list)
+    for label, node in ctx.nodes.items():
+        if (
+            not node.mathlibok
+            and node.kind in DEFINITION_LIKE_KINDS
+            and label not in frozen
+        ):
+            pending[label] = "missing-definition"
+    return pending
+
+
+def _phase2_definition_prerequisites(
+    ctx: Ctx,
+    sections: Iterable[Section],
+    blocked_labels: Iterable[str],
+    evidence_by_label: Mapping[str, str],
+) -> dict[str, set[str]]:
+    """Find deferred definitions that concrete Phase-2 evidence needs unfolded.
+
+    Top-down proof order may assume a deferred theorem statement, but Lean
+    cannot reduce a ``def`` whose value is still ``sorry``. This detector is
+    intentionally evidence-bound: it considers only unresolved definition-like
+    declarations in the blocked node's blueprint dependency closure, then
+    requires the diagnostic to name that blueprint/Lean declaration. A unique
+    direct definition is also accepted when the diagnostic explicitly says the
+    obstacle is opacity or unfolding. It never infers a new dependency edge.
+    """
+    pending_kinds = _phase2_unimplemented_body_kinds(ctx, sections)
+    definition_kinds = {"def", "abbrev", "instance", "missing-definition"}
+    routed: dict[str, set[str]] = {}
+    opacity_cue = re.compile(
+        r"\b(?:opaque|unfold|unfolding|definition body|definitional|"
+        r"does not reduce|cannot reduce|not implemented|incomplete definition)\b",
+        re.IGNORECASE,
+    )
+    for blocked in dict.fromkeys(str(label) for label in blocked_labels):
+        if blocked not in ctx.nodes:
+            continue
+        evidence = str(evidence_by_label.get(blocked) or "")
+        if not evidence.strip():
+            continue
+        closure = _dependency_closure(ctx.nodes, [blocked]) - {blocked}
+        candidates = {
+            dependency
+            for dependency in closure
+            if pending_kinds.get(dependency) in definition_kinds
+        }
+        if not candidates:
+            continue
+        explicit = {
+            dependency
+            for dependency in candidates
+            if dependency in evidence
+            or re.search(
+                rf"(?<![A-Za-z0-9_]){re.escape(_lean_name(dependency))}(?![A-Za-z0-9_])",
+                evidence,
+            )
+        }
+        selected = explicit
+        if not selected and opacity_cue.search(evidence):
+            direct = candidates & set(ctx.nodes[blocked].uses)
+            if len(direct) == 1:
+                selected = direct
+        if selected:
+            routed[blocked] = selected
+    return routed
+
+
+def _schedule_phase2_definition_prerequisites(
+    ctx: Ctx,
+    sections: Iterable[Section],
+    blocked_labels: Iterable[str],
+    evidence_by_label: Mapping[str, str],
+    *,
+    source: str,
+) -> tuple[set[str], dict[str, set[str]]]:
+    """Persist a local implementation-order override without editing TeX."""
+    section_list = list(sections)
+    routed = _phase2_definition_prerequisites(
+        ctx, section_list, blocked_labels, evidence_by_label
+    )
+    prerequisites = {
+        dependency for dependencies in routed.values() for dependency in dependencies
+    }
+    if not prerequisites:
+        return set(), {}
+    # A named provider may itself have been invalidated together with one or
+    # more of its dependencies. Rebuild only the missing part of that existing
+    # blueprint closure so the complete-node transaction remains
+    # dependency-ready. Frozen theorem statements are sufficient and are not
+    # reopened; no dependency edge is inferred here.
+    frozen = _frozen_labels(section_list)
+    missing_closure = {
+        label
+        for label in _dependency_closure(ctx.nodes, sorted(prerequisites))
+        if label in ctx.nodes
+        and not ctx.nodes[label].mathlibok
+        and label not in frozen
+    }
+    prerequisites.update(missing_closure)
+    if not hasattr(ctx, "phase2_prerequisite_labels"):
+        ctx.phase2_prerequisite_labels = set()
+    ctx.phase2_prerequisite_labels.update(prerequisites)
+    _record(
+        ctx.telemetry,
+        "phase2_definition_prerequisite_routed",
+        source=source,
+        blocked_labels=sorted(routed),
+        prerequisite_labels=sorted(prerequisites),
+        prerequisites_by_blocked={
+            label: sorted(dependencies) for label, dependencies in routed.items()
+        },
+        evidence_by_label={
+            label: str(evidence_by_label.get(label) or "")[-4000:]
+            for label in routed
+        },
+        blueprint_edited=False,
+        repair_trial_consumed=False,
+        normal_phase2_order=PHASE2_PROOF_ORDER,
+        prerequisite_order="bottom-up",
+    )
+    return prerequisites, routed
+
+
+def _phase2_prerequisite_frontier(
+    ctx: Ctx, unresolved: set[str]
+) -> tuple[int, list[str], list[str]] | None:
+    """Return the next local dependency-body override, if one is pending."""
+    if not hasattr(ctx, "phase2_prerequisite_labels"):
+        ctx.phase2_prerequisite_labels = set()
+    ctx.phase2_prerequisite_labels.intersection_update(unresolved)
+    if not ctx.phase2_prerequisite_labels:
+        return None
+    return _next_implementation_frontier(
+        ctx.nodes,
+        set(ctx.phase2_prerequisite_labels),
+        "bottom-up",
+    )
+
+
+def _prioritized_phase2_declaration_work(
+    ctx: Ctx, pending: set[str]
+) -> set[str]:
+    """Prefer a persisted local prerequisite closure over unrelated repairs."""
+    if not bool(getattr(ctx, "phase2_started", False)):
+        return set(pending)
+    priority = set(pending) & set(
+        getattr(ctx, "phase2_prerequisite_labels", set())
+    )
+    return priority or set(pending)
+
+
 def _route_phase2_proof_outcomes(
     ctx: Ctx,
     outcomes: Iterable[SectionProofOutcome],
+    sections: Iterable[Section] = (),
 ) -> RepairRequest | None:
     """Route one proof frontier without widening blueprint-edit authority.
 
@@ -19081,30 +22239,79 @@ def _route_phase2_proof_outcomes(
     merely because a sibling worker requested decomposition.
     """
     ordered = list(outcomes)
+    section_list = list(sections)
     failed: dict[str, str] = {}
     authorized: list[RepairRequest] = []
+    decomposition_evidence: dict[str, str] = {}
+    decomposition_helpers: dict[str, list[str]] = {}
     for outcome in ordered:
         failed.update(outcome.failed)
         for label, helpers in outcome.decomposition.items():
             reason = outcome.decomposition_evidence.get(
                 label, "generator requested decomposition"
             )
-            evidence = (
-                f"Phase 2 implementation requested decomposition for {label}.\n"
-                f"Blueprint statement:\n{ctx.stmt_blocks.get(label, '')[:2500]}\n"
-                f"Exact decomposition evidence:\n{reason[-5000:]}"
+            decomposition_evidence[label] = reason
+            decomposition_helpers[label] = list(helpers)
+
+    prerequisites, prerequisite_routes = _schedule_phase2_definition_prerequisites(
+        ctx,
+        section_list,
+        decomposition_evidence,
+        decomposition_evidence,
+        source="phase2_proof_decomposition",
+    )
+    prerequisite_blocked = set(prerequisite_routes)
+    for label, reason in decomposition_evidence.items():
+        if label in prerequisite_blocked:
+            failed.pop(label, None)
+            continue
+        helpers = decomposition_helpers[label]
+        evidence = (
+            f"Phase 2 implementation requested decomposition for {label}.\n"
+            f"Blueprint statement:\n{ctx.stmt_blocks.get(label, '')[:2500]}\n"
+            f"Exact decomposition evidence:\n{reason[-5000:]}"
+        )
+        authorized.append(
+            RepairRequest(
+                evidence,
+                [label],
+                decomposition_helpers=list(helpers),
+                section_labels=[label],
+                context_labels=[label],
+                authorizes_blueprint_repair=True,
+                evidence_by_label={label: reason},
             )
-            authorized.append(
-                RepairRequest(
-                    evidence,
-                    [label],
-                    decomposition_helpers=list(helpers),
-                    section_labels=[label],
-                    context_labels=[label],
-                    authorizes_blueprint_repair=True,
-                    evidence_by_label={label: reason},
-                )
+        )
+
+    if prerequisites:
+        # Preserve unrelated, explicitly authorized blueprint diagnoses from
+        # the same parallel frontier. They remain queued while the local Lean
+        # implementation prerequisite takes scheduling priority.
+        if authorized:
+            _enqueue_phase2_repair_requests(ctx, authorized)
+        if failed:
+            _store_generation_feedback(
+                ctx,
+                failed,
+                "\n\n".join(
+                    f"- {label}: {evidence}" for label, evidence in failed.items()
+                ),
+                source="phase2_proof_frontier_parallel_failure",
+                evidence_by_label=failed,
             )
+        return RepairRequest(
+            "Phase 2 requires deferred definition body/bodies before retrying "
+            "the blocked top-down node(s). The blueprint is unchanged.",
+            sorted(prerequisite_blocked),
+            section_labels=sorted(prerequisite_blocked),
+            authorizes_blueprint_repair=False,
+            implementation_prerequisites=sorted(prerequisites),
+            scheduling_only=True,
+            evidence_by_label={
+                label: decomposition_evidence[label]
+                for label in prerequisite_blocked
+            },
+        )
 
     if authorized:
         _enqueue_phase2_repair_requests(ctx, authorized)
@@ -19141,6 +22348,42 @@ def _route_phase2_proof_outcomes(
         section_labels=sorted(failed),
         authorizes_blueprint_repair=False,
         evidence_by_label=failed,
+    )
+
+
+def _phase2_prerequisite_request_for_repair(
+    ctx: Ctx,
+    sections: Iterable[Section],
+    request: RepairRequest,
+    *,
+    source: str,
+) -> RepairRequest | None:
+    """Convert a misrouted blueprint repair into implementation scheduling."""
+    if not bool(getattr(ctx, "phase2_started", False)):
+        return None
+    evidence_by_label = dict(request.evidence_by_label) or {
+        label: request.evidence for label in request.labels
+    }
+    prerequisites, _routes = _schedule_phase2_definition_prerequisites(
+        ctx,
+        sections,
+        request.labels,
+        evidence_by_label,
+        source=source,
+    )
+    if not prerequisites:
+        return None
+    return RepairRequest(
+        "Phase 2 repair evidence identifies deferred definition body/bodies, "
+        "so the scheduler will implement those dependencies before retrying "
+        "the blocked node. The blueprint is unchanged.",
+        list(request.labels),
+        section_labels=list(request.section_labels),
+        context_labels=list(request.context_labels),
+        authorizes_blueprint_repair=False,
+        implementation_prerequisites=sorted(prerequisites),
+        scheduling_only=True,
+        evidence_by_label=evidence_by_label,
     )
 
 
@@ -20468,6 +23711,8 @@ def _mark_repair_boundary_pending(
     changed: Iterable[str],
     previous_nodes: dict[str, Node],
     *,
+    previous_statement_blocks: Mapping[str, str],
+    previous_statement_fps: Mapping[str, str],
     repair_roots: Iterable[str] = (),
     failure_evidence: str = "",
 ) -> set[str]:
@@ -20483,8 +23728,12 @@ def _mark_repair_boundary_pending(
     roots = {
         label for label in repair_roots if label in ctx.nodes
     }
-    before_statements = _statement_blocks(previous_nodes)
-    before_fps = _statement_fingerprints(previous_nodes)
+    # ``Node`` stores only a file path and source position. Re-extracting TeX
+    # from ``previous_nodes`` after a model edit therefore reads the *new* file
+    # and can make an existing-node statement repair look unchanged. Callers
+    # must pass the immutable text/fingerprints captured before the edit.
+    before_statements = dict(previous_statement_blocks)
+    before_fps = dict(previous_statement_fps)
     statement_changed = {
         label
         for label in changed_set
@@ -21193,10 +24442,54 @@ def _repair_blueprint(
             before_nodes, validation.nodes, decomposition_roots
         )
         if orientation_findings:
-            raise ValueError(
-                "blueprint decomposition put helper nodes in the wrong graph "
-                "direction:\n- " + "\n- ".join(orientation_findings)
+            orientation_edges = _decomposition_orientation_dependency_edges(
+                before_nodes, validation.nodes, decomposition_roots
             )
+            if orientation_edges:
+                ctx.refresh_nodes(validation.nodes)
+                edge_changed = _apply_required_dependency_edges(
+                    ctx, orientation_edges
+                )
+                validation = _validate_draft(ctx)
+                remaining_findings = (
+                    _decomposition_orientation_findings(
+                        before_nodes,
+                        validation.nodes if validation.ok else {},
+                        decomposition_roots,
+                    )
+                    if edge_changed and validation.ok
+                    else orientation_findings
+                )
+                if edge_changed and validation.ok and not remaining_findings:
+                    _record(
+                        ctx.telemetry,
+                        "blueprint_decomposition_orientation_edge_repair",
+                        labels=labels,
+                        status="applied",
+                        required_dependencies={
+                            label: sorted(dependencies)
+                            for label, dependencies in orientation_edges.items()
+                        },
+                        changed_labels=sorted(edge_changed),
+                    )
+                    _log(
+                        "  fixed decomposition helper direction by adding "
+                        "statement dependency edge(s): "
+                        + "; ".join(
+                            f"{label} -> {', '.join(sorted(dependencies))}"
+                            for label, dependencies in orientation_edges.items()
+                        )
+                    )
+                else:
+                    raise ValueError(
+                        "blueprint decomposition put helper nodes in the wrong "
+                        "graph direction:\n- " + "\n- ".join(remaining_findings)
+                    )
+            else:
+                raise ValueError(
+                    "blueprint decomposition put helper nodes in the wrong graph "
+                    "direction:\n- " + "\n- ".join(orientation_findings)
+                )
     except (OSError, ValueError) as exc:
         ctx.last_blueprint_repair_rejection = str(exc)
         content_path.write_text(before_content, encoding="utf-8")
@@ -21900,11 +25193,22 @@ def main(argv: list[str] | None = None) -> int:
     blueprint_dir = _prepare_blueprint_draft(
         args.name, continue_run=args.continue_run
     )
+    restored_interrupted_repair = (
+        _restore_interrupted_phase2_repair(args.name, blueprint_dir)
+        if args.continue_run
+        else ""
+    )
+    if restored_interrupted_repair:
+        _log(
+            "==> Restored the pre-edit Phase 2 blueprint transaction after "
+            "an interrupted repair call"
+        )
     draft_content_path = blueprint_dir / "blueprint" / "src" / "content.tex"
     telemetry.record(
         "blueprint_draft_ready",
         mode="resumed" if draft_was_resumed else "created_from_published",
         discarded_prior_draft=discarded_prior_draft,
+        restored_interrupted_phase2_repair=restored_interrupted_repair,
         draft=str(draft_content_path.relative_to(REPO_ROOT)),
         draft_sha256=hashlib.sha256(draft_content_path.read_bytes()).hexdigest(),
     )
@@ -21962,9 +25266,40 @@ def main(argv: list[str] | None = None) -> int:
             shutil.rmtree(lake_generated_dir)
         with contextlib.suppress(FileNotFoundError, OSError):
             _state_path(args.name).unlink()
+        shutil.rmtree(
+            SCRATCH_DIR / args.name / "phase2-repair-transactions",
+            ignore_errors=True,
+        )
 
     sections: list[Section] = _load_state(ctx, lean_command) if args.continue_run else []
     _prune_stale_generated(ctx, sections)
+    active_repair = getattr(ctx, "phase2_repair_active", {}) or {}
+    active_repair_id = str(active_repair.get("request_id") or "")
+    if (
+        args.continue_run
+        and active_repair_id
+        and not (
+            _phase2_repair_transaction_dir(args.name, active_repair_id)
+            / "manifest.json"
+        ).is_file()
+    ):
+        # State written before durable repair snapshots existed cannot recover
+        # the graph preceding its already-staged edit. Treat the exact resumed
+        # state as a one-time migration baseline so no later verification
+        # failure can accumulate another unverified helper component.
+        _save_ctx_state(ctx, sections)
+        _begin_phase2_repair_transaction(ctx, active_repair_id)
+        _record(
+            ctx.telemetry,
+            "phase2_repair_transaction_legacy_baseline",
+            request_id=active_repair_id,
+            stage=str(active_repair.get("stage") or "repair"),
+            labels=list(active_repair.get("labels") or []),
+        )
+        _log(
+            "==> Established a durable rollback point for a Phase 2 repair "
+            "resumed from pre-transaction state"
+        )
     report_lines = [
         f"# Statements-First Formalization: `{args.name}`",
         "",
@@ -21993,13 +25328,46 @@ def main(argv: list[str] | None = None) -> int:
     _print_pipeline_progress(ctx, sections, repair_trials, args.max_trials)
     try:
         while True:
+            if (
+                not ctx.repair_boundary_pending
+                and _complete_verified_phase2_repair(ctx, sections)
+            ):
+                _save_ctx_state(ctx, sections)
             repair_boundary_active = bool(ctx.repair_boundary_pending)
             boundary_request = _pending_repair_boundary_request(ctx)
+            if boundary_request is not None:
+                scheduling_request = _phase2_prerequisite_request_for_repair(
+                    ctx,
+                    sections,
+                    boundary_request,
+                    source="post_repair_boundary",
+                )
+                if scheduling_request is not None:
+                    ctx.repair_boundary_pending = {}
+                    _save_ctx_state(ctx, sections)
+                    _log(
+                        "==> Phase 2 scheduling deferred definition prerequisite(s) "
+                        "instead of editing the blueprint again: "
+                        + ", ".join(
+                            scheduling_request.implementation_prerequisites
+                        )
+                    )
+                    continue
             queued_phase2_request = (
                 None
                 if boundary_request is not None
                 else _pending_phase2_repair_request(ctx)
             )
+            if ctx.phase2_prerequisite_labels:
+                # A queued blueprint repair from a sibling worker must not
+                # preempt an implementation prerequisite just discovered for
+                # the blocked top-down proof. Completed prerequisites are
+                # removed here; the remaining repair queue is then resumed.
+                ctx.phase2_prerequisite_labels.difference_update(
+                    _proved_labels(sections)
+                )
+                if ctx.phase2_prerequisite_labels:
+                    queued_phase2_request = None
             if repair_boundary_active:
                 # Persist both an accepted audit (cleared state) and a routed
                 # rejection before any further model call can be interrupted.
@@ -22029,6 +25397,12 @@ def main(argv: list[str] | None = None) -> int:
                 if more_dropped:
                     continue
                 frozen = _frozen_labels(sections)
+            # Phase 2 blueprint mutations are transactional. Replacement Lean
+            # for every invalidated/new node has priority over another queued
+            # graph edit; otherwise independent diagnoses accumulate an
+            # unverified helper forest before any repair receives feedback.
+            if ctx.phase2_started and required_skeleton - frozen:
+                queued_phase2_request = None
             evidence_for_repair: str | None = None
             repair_labels: list[str] = []
             repair_helpers: list[str] = []
@@ -22079,8 +25453,10 @@ def main(argv: list[str] | None = None) -> int:
                 repair_context_labels = list(
                     queued_phase2_request.context_labels
                 )
-                active_phase2_repair_id = str(
-                    getattr(queued_phase2_request, "queue_id", "")
+                active_phase2_repair_id = _start_phase2_repair_transaction(
+                    ctx,
+                    sections,
+                    queued_phase2_request,
                 )
                 phase1_repair = False
                 _log(
@@ -22092,10 +25468,13 @@ def main(argv: list[str] | None = None) -> int:
             if evidence_for_repair is None:
                 contract_pending = required_skeleton - _frozen_labels(sections)
                 if contract_pending:
+                    declaration_work = _prioritized_phase2_declaration_work(
+                        ctx, contract_pending
+                    )
                     stage = _contract_work_stage(ctx)
                     if ctx.phase2_started:
                         print(
-                            f"==> {stage}: completing {len(contract_pending)} "
+                            f"==> {stage}: completing {len(declaration_work)} "
                             "new/changed blueprint node(s), including their Lean "
                             "statements and bodies, in one Phase 2 transaction each "
                             f"({len(required_skeleton) - len(contract_pending)} current "
@@ -22105,8 +25484,12 @@ def main(argv: list[str] | None = None) -> int:
                         _record(
                             ctx.telemetry,
                             "phase2_whole_node_repair_started",
-                            labels=sorted(contract_pending),
-                            pending_count=len(contract_pending),
+                            labels=sorted(declaration_work),
+                            pending_count=len(declaration_work),
+                            total_pending_count=len(contract_pending),
+                            prerequisite_priority=(
+                                declaration_work != contract_pending
+                            ),
                             frozen_current_count=(
                                 len(required_skeleton) - len(contract_pending)
                             ),
@@ -22121,7 +25504,7 @@ def main(argv: list[str] | None = None) -> int:
                         )
                     try:
                         sections = _run_pending_declaration_work(
-                            ctx, sections, contract_pending
+                            ctx, sections, declaration_work
                         )
                         integration_failures = _phase1_recompile_environment(
                             ctx, sections
@@ -22134,17 +25517,46 @@ def main(argv: list[str] | None = None) -> int:
                         if integration_failures:
                             continue
                         if ctx.phase2_started:
+                            active = getattr(ctx, "phase2_repair_active", {}) or {}
+                            verifying_id = (
+                                str(active.get("request_id") or "")
+                                if str(active.get("stage") or "") == "verify"
+                                else ""
+                            )
+                            if verifying_id:
+                                _complete_phase2_repair_request(
+                                    ctx, verifying_id
+                                )
+                                _save_ctx_state(ctx, sections)
                             _record(
                                 ctx.telemetry,
                                 "phase2_whole_node_repair_completed",
-                                labels=sorted(contract_pending),
-                                completed_count=len(contract_pending),
+                                labels=sorted(declaration_work),
+                                completed_count=len(declaration_work),
                             )
                             _log(
                                 "==> Phase 2 whole-node repair complete; "
                                 "resuming top-down proof scheduling"
                             )
+                            if verifying_id:
+                                # Re-enter through the queue gate so stale
+                                # diagnoses are pruned against the verified
+                                # dependency environment before another edit.
+                                continue
                     except RepairRequest as request:
+                        active = getattr(ctx, "phase2_repair_active", {}) or {}
+                        if (
+                            ctx.phase2_started
+                            and str(active.get("stage") or "") == "verify"
+                            and _requires_blueprint_transaction(
+                                request.authorizes_blueprint_repair,
+                                request.required_dependencies,
+                            )
+                        ):
+                            sections, request = _restart_active_phase2_repair(
+                                ctx, sections, request
+                            )
+                            phase1_integration_checked = False
                         evidence_for_repair = request.evidence
                         repair_labels = request.labels
                         repair_authorized = request.authorizes_blueprint_repair
@@ -22181,6 +25593,10 @@ def main(argv: list[str] | None = None) -> int:
                         active_phase2_repair_id = str(
                             getattr(request, "queue_id", "")
                         )
+                        if active_phase2_repair_id:
+                            _activate_phase2_repair_request(
+                                ctx, active_phase2_repair_id
+                            )
 
                 elif not phase1_integration_checked:
                     stage = _contract_work_stage(ctx)
@@ -22194,6 +25610,21 @@ def main(argv: list[str] | None = None) -> int:
                     phase1_integration_checked = not integration_failures
                     _save_ctx_state(ctx, sections)
                     if integration_failures:
+                        continue
+                    active = getattr(ctx, "phase2_repair_active", {}) or {}
+                    verifying_id = (
+                        str(active.get("request_id") or "")
+                        if ctx.phase2_started
+                        and str(active.get("stage") or "") == "verify"
+                        else ""
+                    )
+                    if verifying_id:
+                        _complete_phase2_repair_request(ctx, verifying_id)
+                        _save_ctx_state(ctx, sections)
+                        _log(
+                            "==> Verified active Phase 2 blueprint repair; "
+                            "revalidating queued diagnoses"
+                        )
                         continue
 
             if evidence_for_repair is None and ctx.conjecture_policy == "attempt":
@@ -22249,11 +25680,21 @@ def main(argv: list[str] | None = None) -> int:
                 proof_roots: list[str] = []
                 frontier_labels = sorted(all_unproved)
                 if all_unproved:
-                    proof_layer, frontier_labels, proof_roots = (
-                        _next_implementation_frontier(
-                            ctx.nodes, all_unproved, PHASE2_PROOF_ORDER
-                        )
+                    prerequisite_frontier = _phase2_prerequisite_frontier(
+                        ctx, all_unproved
                     )
+                    if prerequisite_frontier is not None:
+                        proof_layer, frontier_labels, proof_roots = (
+                            prerequisite_frontier
+                        )
+                        scheduling_mode = "definition_prerequisite_override"
+                    else:
+                        proof_layer, frontier_labels, proof_roots = (
+                            _next_implementation_frontier(
+                                ctx.nodes, all_unproved, PHASE2_PROOF_ORDER
+                            )
+                        )
+                        scheduling_mode = "dynamic_branch_ready_frontier"
                     frontier = set(frontier_labels)
                     unproved_by_section = [
                         (sec, [label for label in labels if label in frontier])
@@ -22266,7 +25707,12 @@ def main(argv: list[str] | None = None) -> int:
                     ]
                 if unproved_by_section:
                     mode_note = (
-                        f"{PHASE2_PROOF_ORDER} ready frontier {proof_layer} "
+                        (
+                            "dependency-first definition prerequisite"
+                            if scheduling_mode == "definition_prerequisite_override"
+                            else f"{PHASE2_PROOF_ORDER} ready frontier {proof_layer}"
+                        )
+                        + " "
                         f"({len(frontier_labels)} node(s))"
                     )
                     print(
@@ -22279,7 +25725,7 @@ def main(argv: list[str] | None = None) -> int:
                         "proof_frontier_scheduled",
                         proof_order=PHASE2_PROOF_ORDER,
                         phase1_order=PHASE1_STATEMENT_ORDER,
-                        scheduling="dynamic_branch_ready_frontier",
+                        scheduling=scheduling_mode,
                         layer=proof_layer,
                         labels=frontier_labels,
                         theorem_labels=[
@@ -22309,8 +25755,20 @@ def main(argv: list[str] | None = None) -> int:
                         for future in concurrent.futures.as_completed(futures):
                             outcomes.append(future.result())
                     _save_ctx_state(ctx, sections)
-                    request = _route_phase2_proof_outcomes(ctx, outcomes)
+                    request = _route_phase2_proof_outcomes(
+                        ctx, outcomes, sections
+                    )
                     if request is not None:
+                        if request.scheduling_only:
+                            _save_ctx_state(ctx, sections)
+                            _log(
+                                "==> Phase 2 will implement deferred definition "
+                                "prerequisite(s) before retrying the blocked node: "
+                                + ", ".join(
+                                    request.implementation_prerequisites
+                                )
+                            )
+                            continue
                         evidence_for_repair = request.evidence
                         repair_labels = list(request.labels)
                         repair_helpers = list(request.decomposition_helpers)
@@ -22320,9 +25778,14 @@ def main(argv: list[str] | None = None) -> int:
                         repair_required_dependencies = request.required_dependencies
                         repair_model_labels = list(request.model_repair_labels)
                         repair_evidence_by_label = dict(request.evidence_by_label)
-                        active_phase2_repair_id = str(
-                            getattr(request, "queue_id", "")
-                        )
+                        if request.authorizes_blueprint_repair:
+                            active_phase2_repair_id = (
+                                _start_phase2_repair_transaction(
+                                    ctx,
+                                    sections,
+                                    request,
+                                )
+                            )
                         phase1_repair = False
                     else:
                         proved_now = sorted(
@@ -22546,6 +26009,8 @@ def main(argv: list[str] | None = None) -> int:
 
             repair_trials += 1
             nodes_before_repair = dict(ctx.nodes)
+            statement_blocks_before_repair = dict(ctx.stmt_blocks)
+            statement_fps_before_repair = dict(ctx.stmt_fps)
             content_path = ctx.content_path
             content_before_repair = content_path.read_text(encoding="utf-8")
             # Compound transactions have two independently authorized writers:
@@ -22913,19 +26378,6 @@ def main(argv: list[str] | None = None) -> int:
                             "the next repair dependency-connected; add explicit uses "
                             "edges for genuinely necessary helpers or consumers."
                         )
-            if (
-                active_phase2_repair_id
-                and changed
-                and not disconnected_rollback
-                and (
-                    not repair_model_labels
-                    or scope_changed is None
-                    or bool(scope_changed)
-                )
-            ):
-                _complete_phase2_repair_request(
-                    ctx, active_phase2_repair_id
-                )
             if changed:
                 noop_repairs = 0
                 escalation_note = ""
@@ -22938,6 +26390,8 @@ def main(argv: list[str] | None = None) -> int:
                     ctx,
                     changed_requiring_boundary_audit,
                     nodes_before_repair,
+                    previous_statement_blocks=statement_blocks_before_repair,
+                    previous_statement_fps=statement_fps_before_repair,
                     repair_roots=(repair_model_labels or repair_labels),
                     failure_evidence=evidence_for_repair,
                 )
@@ -22948,6 +26402,20 @@ def main(argv: list[str] | None = None) -> int:
                     lean_command,
                     previous_nodes=nodes_before_repair,
                 )
+                if (
+                    active_phase2_repair_id
+                    and not disconnected_rollback
+                    and (
+                        not repair_model_labels
+                        or scope_changed is None
+                        or bool(scope_changed)
+                    )
+                ):
+                    _mark_phase2_repair_verifying(
+                        ctx,
+                        active_phase2_repair_id,
+                        invalidated | changed,
+                    )
                 phase1_integration_checked = False
                 deferred_labels = {
                     label

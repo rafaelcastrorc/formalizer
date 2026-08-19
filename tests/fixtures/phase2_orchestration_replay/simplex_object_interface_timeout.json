@@ -1,0 +1,33 @@
+{
+  "source_run": ".auto-blueprint/formalization/simplex/run-20260813-010635.log",
+  "source_blueprint": "simplex",
+  "label": "lem:relu-block-flattened-final-map-at-casted-input",
+  "observed": {
+    "legacy_object_timeout_seconds": 600,
+    "repeated_object_timeouts_before_snapshot": 6,
+    "repeated_object_timeout_exposure_seconds": 3600,
+    "skeleton97": {
+      "imports_only_plain_seconds": 12.632,
+      "statement_with_sorry_plain_seconds": 46.968,
+      "imports_only_object_seconds": 15.298,
+      "statement_with_sorry_object_timed_out_after_seconds": 90
+    },
+    "skeleton98": {
+      "imports_only_plain_seconds": 34.284,
+      "statement_with_sorry_plain_seconds": 60.812,
+      "complete_proof_plain_seconds": 58.822,
+      "imports_only_object_seconds": 16.943,
+      "statement_with_sorry_object_timed_out_after_seconds": 120,
+      "complete_proof_object_timed_out_after_seconds": 600
+    }
+  },
+  "required_behavior": {
+    "candidate_object_timeout_seconds": 90,
+    "run_statement_only_control_after_phase2_timeout": true,
+    "statement_control_timeout_classification": "interface_usability",
+    "proof_control_success_classification": "implementation_object",
+    "interface_failure_revises_lean_plan_not_blueprint": true,
+    "preserve_exact_blueprint_mathematics": true,
+    "rerun_all_acceptance_gates": true
+  }
+}

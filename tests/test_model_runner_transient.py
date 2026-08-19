@@ -53,6 +53,24 @@ class SequenceRunner(ModelRunner):
         return outcome
 
 
+class TimeoutWithObservedSessionRunner:
+    backend_name = "codex"
+    model = "gpt-test"
+    observed_session_id = "session-timeout-1"
+
+    def run(self, prompt, *, cwd=None, retries=0):
+        raise RunnerError("codex CLI timed out after 300s")
+
+
+class SuccessfulRunner:
+    backend_name = "codex"
+    model = "gpt-test"
+    observed_session_id = None
+
+    def run(self, prompt, *, cwd=None, retries=0):
+        return RunResult(text="```lean\ntheorem ok : True := by trivial\n```", session_id="session-ok-2")
+
+
 class ModelRunnerTransientTests(unittest.TestCase):
     def test_july31_websocket_failure_is_transient(self) -> None:
         fixture = json.loads(
@@ -149,6 +167,54 @@ class ModelRunnerTransientTests(unittest.TestCase):
         self.assertEqual(model_events[-1]["status"], "transport_exhausted")
         self.assertTrue(model_events[-1]["transport_error"])
         self.assertFalse(any(event == "phase1_generation_retry" for event, _ in telemetry.events))
+
+    def test_timeout_session_survives_outer_retry_with_fresh_local_sessions(self) -> None:
+        telemetry = FakeTelemetry()
+        ctx = SimpleNamespace(
+            telemetry=telemetry,
+            runner_spec="codex:gpt-test",
+            escalation_runner_spec="codex:gpt-test",
+            stmt_fps={"lem:test": "stmt-fp"},
+            nodes={"lem:test": object()},
+            design_plan_entries={},
+            blueprint_direct_generation={},
+            model_resume_sessions={},
+        )
+        resume_ids: list[str | None] = []
+
+        def make_runner(spec, **kwargs):
+            resume_ids.append(kwargs.get("resume_session_id"))
+            if len(resume_ids) == 1:
+                return TimeoutWithObservedSessionRunner()
+            return SuccessfulRunner()
+
+        with patch("formalize_blueprint._make_runner", side_effect=make_runner):
+            first = _call_model(
+                ctx,
+                "same prompt",
+                purpose="phase1_statement_generation",
+                timeout=300,
+                effort=None,
+                labels=["lem:test"],
+                sessions={},
+            )
+            second = _call_model(
+                ctx,
+                "same prompt",
+                purpose="phase1_statement_generation",
+                timeout=300,
+                effort=None,
+                labels=["lem:test"],
+                sessions={},
+            )
+
+        self.assertEqual(first.status, "timeout")
+        self.assertEqual(second.status, "ok")
+        self.assertEqual(resume_ids, [None, "session-timeout-1"])
+        model_events = [fields for event, fields in telemetry.events if event == "model_call"]
+        self.assertEqual(model_events[0]["status"], "timeout")
+        self.assertTrue(model_events[0]["session_captured_for_resume"])
+        self.assertTrue(model_events[1]["resumed_session"])
 
 
 if __name__ == "__main__":

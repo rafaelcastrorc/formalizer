@@ -1,0 +1,21 @@
+{
+  "source_run": ".auto-blueprint/formalization/simplex/run-20260814-043118.log",
+  "observed_failure": "A repair returned directly by the Phase 2 proof frontier was activated and marked for verification without creating the pre-edit transaction snapshot. Nested decomposition then crashed while attempting rollback.",
+  "root_label": "cor:geometric-signed-simplex",
+  "blueprint_statement": "The support function of every polytope is a finite signed sum of support functions of simplices and their nonempty common faces.",
+  "decomposition_evidence": "The frozen dependencies do not provide the finite signed index family or common-face polytopes required by the existential statement.",
+  "decomposition_helpers": [
+    "Construct polytopes for nonempty common intersections of triangulation cells.",
+    "Construct the finite signed support-function expansion."
+  ],
+  "baseline_blueprint": "baseline geometric corollary\n",
+  "provisional_blueprint": "provisional helper component\n",
+  "provisional_labels": [
+    "cor:geometric-signed-simplex",
+    "lem:simplex-face-polytope"
+  ],
+  "expected": {
+    "transaction_snapshot_before_mutation": true,
+    "nested_decomposition_restores_baseline": true
+  }
+}

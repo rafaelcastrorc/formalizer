@@ -1646,8 +1646,11 @@ function stageFromLine(line){
   if ((m = line.match(/==> Phase 2 whole-node repair: completing (\d+) dependency-ready node/))) {
     return `Phase 2 · complete repaired frontier (${m[1]} nodes)`;
   }
+  if ((m = line.match(/==> Phase 2 complete-node candidate (\d+): (\d+) node/))) {
+    return `Phase 2 · validate complete candidate (${m[2]})`;
+  }
   if ((m = line.match(/==> Phase 2 repaired node (\d+): (\d+) node/))) {
-    return `Phase 2 · verify complete repaired node (${m[2]})`;
+    return `Phase 2 · validate complete candidate (${m[2]})`;
   }
   if (line.includes('Phase 2 whole-node repair integration gate')) {
     return 'Phase 2 · integrate complete repaired nodes';
@@ -1711,6 +1714,7 @@ function stageFromLine(line){
       proof_batch: 'proof batch',
       proof_singleton: 'singleton proof',
       phase2_whole_node_repair: 'complete repaired node',
+      phase2_complete_node_correction: 'correct retained complete node',
       blueprint_repair: 'blueprint repair',
       section_normalization: 'section normalization',
     }[m[1]] || m[1].replace(/_/g, ' ');

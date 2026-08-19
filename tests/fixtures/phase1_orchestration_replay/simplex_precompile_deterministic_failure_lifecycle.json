@@ -1,0 +1,16 @@
+{
+  "blueprint": "simplex",
+  "run": "run-20260813-235136",
+  "layer": 11,
+  "label": "remark:geometric-recursion-gap",
+  "statement_fp": "8f98e3fad61e688bbed5831812542ec914fa2d3babe690c0343c7e3bf7ae72b1",
+  "deterministic_rejection": "remark:geometric-recursion-gap / `remark_geometric_recursion_gap`: placeholder declaration name `remark_geometric_recursion_gap`",
+  "observed_retry_range": [28, 57],
+  "expected_lifecycle_states": [
+    "escalation",
+    "exhausted",
+    "escalation",
+    "exhausted"
+  ],
+  "expected_terminal_route": "decomposition"
+}

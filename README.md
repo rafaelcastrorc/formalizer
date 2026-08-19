@@ -413,7 +413,11 @@ compact semantic plan plus candidate-derived typed contracts described above.
    frontier. After every accepted transaction, readiness is recomputed from the
    actual frozen contracts. The scheduler never requires an entire static graph
    layer to finish: unresolved nodes remain queued and block only consumers in
-   their own dependency closure. Candidate groups
+   their own dependency closure. If a scoped failure leaves another dependency
+   branch ready, Phase 1 drains that independent branch before returning the
+   failure to the serialized repair loop. The repair itself is not concurrent
+   with generation, so candidates are never produced while their blueprint is
+   being edited. Candidate groups
    are generated concurrently. Each response supplies both the Lean declaration
    and its exact typed interface contract, then passes canonical ingestion plus
    deterministic coverage, helper-surface, cycle, and dependency checks in
@@ -453,12 +457,15 @@ compact semantic plan plus candidate-derived typed contracts described above.
    declaration errors receive up to three
    bounded compiler-feedback corrections inside the same candidate transaction,
    so they do not restart generation. Every accepted correction refreshes its
-   derived typed contract before the deterministic gates run again. The compiled
-   candidates are imported together, then one independent
-   final statement audit compares the actual compiling declarations with the
-   blueprint. Its cache key includes every target and every transitively consumed
-   local helper. No candidate counts as frozen until compilation, integration,
-   and this final audit pass. Top-down Phase
+   derived typed contract before the deterministic gates run again. Ordinary
+   Lean checking runs before one independent final statement audit compares the
+   actual typechecked declarations with the blueprint. Its cache key includes
+   every target and every transitively consumed local helper. Only accepted
+   candidates are then compiled to `.olean` objects and imported together
+   through the deterministic layer gate, so rejected candidates do not consume
+   the object-build budget. No candidate counts as frozen until ordinary Lean
+   checking, statement alignment, object generation, and integration all pass.
+   Top-down Phase
    1 retains its group transaction because it refines declarations inside the
    provisional whole-graph environment, but it uses the same deterministic,
    Lean, semantic, retry, and repair gates.
@@ -500,6 +507,17 @@ compact semantic plan plus candidate-derived typed contracts described above.
    that exact contract: an eligible legacy plan is revised once, then generation
    switches to the authoritative blueprint without the plan. Compiler evidence
    alone is not treated as proof that the blueprint is mathematically false.
+   Candidate code is bound to the plan/strategy fingerprint that produced it:
+   changing to blueprint-direct generation keeps the old failure as evidence
+   but requires newly generated code, rather than relabelling the failed
+   planned declaration as blueprint-direct output.
+   Plan replacement and strategy switching cross one atomic generation-epoch
+   transition. That transition invalidates candidate code, Phase 1 retry
+   provenance, exchange history, quarantine, and local partitions owned by the
+   obsolete contract while preserving exact compiler/critic feedback. All
+   correction branches use this same boundary; rejected Lean is retained across
+   it only when explicitly reattached as a correction seed under the new
+   contract.
    Only if the same contract also exhausts the blueprint-direct lifecycle is it
    routed to the existing scoped decomposition transaction, where any proposed
    blueprint helper still must pass the ordinary validation and alignment
@@ -602,6 +620,14 @@ compact semantic plan plus candidate-derived typed contracts described above.
    transparent canonical alias to their exact candidate-owned structure, inductive,
    or class interface. Those interfaces freeze their fields or constructors
    immediately.
+   A proposition-valued predicate therefore freezes as a public header such as
+   `def commonFace (Q : I -> Polytope) (J : Finset I) (F : Polytope) : Prop := sorry`.
+   The formula defining that predicate belongs to its Phase-2 body; Phase 1
+   must not move the formula into the result type. The Phase-1 semantic critic
+   may reject this skeleton only for an explicit public-interface defect such
+   as a missing or wrongly typed parameter, a wrong result type, or a separately
+   named helper required by another public statement. Body-only obligations are
+   recorded for Phase 2 and do not trigger statement regeneration.
    Model output that spells a declaration as `corollary` is normalized to
    `theorem` before coverage or compilation, rather than being mistaken for a
    missing declaration. Resumed sessions are discarded between
@@ -665,10 +691,18 @@ compact semantic plan plus candidate-derived typed contracts described above.
    cleared only when that statement is accepted, and is discarded automatically
    if blueprint repair changes the statement. Exact model exchanges are also
    fingerprinted by statement and plan epoch, candidate input, purpose, tier,
-   and prompt; response hashes survive outer retries and `--continue`, preventing
-   a byte-identical response from being compiled and audited again. Distinct
-   responses remain eligible under the bounded stochastic-sampling policy because
-   historical replays include cases where sample two or three first succeeds.
+   model, and prompt. The existing three-sample stochastic allowance is one
+   persisted allowance across inner corrections, outer retries, restart, and
+   `--continue`; it does not reset at a transaction boundary. Response hashes
+   survive those boundaries, preventing a byte-identical response from being
+   compiled and audited again. Distinct responses remain eligible within that
+   allowance because historical replays include cases where sample two or three
+   first succeeds. Once the exact allowance is exhausted, the retained candidate
+   and evidence return to the ordinary failure router without another model call.
+   Independent Phase 1 workers stream directly from generation into deterministic
+   checking and Lean typechecking, so a completed candidate does not wait behind
+   a slower sibling model call. All workers still rendezvous at the same single
+   batched statement audit; no declaration freezes early and no audit is split.
    Every prompt also receives an authoritative dependency table distinguishing generated
    declarations from `\mathlibok` declarations and their settled Lean names.
    Prompts are dependency-sliced so their size scales with the work in the
@@ -676,9 +710,17 @@ compact semantic plan plus candidate-derived typed contracts described above.
    targets' own search terms, the node-graph orientation covers only targets
    plus direct dependencies and consumers, and frozen-interface digests keep
    direct-dependency modules under budget pressure. Read-only generation and
-   audit calls run with agent-spawning and harness-side tools disabled, and
-   every generation prompt carries a write-discipline rule: spend at most
-   half the budget exploring, and always emit the requested code.
+   audit calls run with agent-spawning and harness-side tools disabled. A
+   declaration-local Phase 1 correction receives only the affected target and
+   its owned structural interface, while the deterministic dependency digest
+   supplies everything else; unrelated declarations from a large section are
+   not repeated in that correction prompt. Candidate Lean checks are bounded
+   independently from the final full integration check, and the broad
+   `import Mathlib` diagnostic retry runs only for missing-name errors that an
+   import can plausibly resolve. Type mismatches, heartbeat exhaustion, and
+   unfinished tactics are never compiled a second time merely with a broader
+   import. Every generation prompt carries a write-discipline rule: spend at
+   most half the budget exploring, and always emit the requested code.
 2. **Phase 2 — bodies and proofs top-down.** Phase 1
    freezes exact declaration headers/interfaces but leaves both theorem proofs
    and typed `def`/`abbrev` bodies as terminal `sorry`. Phase 2 implements every
@@ -700,12 +742,50 @@ compact semantic plan plus candidate-derived typed contracts described above.
    only the residue escalates to singleton calls. Every branch-locally ready
    node may run in parallel according to `--workers`; a difficult node blocks
    only dependencies in its own branch, not an entire static graph layer.
+   Top-down scheduling may freely use a lower theorem's frozen statement while
+   that theorem's proof is still deferred. Definitions are different: a proof
+   that must unfold a lower `def` cannot usefully proceed while that definition
+   body is still `sorry` or while a legitimate Phase 2 repair has invalidated
+   its previous complete declaration. When exact compiler/generator/audit
+   evidence names such a provider in the blocked node's dependency closure,
+   the scheduler persists a **local definition prerequisite**, rebuilds only
+   the missing part of that provider's existing dependency closure as complete
+   Phase 2 nodes, and then returns to the blocked top-down node. This
+   scheduling-only route does not edit the blueprint,
+   create a dependency edge, reopen Phase 1, or consume a blueprint-repair
+   trial. The evidence and prerequisite survive `--continue`.
    A Phase 2 whole-node call that returns a concrete `NEEDS-DECOMPOSITION`
    response enters the authorized blueprint-repair transaction immediately.
    It is not retried as escalated Lean generation: unlike Phase 1's
    statement-only generator, the whole-node call already received the complete
    statement, proof, and frozen dependency interfaces, so forcing generation
    would risk a weakened substitute and waste a model call.
+   A complete declaration rejected by deterministic checks, Lean, object
+   compilation, or the alignment audit is retained as an untrusted correction
+   candidate. The next call receives that exact statement-and-body declaration
+   plus only its current rejection and must return a corrected complete node;
+   it does not regenerate the node from scratch or route through the Phase 1
+   `sorry` patcher. The correction starts in a fresh backend session because it
+   is self-contained; historical telemetry showed that resuming the exploratory
+   generation session made these calls substantially slower. The corrected
+   node re-runs every ordinary acceptance gate before it can replace anything.
+   Candidate state is fingerprinted by the blueprint and dependency-contract
+   epoch and survives outer retries and `--continue`; a changed contract
+   invalidates it automatically.
+   Object generation is also a bounded interface-usability gate. Candidate
+   modules receive 90 seconds for `lean -o`; the final assembled integration
+   check keeps its longer budget. If a complete Phase 2 node exceeds that
+   budget, the pipeline compiles one disposable control with only the target
+   body replaced by `sorry`. A passing control proves that the public interface
+   is usable, so the correction must preserve it exactly and simplify only the
+   implementation. If the control also times out, rewriting the proof cannot
+   help: the retained whole-node transaction revises the Lean representation
+   using bounded named same-node fields while preserving the exact blueprint
+   statement and proof obligations. In Phase 1 the candidate already has
+   deferred bodies, so the same timeout immediately revises only its advisory
+   Lean interface plan. Neither route edits, weakens, or reinterprets the
+   blueprint, and every replacement reruns deterministic coverage, Lean,
+   statement alignment, object generation, and integration before acceptance.
    Phase 2 uses the same failure-scope policy as Phase 1: successful bodies stay
    committed, a failed subset is retried alone, and a batch that fails as a
    whole is repeatedly bisected through base-runner rounds before any remaining
@@ -720,8 +800,26 @@ compact semantic plan plus candidate-derived typed contracts described above.
    Dependencies and neighboring contracts are read-only context. A repair may
    add new dependency-connected helper nodes, but those helpers still pass the
    normal graph checks and scoped post-repair blueprint audit before Lean
-   generation. Accepted sibling nodes remain frozen while the queue is
-   processed, and `--continue` restores the queue without recombining it.
+   generation. The queue has a single persisted active transaction. Before its
+   model call may edit the unpublished blueprint, the pipeline snapshots the
+   exact draft, scheduler state, generated Lean modules, and compiled generated
+   objects. After the edit, every changed/new blueprint node is generated as a
+   complete Lean node, compiled, and alignment-audited. If that verification
+   exposes another blueprint/decomposition defect, the entire provisional
+   component is discarded, the pre-edit snapshot is restored, and the exact new
+   evidence is added to the original repair request. The next repair therefore
+   replaces the component from its clean graph instead of extending rejected
+   helper nodes. The snapshot is deleted, and the blueprint edit becomes part
+   of the unpublished draft, only after all replacement nodes pass. This is a
+   storage/scheduling boundary and adds no model call to a successful repair.
+   Only then is the transaction acknowledged and may a later queued edit start.
+   Remaining diagnoses are fingerprinted against
+   their complete dependency context and discarded as stale when the verified
+   repair changed that context; the affected unproved node returns to ordinary
+   Phase 2 scheduling under the new graph. These checks are deterministic and
+   add no model-call stage. Accepted sibling nodes remain frozen while the queue
+   is processed, and `--continue` restores both the active transaction and the
+   queue without recombining them.
    The same rule applies to ordinary Phase 2 proof-frontier workers: concurrent
    decomposition findings become one queued transaction per explicitly named
    node. A decomposition response grants edit authority only when the entire
@@ -756,6 +854,13 @@ compact semantic plan plus candidate-derived typed contracts described above.
    excerpt, and the harness conventions, and reads `content.tex` from disk
    instead of receiving the whole blueprint inline. Repairs are instructed to
    stay additive — add helper nodes and keep non-target statements unchanged.
+   Phase-1 failures discovered before Lean compilation use the same persisted
+   per-statement retry lifecycle as compiler and semantic-audit failures:
+   base generation, escalation generation, one blueprint-direct strategy, then
+   scoped decomposition only if that direct strategy also fails. Mechanical
+   plan-closure findings keep their separate plan-correction route. This
+   prevents a deterministic candidate rejection from restarting ordinary
+   generation for every outer repair trial.
    A model audit cannot authorize blueprint mutation merely by returning the
    label `blueprint_issue`: it must identify the exact mathematical information
    absent from the blueprint. If the existing text is concrete and another
@@ -787,9 +892,12 @@ compact semantic plan plus candidate-derived typed contracts described above.
    its dependencies refreeze. A descendant is reactivated only if that
    deterministic check passes. Before Phase 2 starts, an unsuccessful recheck
    remains ordinary Phase 1 contract refinement. After Phase 2 starts, each new
-   or changed node enters a **Phase 2 whole-node transaction**: one model call
-   returns the current Lean statement and its complete proof or definition body
-   together. The combined declaration must pass deterministic coverage,
+   or changed node enters a **Phase 2 whole-node transaction**: an initial model
+   call returns the current Lean statement and its complete proof or definition
+   body together. If that candidate is locally rejected, one focused correction
+   edits the retained complete declaration from the exact diagnostic; the
+   workflow never splits it into separate statement and proof phases. The
+   combined declaration must pass deterministic coverage,
    compilation, statement/body alignment, and object integration before the
    complete Lean node is accepted against the unpublished blueprint draft.
    Phase 2 never sends the node through Phase 1 statement generation
@@ -910,6 +1018,59 @@ test. The committed cases cover both `simplex` and
 `unconditional-unclonable-encryption`, including a healthy-plan path and a bad
 plan that must be corrected before generation.
 
+Phase 1 scheduler headroom has a separate timing replay built from committed
+task traces:
+
+```bash
+uv run python scripts/replay_phase1_scheduler_latency.py
+```
+
+It preserves the recorded model calls and per-label causal order while testing
+how much wall time independent-branch scheduling and post-audit object builds
+could remove. The replay is intentionally an upper-bound tool, not a claim that
+an unseen model response will have the same duration. Use `--require-target`
+when evaluating a proposed speedup target; the command fails when even the
+optimistic historical counterfactual cannot reach it.
+
+### Deterministic Phase 2 latency replay
+
+Complete-node orchestration can also be benchmarked without a model, network,
+or local telemetry. The committed Phase 2 fixture contains a real legacy call
+trajectory and a deterministic retained-candidate counterfactual. A logical
+clock compares full-generation count, model-seconds, timeout exposure, and the
+set of correctness gates reached by both policies:
+
+```bash
+uv run python scripts/replay_phase2_latency.py --assert-improvement
+```
+
+The legacy durations and outcomes are observed historical data. The focused
+correction duration is a counterfactual based on the observed fresh successful
+Phase 2 average, so this benchmark proves that the scheduler removes the known
+discard/regenerate waste under that outcome; it does not predict an unseen
+model's wall-clock response. A live end-to-end run remains the final runtime
+measurement. The test fails if the retained path skips deterministic coverage,
+Lean compilation, statement alignment, or object integration.
+
+The committed `simplex_opaque_definition_prerequisite.json` fixture covers a
+separate historical routing failure: a top-down consumer repeatedly requested
+blueprint repair because `def:m-function` still had a deferred Lean body. The
+regression requires a local dependency-body prerequisite, zero blueprint edits,
+and zero consumed blueprint-repair trials.
+
+To diagnose a slow single-declaration module without mutating generated state,
+measure imports, its statement with a disposable `sorry` body, and its real body
+separately under plain checking and object generation:
+
+```bash
+uv run python scripts/benchmark_lean_candidate.py \
+  AutoBlueprint/Generated/<Blueprint>/SkeletonNN.lean --timeout 120
+```
+
+The command writes controls only under `.auto-blueprint/benchmarks/`, removes
+them when it exits, and prints JSON timings. It accepts only a module containing
+one declaration so the attribution remains meaningful.
+
 The explicit OpenAI-style CLI shape, if you want to pin model names yourself,
 is:
 
@@ -939,14 +1100,17 @@ flowchart TD
     C1 --> DG["Canonical ingestion and deterministic gates: coverage, dependencies, members, aliases, cycles"]
     DG -->|Candidate defect| SC["Patch the saved candidate with exact evidence"]
     SC --> C1
-    DG -->|Passes| PA["Compile candidate groups in parallel"]
+    DG -->|Passes| PA["Stream each completed worker directly into Lean typechecking"]
     PA -->|Failed| EF{"Same declarations compile under complete project environment?"}
-    EF -->|Yes| IG["Keep declarations unchanged with resolved environment"]
-    EF -->|No| CP["Bounded compiler-feedback corrections inside same component transaction"]
+    EF -->|Missing-name diagnostic and yes| EOK["Keep declarations unchanged with resolved environment"]
+    EOK --> CH
+    EF -->|Not import-related or still fails| CP["Bounded compiler-feedback corrections inside same component transaction"]
     CP --> C1
-    PA -->|Compiled| IG["Import compiled candidates together in one deterministic layer gate"]
-    IG --> CH["Independent final audit compares compiling statements and consumed helpers with blueprint"]
-    CH -->|Accepted| I["Freeze integrated statements"]
+    PA -->|Typechecked| CH["Independent final audit compares typechecked statements and consumed helpers with blueprint"]
+    CH -->|Accepted| OB["Build objects for accepted candidates in parallel"]
+    OB -->|Failed| CP
+    OB --> IG["Import accepted candidates together in one deterministic layer gate"]
+    IG --> I["Freeze integrated statements"]
     CH -->|Per-node Lean translation issue| SC
     DG -->|Corrected Lean and critic agree on a missing existing dependency| DER["Add the direct uses edge transactionally"]
     DER --> RV
@@ -970,6 +1134,9 @@ flowchart TD
     AG -->|Passes| J["Phase 2: select every branch-locally ready top-down body; skip recorded conjectures"]
     J --> K["Implement theorem proofs and definition bodies against frozen interfaces"]
     K --> L["Batched body-implementation model calls"]
+    L -->|Exact evidence requires unfolding a deferred definition| DPI["Persist local definition prerequisite"]
+    DPI --> DPP["Implement prerequisite definition bodies dependency-first"]
+    DPP --> K
     L --> C2["Canonical ingestion: extract tactic bodies by frozen declaration owner"]
     C2 --> M["Singleton escalation for residue"]
     M --> N["Advance Phase 2 from public results toward supporting declarations"]
@@ -977,10 +1144,20 @@ flowchart TD
     N -->|No sorries remain| V["Run strict correctness audit: no sorry, axioms, vacuous True proofs"]
     V -->|Proof failed but statement is still valid| K
     V -->|Blueprint evidence from real Lean/audit output| R2["Phase 2 repairs the unpublished blueprint draft"]
-    R2 --> RV2["Audit original root plus complete changed helper component before Lean generation"]
+    R2 --> RQ["Activate exactly one persisted Phase 2 repair"]
+    RQ --> RV2["Audit original root plus complete changed helper component before Lean generation"]
     RV2 --> PR["Generate each changed blueprint node as one complete Lean statement-and-body transaction"]
-    PR --> PRA["Validate, compile, and audit the complete Lean node against the unpublished blueprint draft"]
-    PRA --> J
+    PR --> PC["Retain complete statement-and-body candidate"]
+    PC --> PRA["Validate, compile, and audit the complete Lean node against the unpublished blueprint draft"]
+    PRA -->|Object build exceeds 90s| OCP["Compile disposable statement-only control"]
+    OCP -->|Control passes| OB["Preserve public interface; simplify only implementation"]
+    OCP -->|Control also times out| OI["Preserve blueprint semantics; revise bounded same-node Lean representation"]
+    OB --> PC
+    OI --> PC
+    PRA -->|Lean-generation rejection| PCR["Correct retained complete node from exact current evidence in a fresh bounded call"]
+    PCR --> PC
+    PRA --> RQV["Acknowledge active repair and invalidate stale queued diagnoses"]
+    RQV --> J
     V -->|All proofs accepted| O["Assemble formalization.lean"]
     O --> P["Final from-scratch Lean check"]
     P --> Q["Atomically promote blueprint draft and publish Lean file"]
@@ -1409,8 +1586,10 @@ The telemetry is raw observation data, not guessed labels. It stores:
   bodies. A slow body blocks only its own dependency branch rather than every
   node in a deeper static graph layer;
 - Phase 2 whole-node repair transactions, including the exact changed blueprint
-  fingerprint, complete statement-and-body candidate, producing tier, compiler
-  and alignment result, and whether the transaction committed or exhausted;
+  fingerprint, retained complete statement-and-body candidate, candidate and
+  rejection fingerprints, focused-correction attempts, producing tier,
+  compiler and alignment result, and whether the transaction committed or
+  exhausted;
 - blueprint-repair outcomes, changed nodes, graph distance from repair targets,
   downstream scope rollbacks, added/removed helpers, deferred unchanged
   descendants, deterministic recompile outcomes, and nodes that genuinely
