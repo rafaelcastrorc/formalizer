@@ -1772,6 +1772,20 @@ def _realize_typed_contracts_from_candidate(
     ctx.design_plan_entries = entries
     target_by_name = {_lean_name(label): label for label in requested}
     owner_by_index = dict(canonical.owner_by_index)
+    explicit_owners = _planned_helper_owner_by_name(ctx, requested)
+    owner_by_name = {
+        decl.name: owner_by_index[index]
+        for index, decl in enumerate(canonical.parsed.decls)
+        if decl.name and index in owner_by_index
+    }
+    for index, decl in enumerate(canonical.parsed.decls):
+        if (
+            decl.name
+            and decl.name not in target_by_name
+            and decl.kind in {"structure", "class", "inductive"}
+            and index in owner_by_index
+        ):
+            explicit_owners.setdefault(decl.name, owner_by_index[index])
     realized: set[str] = set()
     changed: set[str] = set()
     for label in requested:
@@ -1823,10 +1837,28 @@ def _realize_typed_contracts_from_candidate(
             for key in _PLAN_ENTRY_PROGRESS_KEYS
             if key in previous
         }
+        expected_kind = _phase1_target_kinds(ctx, [label]).get(target_name, "")
+        structural_alias = _is_phase1_structural_target_alias(
+            target,
+            expected_kind,
+            canonical.parsed,
+            owner_by_name,
+            explicit_owners,
+        )
         replacement = {
             "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
             "statement_fp": ctx.stmt_fps[label],
-            "target_signature": _decl_interface_text(target),
+            # Phase 1 owns the public declaration surface, never an ordinary
+            # definition body or theorem proof.  Keeping a completed body here
+            # made the next repair prompt call it an "exact typed contract";
+            # the model then moved that body into the result type to satisfy the
+            # simultaneous `:= sorry` rule.  Strip ordinary bodies even when a
+            # caller presents an unnormalised historical candidate.
+            "target_signature": (
+                _decl_interface_text(target)
+                if structural_alias
+                else _phase1_target_interface_text(target)
+            ),
             "helpers": helpers,
             "decisions": decisions,
             "origin": "phase1_candidate",
@@ -1863,6 +1895,7 @@ def _ingest_model_lean(
     *,
     strict_duplicates: bool = True,
     realize_contracts: bool = False,
+    defer_phase1_bodies: bool = False,
 ) -> CanonicalModelModule:
     """Extract and canonicalize a Lean code block returned by a model."""
     canonical = _canonicalize_model_lean(
@@ -1871,6 +1904,8 @@ def _ingest_model_lean(
         _extract_lean_code(response),
         strict_duplicates=strict_duplicates,
     )
+    if defer_phase1_bodies:
+        canonical = _defer_phase1_target_bodies(ctx, labels, canonical)
     if realize_contracts:
         _realize_typed_contracts_from_candidate(ctx, labels, canonical)
     return canonical
@@ -1908,6 +1943,186 @@ def _has_terminal_sorry(decl_text: str) -> bool:
 
 def _normalize_terminal_sorry(decl_text: str) -> str:
     return _TERMINAL_SORRY_RE.sub(":= sorry", decl_text.rstrip())
+
+
+def _top_level_assignment_index(decl_text: str) -> int | None:
+    """Locate a declaration's top-level ``:=`` without matching binder syntax.
+
+    Phase 1 receives model-authored Lean, so a plain ``split(':=', 1)`` is not
+    safe: binder types, strings, and comments may themselves contain ``:=``.
+    This small lexer recognizes exactly the boundary needed to retain a public
+    declaration header while deferring its body.
+    """
+    depths = {"(": 0, "[": 0, "{": 0}
+    closing = {")": "(", "]": "[", "}": "{"}
+    block_depth = 0
+    line_comment = False
+    in_string = False
+    escaped = False
+    index = 0
+    while index < len(decl_text):
+        pair = decl_text[index : index + 2]
+        char = decl_text[index]
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+            index += 1
+            continue
+        if block_depth:
+            if pair == "/-":
+                block_depth += 1
+                index += 2
+            elif pair == "-/":
+                block_depth -= 1
+                index += 2
+            else:
+                index += 1
+            continue
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if pair == "--":
+            line_comment = True
+            index += 2
+            continue
+        if pair == "/-":
+            block_depth = 1
+            index += 2
+            continue
+        if char == '"':
+            in_string = True
+            index += 1
+            continue
+        if char in depths:
+            depths[char] += 1
+            index += 1
+            continue
+        if char in closing:
+            opener = closing[char]
+            depths[opener] = max(0, depths[opener] - 1)
+            index += 1
+            continue
+        if pair == ":=" and not any(depths.values()):
+            return index
+        index += 1
+    return None
+
+
+def _phase1_target_interface_text(decl: DeclBlock) -> str:
+    """Return a Phase-1 target contract without an implementation/proof body."""
+    if decl.kind in {"def", "abbrev", "theorem", "lemma"}:
+        boundary = _top_level_assignment_index(decl.text)
+        if boundary is not None:
+            return decl.text[:boundary].rstrip()
+    return _decl_interface_text(decl)
+
+
+def _deferred_prop_structure(decl: DeclBlock) -> str | None:
+    """Convert the invalid Phase-1 shape ``structure ... : Prop where``.
+
+    A structure whose sort is ``Prop`` cannot be the bundled data interface
+    allowed by Phase 1. Models sometimes use its fields to spell a predicate's
+    conditions. The public interface is already present in the structure
+    header, so retain that header as an ordinary deferred predicate instead of
+    paying for a compiler failure and model repair.
+    """
+    if decl.kind != "structure":
+        return None
+    match = re.match(
+        r"\s*structure\s+(?P<header>[\s\S]*?:\s*Prop)\s+where\b",
+        decl.text,
+    )
+    if match is None:
+        return None
+    return "def " + match.group("header").strip() + " := sorry"
+
+
+def _defer_phase1_target_bodies(
+    ctx: Ctx,
+    labels: Iterable[str],
+    canonical: CanonicalModelModule,
+) -> CanonicalModelModule:
+    """Enforce the Phase-1 output contract at the shared model boundary.
+
+    Models choose public Lean headers; the pipeline owns the provisional body.
+    This prevents a provider from spending Phase 1 implementing a definition or
+    proof and, more importantly, prevents that body from becoming authoritative
+    input to the next correction prompt. Candidate-owned structural interfaces
+    and their transparent type aliases remain unchanged.
+    """
+    label_list = [label for label in labels if label in ctx.nodes]
+    target_kinds = _phase1_target_kinds(ctx, label_list)
+    explicit_owners = _planned_helper_owner_by_name(ctx, label_list)
+    for index, decl in enumerate(canonical.parsed.decls):
+        if (
+            decl.name
+            and decl.name not in target_kinds
+            and decl.kind in {"structure", "class", "inductive"}
+            and index in canonical.owner_by_index
+        ):
+            explicit_owners.setdefault(
+                decl.name, canonical.owner_by_index[index]
+            )
+    owner_by_name = {
+        decl.name: canonical.owner_by_index[index]
+        for index, decl in enumerate(canonical.parsed.decls)
+        if decl.name and index in canonical.owner_by_index
+    }
+    changed: list[str] = []
+    for decl in canonical.parsed.decls:
+        expected_kind = target_kinds.get(decl.name or "")
+        if not expected_kind or expected_kind == OPEN_CONJECTURE_TARGET_KIND:
+            continue
+        if _is_phase1_structural_target_alias(
+            decl,
+            expected_kind,
+            canonical.parsed,
+            owner_by_name,
+            explicit_owners,
+        ):
+            continue
+        malformed_prop_structure = _deferred_prop_structure(decl)
+        if malformed_prop_structure is not None and not _is_theorem_like_kind(
+            expected_kind
+        ):
+            decl.kind = "def"
+            decl.text = malformed_prop_structure
+            if decl.name:
+                changed.append(decl.name)
+            continue
+        ordinary_definition = (
+            not _is_theorem_like_kind(expected_kind)
+            and decl.kind in {"def", "abbrev"}
+        )
+        theorem = (
+            _is_theorem_like_kind(expected_kind)
+            and decl.kind in {"theorem", "lemma"}
+        )
+        if not (ordinary_definition or theorem):
+            continue
+        boundary = _top_level_assignment_index(decl.text)
+        if boundary is None:
+            continue
+        deferred = decl.text[:boundary].rstrip() + " := sorry"
+        if deferred != decl.text.rstrip():
+            decl.text = deferred
+            if decl.name:
+                changed.append(decl.name)
+    if changed and hasattr(ctx, "telemetry"):
+        _record(
+            ctx.telemetry,
+            "phase1_model_body_deferred",
+            labels=label_list,
+            declarations=changed,
+            count=len(changed),
+        )
+    return canonical
 
 
 def _may_defer_target_body(decl: DeclBlock, expected_kind: str | None) -> bool:
@@ -6582,25 +6797,134 @@ def _lean_environment_fingerprint(lean_command: list[str]) -> str:
     return digest.hexdigest()
 
 
+_SECTION_OBJECT_FINGERPRINT_PREFIX = "opaque-theorem-v2:"
+
+
+def _section_exact_source_fingerprint(path: Path) -> str:
+    """Hash the exact generated source persisted by the scheduler.
+
+    This is deliberately different from the reusable-object fingerprint below:
+    state restoration and final publication care about every source byte, while
+    an imported Lean object cannot observe an opaque theorem proof body.
+    """
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _section_object_source_fingerprint(path: Path) -> str:
+    """Hash source that can affect this module's importable Lean object.
+
+    Theorem and lemma proof bodies are opaque to importers, so only their exact
+    headers participate. Definition-like bodies, structures, instances,
+    imports, options, preamble commands, and all other declarations remain
+    exact. If parsing fails, fall back to the complete source so reuse is
+    conservative.
+    """
+    try:
+        source = path.read_text(encoding="utf-8")
+        parsed = _parse_module(source)
+    except (OSError, UnicodeError, ValueError):
+        try:
+            return _section_exact_source_fingerprint(path)
+        except OSError:
+            return hashlib.sha256(b"<missing-source>").hexdigest()
+
+    options = [
+        line.strip()
+        for line in source.splitlines()
+        if line.strip().startswith("set_option ")
+    ]
+    declarations = []
+    for decl in parsed.decls:
+        text = (
+            _phase1_target_interface_text(decl)
+            if decl.kind in {"theorem", "lemma"}
+            else decl.text.strip()
+        )
+        declarations.append(
+            {"kind": decl.kind, "name": decl.name or "", "text": text}
+        )
+    canonical = {
+        "imports": parsed.imports,
+        "options": options,
+        "preamble": parsed.preamble,
+        "declarations": declarations,
+    }
+    return hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
 def _section_compile_fingerprint(
     sec: Section,
     lean_command: list[str],
     sections: Iterable[Section] = (),
 ) -> str:
-    """Fingerprint every persisted input to one generated module object."""
+    """Fingerprint inputs that can change one module's importable object.
+
+    In particular, an opaque theorem proof edit does not invalidate this
+    module or cascade through its importers. Statement edits and every
+    definition-body edit still do.
+    """
     digest = hashlib.sha256()
     digest.update(_lean_environment_fingerprint(lean_command).encode("ascii"))
-    try:
-        digest.update(sec.path.read_bytes())
-    except OSError:
-        digest.update(b"<missing-source>")
+    digest.update(_section_object_source_fingerprint(sec.path).encode("ascii"))
     by_module = {item.module: item for item in sections}
     for module in sorted(sec.import_modules):
         digest.update(module.encode("utf-8"))
         imported = by_module.get(module)
         if imported is not None:
             digest.update((imported.compile_fingerprint or "<unrecorded>").encode("ascii"))
-    return digest.hexdigest()
+    return _SECTION_OBJECT_FINGERPRINT_PREFIX + digest.hexdigest()
+
+
+def _migrate_section_compile_fingerprints(
+    sections: Iterable[Section], lean_command: list[str]
+) -> int:
+    """Upgrade pre-v2 object keys without rebuilding known-good objects.
+
+    Saved state already verifies the exact source hash before reaching this
+    migration. Phase 2 either retained an object after theorem-only work or
+    rebuilt it after definition work, so recomputing the cache identity is
+    sufficient and avoids a one-time full rebuild on ``--continue``.
+    """
+    section_list = list(sections)
+    legacy = [
+        sec
+        for sec in section_list
+        if sec.compile_fingerprint
+        and not sec.compile_fingerprint.startswith(
+            _SECTION_OBJECT_FINGERPRINT_PREFIX
+        )
+        and not sec.deferred
+        and not sec.provisional_environment
+        and _section_objects_exist(sec)
+    ]
+    if not legacy:
+        return 0
+
+    by_module = {sec.module: sec for sec in section_list}
+    visited: set[str] = set()
+
+    def visit(sec: Section) -> None:
+        if sec.module in visited:
+            return
+        visited.add(sec.module)
+        for module in sec.import_modules:
+            imported = by_module.get(module)
+            if imported is not None:
+                visit(imported)
+        if _section_objects_exist(sec):
+            sec.compile_fingerprint = _section_compile_fingerprint(
+                sec, lean_command, section_list
+            )
+
+    # Re-key the complete graph, not only legacy entries. A missing importer
+    # object may have been rebuilt earlier in resume using an imported legacy
+    # key; recomputing every surviving key topologically prevents that importer
+    # from paying one unnecessary integration rebuild immediately afterward.
+    for sec in section_list:
+        visit(sec)
+    return len(legacy)
 
 
 def _section_objects_exist(sec: Section) -> bool:
@@ -6895,7 +7219,7 @@ def _save_state(
     entries = []
     for sec in sections:
         try:
-            sha = hashlib.sha256(sec.path.read_bytes()).hexdigest()
+            sha = _section_exact_source_fingerprint(sec.path)
         except OSError:
             continue
         entries.append(
@@ -8104,7 +8428,7 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
         if (
             ok
             and entry_deferred
-            and hashlib.sha256(path.read_bytes()).hexdigest() != entry.get("sha256")
+            and _section_exact_source_fingerprint(path) != entry.get("sha256")
         ):
             # Deferred code is not accepted and cannot be semantically audited
             # from state alone. A modified cache candidate is regenerated.
@@ -8112,7 +8436,7 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
         if (
             ok
             and not entry_deferred
-            and hashlib.sha256(path.read_bytes()).hexdigest() != entry.get("sha256")
+            and _section_exact_source_fingerprint(path) != entry.get("sha256")
         ):
             # The file changed after the last state save (e.g. proofs were
             # spliced right before a crash). The full blueprint contracts still
@@ -8170,6 +8494,20 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
         elif not sec.provisional_environment and not sec.compile_fingerprint:
             _mark_section_compiled(sec, lean_command, kept)
         kept.append(sec)
+    migrated_fingerprints = _migrate_section_compile_fingerprints(
+        kept, lean_command
+    )
+    if migrated_fingerprints:
+        _log(
+            "resume: migrated "
+            f"{migrated_fingerprints} object fingerprint(s) without rebuilding"
+        )
+        _record(
+            ctx.telemetry,
+            "section_object_fingerprint_migration",
+            migrated_modules=migrated_fingerprints,
+            rebuilt_modules=0,
+        )
     if dropped_labels:
         _log(f"resume: dropped {len(dropped_labels)} stale label(s); kept {len(kept)} section(s)")
     if not workflow and kept:
@@ -9341,20 +9679,22 @@ Return exactly one Lean 4 file (one code block). No commentary.
 
 Generate ONE declaration per target node listed below — statements only:
 - definition-kind nodes (definition/defn/construction/notation/convention):
-  emit the exact public type/interface. A `def` or `abbrev` body must end in
-  `:= sorry`; Phase 2 implements it. A `structure`/`inductive` interface must
-  list its real fields/constructors and cannot use `sorry`. The one narrow
+  emit the exact public type/interface. For an ordinary definition, output
+  only `def NAME ... : TYPE := sorry` (or `abbrev`): do not write the defining
+  formula after `:=`, and do not move that formula into `TYPE`. A predicate
+  described by conditions or witnesses is an ordinary `def ... : Prop :=
+  sorry`, not a structure containing those conditions as fields. Use a
+  `structure`/`class`/`inductive` only when the blueprint node genuinely
+  defines a bundled data object with named stored components; list its real
+  fields/constructors and do not use `sorry`. The one narrow
   exception is a type-valued target whose complete contract is a plan-owned
   structure/class/inductive: emit that helper completely and make the target a
   transparent alias such as `def target (n) : Type := OwnedInterface n`;
 - theorem-like nodes (lemma/proposition/theorem/corollary and EVERY other
   environment kind, e.g. claim/fact/remark): the exact statement as a
   `theorem` ending in `:= sorry`. Do NOT attempt proofs at this phase: a
-  partial or failing tactic block is rejected deterministically and wastes
-  the whole call. The ONLY exception is a complete single-tactic closer you
-  are certain of (e.g. `:= rfl`); when in any doubt, use `:= sorry`. If a
-  proof attempt is unfinished when your budget runs short, replace it with
-  `:= sorry` before replying. Never encode a theorem-like node as a bare
+  proof body is discarded by the Phase-1 schema even if it succeeds. Never
+  encode a theorem-like node as a bare
   `def : Prop`, except for conjectures explicitly governed by the `record`
   policy below.
 - Emit no auxiliary `def`, `abbrev`, theorem, lemma, or instance declarations.
@@ -9442,9 +9782,14 @@ def _targeted_skeleton_patch_prompt(
         budget=8000,
     )
     provisional_rule = (
-        "Repair the signature/type only. The body of a target `def`/`abbrev` "
-        "and the proof of a target theorem must end in `:= sorry`; Phase 2 "
-        "implements them. Structure/inductive fields and constructors must be exact. "
+        "Repair the signature/type only. Return an ordinary target `def`/`abbrev` "
+        "in the exact form `def NAME ... : TYPE := sorry`; do not write its "
+        "defining formula after `:=` or move that formula into `TYPE`. A "
+        "predicate is `def ... : Prop := sorry`, never a structure packaging "
+        "its conditions. A target theorem must end in `:= sorry`; Phase 2 "
+        "implements bodies and proofs. Structure/inductive fields and "
+        "constructors must be exact only when the blueprint genuinely defines "
+        "a bundled data object. "
         "A type-valued target may instead be a transparent alias directly to its "
         "same-node plan-owned structural interface; that alias is the public type "
         "contract, not a Phase-2 implementation."
@@ -9516,6 +9861,10 @@ Rules:
   with terminal `:= sorry`; retain the transparent structural-alias exception
   described above. Recorded conjectures are instead exact proposition-valued
   `def` declarations as required by the policy below.
+- The candidate-derived `TARGET` text is interface guidance, not permission to
+  preserve a rejected declaration body. If it contains an implementation from
+  an older candidate, retain its public header and replace the body with
+  terminal `:= sorry`.
 - Use the Lean command `theorem` for theorem-like nodes; never use `corollary`.
 - If a finding concerns a partial or failing proof on a theorem-like node,
   replace that proof with terminal `:= sorry` — do not try to complete it;
@@ -9878,7 +10227,12 @@ def _targeted_patch_skeleton_decls(
     if result.status != "ok":
         return None, f"targeted declaration patch {result.status}: {result.error}"
     try:
-        canonical = _ingest_model_lean(ctx, patch_labels, result.text)
+        canonical = _ingest_model_lean(
+            ctx,
+            patch_labels,
+            result.text,
+            defer_phase1_bodies=True,
+        )
     except ValueError as exc:
         return None, f"targeted declaration patch did not return Lean code: {exc}"
     replacement_parsed = canonical.parsed
@@ -15700,9 +16054,14 @@ against the blueprint.
 
 Per-node rules:
 - definition-kind nodes (definition/defn/construction/notation/convention):
-  emit the exact public type/interface. End a `def`/`abbrev` body in
-  `:= sorry`; Phase 2 implements it. A `structure`/`inductive` must expose its
-  exact fields/constructors and cannot contain `sorry`. A type-valued target
+  emit the exact public type/interface. For an ordinary definition, output
+  only `def NAME ... : TYPE := sorry` (or `abbrev`): do not write the defining
+  formula after `:=`, and do not move that formula into `TYPE`. A predicate
+  described by conditions or witnesses is an ordinary `def ... : Prop :=
+  sorry`, not a structure containing those conditions as fields. Use a
+  `structure`/`class`/`inductive` only when the blueprint genuinely defines a
+  bundled data object with named stored components; expose its exact
+  fields/constructors and do not use `sorry`. A type-valued target
   whose complete contract is a same-node structure/class/inductive returned
   in this response
   may be a transparent alias directly to that helper; this is an interface,
@@ -15803,6 +16162,7 @@ def _salvage_timeout_declarations(
     partial_text: str,
     *,
     realize_contracts: bool = False,
+    defer_phase1_bodies: bool = False,
 ) -> tuple[ParsedModule, list[str]] | None:
     """Recover complete target declarations from a timed-out call's output.
 
@@ -15820,6 +16180,7 @@ def _salvage_timeout_declarations(
             labels,
             partial_text,
             realize_contracts=realize_contracts,
+            defer_phase1_bodies=defer_phase1_bodies,
         ).parsed
     except (ValueError, Exception):
         return None
@@ -16383,7 +16744,12 @@ def _parallel_initial_emission(
         if result.status not in {"ok", "timeout"} or not text.strip():
             return None
         try:
-            return _ingest_model_lean(ctx, chunk, text).parsed
+            return _ingest_model_lean(
+                ctx,
+                chunk,
+                text,
+                defer_phase1_bodies=True,
+            ).parsed
         except ValueError:
             return None
 
@@ -16551,6 +16917,7 @@ def _bulk_skeleton_pass(
                 chunk,
                 result.text,
                 realize_contracts=not initial_only,
+                defer_phase1_bodies=True,
             ).parsed
         except ValueError:
             _log("  design pass returned no Lean code; falling back")
@@ -17074,6 +17441,7 @@ def _freeze_section(
                     labels,
                     result.partial_text,
                     realize_contracts=not initial_only,
+                    defer_phase1_bodies=True,
                 )
                 if salvage is not None:
                     parsed_partial, delivered = salvage
@@ -17393,8 +17761,11 @@ def _freeze_section(
                     if "```" in result.text:
                         delivered_code = _extract_lean_code(result.text)
                         if delivered_code.strip():
-                            candidate = _canonicalize_model_lean(
-                                ctx, labels, delivered_code
+                            candidate = _ingest_model_lean(
+                                ctx,
+                                labels,
+                                delivered_code,
+                                defer_phase1_bodies=True,
                             ).parsed
                             if candidate.decls:
                                 delivered = candidate
@@ -17464,6 +17835,7 @@ def _freeze_section(
                 labels,
                 result.text,
                 realize_contracts=not initial_only,
+                defer_phase1_bodies=True,
             ).parsed
             missing_imports = _missing_olean_imports(parsed.imports)
             if missing_imports:
@@ -18301,7 +18673,12 @@ def _run_initial_declaration_pass(
     parse_error = ""
     if candidate.strip():
         try:
-            parsed = _ingest_model_lean(ctx, order, candidate).parsed
+            parsed = _ingest_model_lean(
+                ctx,
+                order,
+                candidate,
+                defer_phase1_bodies=True,
+            ).parsed
         except ValueError as exc:
             parse_error = str(exc)
     elif result.error:
@@ -18553,7 +18930,11 @@ def _generate_phase1_statement_group(
             continue
         try:
             replacement_module = _ingest_model_lean(
-                ctx, labels, candidate, realize_contracts=True
+                ctx,
+                labels,
+                candidate,
+                realize_contracts=True,
+                defer_phase1_bodies=True,
             ).parsed
             replacement_code, _ = _compose_module(
                 replacement_module.imports,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import sys
 import json
@@ -100,6 +101,7 @@ from formalize_blueprint import (  # noqa: E402
     _prune_stale_quarantine,
     _prune_stale_retry_lifecycle,
     _parse_module,
+    _ingest_model_lean,
     _normalize_theorem_like_keywords,
     _canonicalize_model_lean,
     _closure_blocked_labels,
@@ -152,7 +154,11 @@ from formalize_blueprint import (  # noqa: E402
     _prioritized_phase2_declaration_work,
     _route_phase2_proof_outcomes,
     _phase1_recompile_environment,
+    _section_compile_fingerprint,
+    _section_exact_source_fingerprint,
+    _migrate_section_compile_fingerprints,
     _phase1_target_kinds,
+    _phase1_target_interface_text,
     _generate_uncompiled_phase1_candidate,
     _compile_semantic_phase1_candidate,
     _compile_semantic_phase1_candidates,
@@ -5874,6 +5880,133 @@ def def_polytope (n : Nat) : Type := sorry
             any("implementation belongs in Phase 2" in item.message for item in findings)
         )
 
+    def test_phase1_ingestion_defers_historical_cpwl_predicate_body(self) -> None:
+        fixture = json.loads(
+            (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "phase1_orchestration_replay"
+                / "cpwl_predicate_body_deferral.json"
+            ).read_text(encoding="utf-8")
+        )
+        label = fixture["label"]
+        ctx = SimpleNamespace(
+            name="simplex",
+            nodes={label: node(label)},
+            design_plan_entries={},
+            semantic_plan_entries={
+                label: {
+                    "representation": "predicate: continuous and affine on pieces"
+                }
+            },
+            unavailable_imports=set(),
+            telemetry=FakeTelemetry(),
+        )
+
+        canonical = _ingest_model_lean(
+            ctx,
+            [label],
+            "```lean\n" + fixture["completed_predicate"] + "\n```",
+            defer_phase1_bodies=True,
+        )
+        target = next(
+            decl
+            for decl in canonical.parsed.decls
+            if decl.name == _lean_name(label)
+        )
+
+        self.assertEqual(target.text, fixture["expected_deferred"])
+        self.assertEqual(
+            _phase1_target_interface_text(target), fixture["expected_header"]
+        )
+        self.assertNotIn("Continuous f", target.text)
+        events = [
+            payload
+            for event, payload in ctx.telemetry.events
+            if event == "phase1_model_body_deferred"
+        ]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["declarations"], [_lean_name(label)])
+
+    def test_phase1_ingestion_normalizes_historical_prop_structure(self) -> None:
+        fixture = json.loads(
+            (
+                REPO_ROOT
+                / "tests"
+                / "fixtures"
+                / "phase1_orchestration_replay"
+                / "cpwl_predicate_body_deferral.json"
+            ).read_text(encoding="utf-8")
+        )
+        label = fixture["label"]
+        ctx = SimpleNamespace(
+            name="simplex",
+            nodes={label: node(label)},
+            design_plan_entries={},
+            semantic_plan_entries={label: {"representation": "predicate"}},
+            unavailable_imports=set(),
+            telemetry=FakeTelemetry(),
+        )
+
+        canonical = _ingest_model_lean(
+            ctx,
+            [label],
+            "```lean\n" + fixture["malformed_predicate_structure"] + "\n```",
+            defer_phase1_bodies=True,
+        )
+        target = next(
+            decl
+            for decl in canonical.parsed.decls
+            if decl.name == _lean_name(label)
+        )
+
+        self.assertEqual(target.kind, "def")
+        self.assertEqual(target.text, fixture["expected_deferred"])
+        self.assertNotIn("continuous :", target.text)
+
+    def test_phase1_ingestion_preserves_transparent_structural_alias(self) -> None:
+        label = "def:finite-subdivision"
+        helper = "FiniteSubdivisionInterface"
+        ctx = SimpleNamespace(
+            name="simplex",
+            nodes={label: node(label)},
+            design_plan_entries={
+                label: {
+                    "schema_version": DESIGN_PLAN_SCHEMA_VERSION,
+                    "helpers": [
+                        {
+                            "name": helper,
+                            "kind": "structure",
+                            "members": [{"name": "cells", "type": "Finset Nat"}],
+                            "required_members": ["cells"],
+                        }
+                    ],
+                }
+            },
+            semantic_plan_entries={},
+            unavailable_imports=set(),
+            telemetry=FakeTelemetry(),
+        )
+        canonical = _ingest_model_lean(
+            ctx,
+            [label],
+            "```lean\n"
+            f"structure {helper} (n : Nat) where\n"
+            "  cells : Finset Nat\n\n"
+            f"def {_lean_name(label)} (n : Nat) : Type := {helper} n\n"
+            "```",
+            defer_phase1_bodies=True,
+        )
+        target = next(
+            decl
+            for decl in canonical.parsed.decls
+            if decl.name == _lean_name(label)
+        )
+
+        self.assertNotIn(":= sorry", target.text)
+        self.assertIn(": Type :=", target.text)
+
     def test_planned_helper_ownership_overrides_adjacency_during_slicing(self) -> None:
         labels = ["def:relu-network", "def:tab"]
         ctx = SimpleNamespace(
@@ -6572,6 +6705,106 @@ def def_tab : Type := sorry
             compile_object.assert_not_called()
             save_state.assert_called_once_with(ctx, [section])
 
+    def test_theorem_proof_edit_preserves_object_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Skeleton01.lean"
+            path.write_text(
+                "set_option autoImplicit false\n"
+                "theorem lem_result (n : Nat) : n = n := sorry\n",
+                encoding="utf-8",
+            )
+            section = Section(1, ["lem:result"], path, "Generated.S1", [])
+            with patch(
+                "formalize_blueprint._lean_environment_fingerprint",
+                return_value="environment",
+            ):
+                phase1_object = _section_compile_fingerprint(
+                    section, ["lean"], [section]
+                )
+                exact_phase1 = _section_exact_source_fingerprint(path)
+                path.write_text(
+                    "set_option autoImplicit false\n"
+                    "theorem lem_result (n : Nat) : n = n := by rfl\n",
+                    encoding="utf-8",
+                )
+                phase2_object = _section_compile_fingerprint(
+                    section, ["lean"], [section]
+                )
+
+            self.assertEqual(phase2_object, phase1_object)
+            self.assertNotEqual(_section_exact_source_fingerprint(path), exact_phase1)
+
+    def test_statement_and_definition_body_edits_invalidate_object_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            theorem_path = root / "Theorem.lean"
+            definition_path = root / "Definition.lean"
+            theorem_path.write_text(
+                "theorem lem_result (n : Nat) : n = n := sorry\n",
+                encoding="utf-8",
+            )
+            definition_path.write_text(
+                "def def_value : Nat := sorry\n", encoding="utf-8"
+            )
+            theorem = Section(1, ["lem:result"], theorem_path, "Generated.T", [])
+            definition = Section(2, ["def:value"], definition_path, "Generated.D", [])
+            with patch(
+                "formalize_blueprint._lean_environment_fingerprint",
+                return_value="environment",
+            ):
+                theorem_before = _section_compile_fingerprint(theorem, ["lean"])
+                definition_before = _section_compile_fingerprint(definition, ["lean"])
+                theorem_path.write_text(
+                    "theorem lem_result (n : Nat) : n + 0 = n := by simp\n",
+                    encoding="utf-8",
+                )
+                definition_path.write_text(
+                    "def def_value : Nat := 1\n", encoding="utf-8"
+                )
+                theorem_after = _section_compile_fingerprint(theorem, ["lean"])
+                definition_after = _section_compile_fingerprint(definition, ["lean"])
+
+            self.assertNotEqual(theorem_after, theorem_before)
+            self.assertNotEqual(definition_after, definition_before)
+
+    def test_legacy_object_fingerprints_migrate_without_compilation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_path = root / "Provider.lean"
+            importer_path = root / "Importer.lean"
+            provider_path.write_text(
+                "theorem provider : True := by trivial\n", encoding="utf-8"
+            )
+            importer_path.write_text(
+                "import Generated.Provider\n"
+                "theorem importer : True := by trivial\n",
+                encoding="utf-8",
+            )
+            provider = Section(
+                1, ["lem:provider"], provider_path, "Generated.Provider", [],
+                compile_fingerprint="legacy-provider",
+            )
+            importer = Section(
+                2, ["lem:importer"], importer_path, "Generated.Importer",
+                ["Generated.Provider"], compile_fingerprint="legacy-importer",
+            )
+            with patch(
+                "formalize_blueprint._section_objects_exist", return_value=True
+            ), patch(
+                "formalize_blueprint._lean_environment_fingerprint",
+                return_value="environment",
+            ), patch(
+                "formalize_blueprint._compile_module_olean"
+            ) as compile_object:
+                migrated = _migrate_section_compile_fingerprints(
+                    [importer, provider], ["lean"]
+                )
+
+            self.assertEqual(migrated, 2)
+            self.assertTrue(provider.compile_fingerprint.startswith("opaque-theorem-v2:"))
+            self.assertTrue(importer.compile_fingerprint.startswith("opaque-theorem-v2:"))
+            compile_object.assert_not_called()
+
     def test_phase2_definition_object_failure_rolls_back_section(self) -> None:
         telemetry = FakeTelemetry()
         ctx = SimpleNamespace(
@@ -7197,7 +7430,7 @@ end ModelOutput
         call_model.assert_called_once()
         check_lean.assert_not_called()
         compile_olean.assert_not_called()
-        self.assertIn("def def_base : Nat := 0", generated)
+        self.assertIn("def def_base : Nat := sorry", generated)
         self.assertIn("theorem lem_root : True := by trivial", generated)
         self.assertEqual(result[0].refined_labels, set())
         event, fields = telemetry.events[-1]
@@ -8867,6 +9100,84 @@ end ModelOutput
             self.assertEqual(
                 event["rebuilt_modules"], fixture["expected_rebuilt_modules"]
             )
+
+    def test_historical_phase2_theorem_updates_do_not_rebuild_import_closure(self) -> None:
+        fixture_path = (
+            REPO_ROOT
+            / "tests"
+            / "fixtures"
+            / "phase2_orchestration_replay"
+            / "opaque_theorem_object_reuse.json"
+        )
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as td, patch(
+            "formalize_blueprint._lean_environment_fingerprint",
+            return_value="historical-environment",
+        ):
+            root = Path(td)
+            sections: list[Section] = []
+            changed = fixture["theorem_body_changes"]
+            for number in range(1, fixture["module_count"] + 1):
+                path = root / f"Skeleton{number:02d}.lean"
+                path.write_text(
+                    f"theorem statement_{number} : True := sorry\n",
+                    encoding="utf-8",
+                )
+                imports = ["Generated.S1"] if number == changed + 1 else []
+                sections.append(
+                    Section(
+                        number,
+                        [f"lem:statement-{number}"],
+                        path,
+                        f"Generated.S{number}",
+                        imports,
+                    )
+                )
+
+            for section in sections:
+                section.compile_fingerprint = _section_compile_fingerprint(
+                    section, ["lean"], sections
+                )
+            before = {
+                section.module: section.compile_fingerprint for section in sections
+            }
+            legacy_before: dict[str, str] = {}
+            for section in sections:
+                digest = hashlib.sha256(section.path.read_bytes())
+                for module in section.import_modules:
+                    digest.update(module.encode("utf-8"))
+                    digest.update(legacy_before[module].encode("ascii"))
+                legacy_before[section.module] = digest.hexdigest()
+
+            for section in sections[:changed]:
+                section.path.write_text(
+                    f"theorem statement_{section.number} : True := by trivial\n",
+                    encoding="utf-8",
+                )
+
+            invalidated = 0
+            legacy_after: dict[str, str] = {}
+            for section in sections:
+                expected = _section_compile_fingerprint(section, ["lean"], sections)
+                if expected != before[section.module]:
+                    invalidated += 1
+                section.compile_fingerprint = expected
+                digest = hashlib.sha256(section.path.read_bytes())
+                for module in section.import_modules:
+                    digest.update(module.encode("utf-8"))
+                    digest.update(legacy_after[module].encode("ascii"))
+                legacy_after[section.module] = digest.hexdigest()
+
+        self.assertEqual(
+            sum(
+                legacy_after[module] != legacy_before[module]
+                for module in legacy_before
+            ),
+            fixture["observed_legacy_rebuilt_modules"],
+        )
+        self.assertEqual(
+            invalidated, fixture["expected_object_semantic_rebuilt_modules"]
+        )
 
     def test_bottom_up_ready_frontier_does_not_wait_for_unrelated_leaf(self) -> None:
         nodes = {

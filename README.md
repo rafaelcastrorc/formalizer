@@ -632,6 +632,15 @@ compact semantic plan plus candidate-derived typed contracts described above.
    transparent canonical alias to their exact candidate-owned structure, inductive,
    or class interface. Those interfaces freeze their fields or constructors
    immediately.
+   Phase 1 asks models for ordinary declarations in header-plus-`sorry` form.
+   The shared ingestion boundary also enforces that contract: if any runner
+   returns a completed ordinary `def`/`abbrev` body or theorem proof, the
+   pipeline retains its public header and deterministically replaces only the
+   top-level body with terminal `:= sorry`. Candidate-derived typed contracts
+   store that header, never the discarded body. A structure is appropriate
+   only when the blueprint genuinely defines a bundled object with named
+   components; it must not be used merely to package a predicate's conditions
+   or existential witnesses.
    A proposition-valued predicate therefore freezes as a public header such as
    `def commonFace (Q : I -> Polytope) (J : Finset I) (F : Polytope) : Prop := sorry`.
    The formula defining that predicate belongs to its Phase-2 body; Phase 1
@@ -747,7 +756,12 @@ compact semantic plan plus candidate-derived typed contracts described above.
    rebuilt before progress is persisted so downstream imports see the concrete
    body rather than the Phase-1 `sorry` object. The theorem-only fast path keeps
    its frozen object because theorem proofs are opaque and do not change the
-   imported interface. Structure fields and inductive constructors remain Phase-1
+   imported interface. The integration cache uses that same Lean distinction:
+   theorem/lemma proof-body edits do not invalidate their module or importers,
+   while theorem statements, definition bodies, imports, and toolchain inputs
+   do. Exact generated source is still persisted independently, and the final
+   assembled source always receives a from-scratch Lean check before publishing.
+   Structure fields and inductive constructors remain Phase-1
    interfaces because they have no separate body to fill.
    Lower-frontier prompts include the frozen statements and blueprint proof
    contracts of the higher results that consume them, so information flows
