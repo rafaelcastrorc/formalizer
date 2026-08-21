@@ -1,0 +1,44 @@
+{
+  "blueprint": "simplex",
+  "run": "run-20260820-032411",
+  "layer": 0,
+  "labels": [
+    "def:relu-network",
+    "lem:claim-five-p1-membership",
+    "lem:claim-five-p2-membership",
+    "lem:claim-five-p3-membership",
+    "lem:claim-five-p4-membership",
+    "lem:claim-five-q-membership",
+    "lem:claim-five-r13-membership",
+    "lem:claim-five-r14-membership",
+    "lem:claim-five-r23-membership",
+    "lem:claim-five-r24-membership",
+    "thm:wang-sun-representation",
+    "def:polytope-complexity-admissible-indices"
+  ],
+  "attributed_labels": [
+    "def:relu-network"
+  ],
+  "preserved_labels": [
+    "lem:claim-five-p1-membership",
+    "lem:claim-five-p2-membership",
+    "lem:claim-five-p3-membership",
+    "lem:claim-five-p4-membership",
+    "lem:claim-five-q-membership",
+    "lem:claim-five-r13-membership",
+    "lem:claim-five-r14-membership",
+    "lem:claim-five-r23-membership",
+    "lem:claim-five-r24-membership",
+    "thm:wang-sun-representation",
+    "def:polytope-complexity-admissible-indices"
+  ],
+  "compiler_error": "Skeleton12.lean:44:17: error: application type mismatch in def_relu_network",
+  "historical_false_retry_advances": 11,
+  "historical_unrelated_escalation_seconds": [
+    205.3,
+    224.7,
+    276.4
+  ],
+  "expected_retry_tier": "escalation",
+  "expected_preserved_tier": "base"
+}

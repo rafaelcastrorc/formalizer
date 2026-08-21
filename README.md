@@ -356,7 +356,11 @@ representation choices and vocabulary across the pending graph. It is advisory:
 it contains no Lean signatures, binder types, helper fields, constructors,
 imports, bodies, or proofs, and it is never repaired in a separate model loop.
 Malformed or missing entries fall back deterministically to blueprint-only
-guidance, so planning cannot block Phase 1. The prompt includes the authoritative
+guidance, so planning cannot block Phase 1. A planner call that times out after
+emitting absolutely no response receives one fresh call through the same base
+runner; this recovers a silent provider/session outlier without adding a plan
+repair loop. If that one call also produces no usable entries, the same
+blueprint-only fallback applies. The prompt includes the authoritative
 dependency-contract table. Only statement dependencies may shape public
 interfaces; proof-only dependencies are reserved for Phase 2, and root context
 cannot invent graph edges absent from the blueprint.
@@ -435,7 +439,12 @@ compact semantic plan plus candidate-derived typed contracts described above.
    its complete siblings disappear: independently owned returned declarations
    pass the same deterministic gates and are persisted as reusable uncompiled
    candidates, while only the missing or invalid declarations are routed for
-   another model call. Reusable singleton/components are scheduled separately
+   another model call. The same preservation applies when a combined Lean
+   compile identifies declaration-owned errors: the exact post-correction
+   module is split at target/helper ownership boundaries, unaffected siblings
+   are rechecked through the normal deterministic and Lean gates, and only the
+   diagnostic owners enter compiler correction. Unattributed diagnostics keep
+   the existing whole-component isolation path. Reusable singleton/components are scheduled separately
    from fresh work so batching cannot accidentally regenerate them. If several
    parallel groups fail, the transaction retains every candidate, exact error,
    and retry route; auditing a successful sibling cannot mask those failures.
@@ -448,8 +457,11 @@ compact semantic plan plus candidate-derived typed contracts described above.
    a model rewrite of the blueprint.
    Before asking a model to rewrite a failing
    candidate, the pipeline tests the identical declarations under the complete
-   Mathlib environment; a
-   candidate that passes is retained unchanged with that environment. Before
+   Mathlib environment. If that succeeds, deterministic local-library lookup
+   resolves the missing declarations to specific modules and recompiles the
+   unchanged candidate. The specific imports are persisted when they pass;
+   the complete Mathlib import remains the correctness fallback only when exact
+   resolution is incomplete, ambiguous, or does not compile. Before
    compilation, a closure gate rejects executable local helpers not represented
    by blueprint nodes; only exact candidate-owned type interfaces may accompany a
    target. This prevents outline generation from turning into untracked proof
@@ -731,7 +743,11 @@ compact semantic plan plus candidate-derived typed contracts described above.
    higher proof. Completed definition
    bodies receive a read-only semantic audit against their blueprint nodes;
    compilation alone cannot accept a definition with the right type but wrong
-   meaning. Structure fields and inductive constructors remain Phase-1
+   meaning. Once such a definition body is accepted, its owning module is
+   rebuilt before progress is persisted so downstream imports see the concrete
+   body rather than the Phase-1 `sorry` object. The theorem-only fast path keeps
+   its frozen object because theorem proofs are opaque and do not change the
+   imported interface. Structure fields and inductive constructors remain Phase-1
    interfaces because they have no separate body to fill.
    Lower-frontier prompts include the frozen statements and blueprint proof
    contracts of the higher results that consume them, so information flows
@@ -841,19 +857,30 @@ compact semantic plan plus candidate-derived typed contracts described above.
    never as mathematical difficulty: batches are bisected, targeted declaration
    patches are used for small skeleton failures, and singletons are retried at
    higher effort. A base-model skeleton `NEEDS-DECOMPOSITION` response is
-   treated as a generator claim, not immediate repair evidence: Phase 1 first
-   retries the same section through the escalation runner using the existing
-   targets and candidate-owned type interfaces (and any declarations delivered
-   alongside the refusal are reused for the other nodes). It cannot invent
+   treated as a generator claim, not immediate repair evidence. Phase 1 asks
+   the escalation runner for a fresh, independent adjudication using the
+   authoritative blueprint and frozen interfaces. The adjudicator does not
+   resume the producer's session or receive its refusal as Lean code: it must
+   either emit the exact declarations or independently confirm the structured
+   decomposition finding. A single producer refusal therefore still cannot
+   edit the blueprint (and any declarations delivered alongside a multi-node
+   refusal remain reusable for the other nodes). It cannot invent
    executable top-level helpers; a genuinely missing mathematical helper must
    become a blueprint node through decomposition. Blueprint repair
    calls whose target still contains multiple labels are also split on timeout
    instead of treating latency as mathematical evidence. Repair prompts are
-   dependency-sliced: an agent-mode repair receives the failing nodes, their
+   dependency-sliced for every provider: they contain the failing nodes, their
    dependency-closure statements, immediate consumers, a deterministic paper
-   excerpt, and the harness conventions, and reads `content.tex` from disk
-   instead of receiving the whole blueprint inline. Repairs are instructed to
-   stay additive — add helper nodes and keep non-target statements unchanged.
+   excerpt, the harness conventions, and exact failure evidence. The model
+   cannot edit the draft and never receives the full `content.tex`; it returns
+   a JSON map containing only complete replacements for the requested nodes
+   plus any brand-new helper nodes owned by those replacements. Python applies
+   that map to the immutable pre-call source and rejects missing targets,
+   unrelated pre-existing labels, duplicate helper ownership, or malformed
+   replacement scope before running the normal blueprint validator. Existing
+   graph-direction, cycle, Phase-1/Phase-2 scope, repair-boundary, Lean, and
+   semantic gates remain mandatory. Repairs are instructed to stay additive —
+   add helper nodes and keep non-target statements byte-for-byte unchanged.
    Phase-1 failures discovered before Lean compilation use the same persisted
    per-statement retry lifecycle as compiler and semantic-audit failures:
    base generation, escalation generation, one blueprint-direct strategy, then
@@ -943,6 +970,8 @@ UI), `--reasoning-effort` (codex effort for batched calls, default `medium`),
 `--escalation-runner` (runner/model for singleton retries and blueprint repair;
 when `--runner` is explicitly set, the CLI default is the same runner, otherwise
 it uses the stronger half of the auto preset),
+`--planner-tier base|escalation` (model tier for the compact Phase-1 semantic
+planner, default `base`),
 `--escalation-effort` (codex effort for escalation calls, default `high`),
 `--timeout`/`--hard-timeout` (per-call budgets, defaults 300/600 s),
 `--conjecture-policy record|attempt` (default `record`),
@@ -1388,6 +1417,22 @@ declaration and route it to blueprint decomposition. Timeout routing hints are
 stored under `.auto-blueprint/formalization/<name>/routing_hints.json`, so a
 later `--continue` run does not have to rediscover the same timeout pattern from
 scratch.
+
+The compact all-node semantic planner is the one exception to destructive
+per-call timeout behavior. For that call, `--hard-timeout` is a hedge threshold:
+if the original producer has not completed, it remains alive while one fresh,
+identical base-runner call starts in parallel. The first complete successful
+response wins and the losing call is cancelled. Each lane has a final safety
+ceiling of twice `--hard-timeout`, so provider failure cannot suspend the run
+forever. This hedge does not affect Phase 1 statement generation, blueprint
+repair, or Phase 2 complete-node calls.
+
+The Web UI's **Compact planner model** selector controls only this planner.
+**Base model** uses the configured base runner/model and effort;
+**Escalation model** uses the configured escalation runner/model and effort.
+Both the primary planner call and its possible hedge use the selected tier.
+All statement generation, retries, repairs, and Phase 2 routing retain their
+existing model policies.
 
 Provider transport failures are separate from model-call timeouts and invalid
 model output. Websocket reconnect failures, dropped/reset connections,

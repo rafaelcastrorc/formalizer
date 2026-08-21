@@ -21,6 +21,7 @@ guards.
 from __future__ import annotations
 
 import abc
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -141,7 +142,22 @@ class ModelRunner(abc.ABC):
         # contribute those 8 rather than being a total loss; timeouts are the
         # single largest category of wasted model time.
         self.partial_text: str = ""
+        self._cancel_requested = threading.Event()
         self.contexts = [load_context_file(p) for p in (context_files or [])]
+
+    def cancel(self) -> None:
+        """Request cancellation of the active backend call.
+
+        Subprocess-backed runners override this to terminate their process
+        group immediately. API runners use the flag to discard a response that
+        loses a coordinator race; not every provider exposes server-side
+        cancellation for a synchronous request.
+        """
+        self._cancel_requested.set()
+
+    @property
+    def cancellation_requested(self) -> bool:
+        return self._cancel_requested.is_set()
 
     @classmethod
     def default_model(cls) -> str:
@@ -175,7 +191,11 @@ class ModelRunner(abc.ABC):
             start = time.monotonic()
             attempts += 1
             try:
+                if self.cancellation_requested:
+                    raise RunnerError(f"{self.backend_name} call cancelled")
                 result = self._run_impl(prompt, full_system, cwd_path)
+                if self.cancellation_requested:
+                    raise RunnerError(f"{self.backend_name} call cancelled")
                 result.backend = self.backend_name
                 result.model = result.model or self.model
                 result.mode = self.mode

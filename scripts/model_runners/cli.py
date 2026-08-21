@@ -149,6 +149,18 @@ class ClaudeCodeRunner(ModelRunner):
                 "ToolSearch,ReportFindings,Skill,SendMessage,AskUserQuestion"
             )
         self.max_turns = max_turns
+        self._active_process: subprocess.Popen[str] | None = None
+        self._active_process_lock = threading.Lock()
+
+    def cancel(self) -> None:
+        super().cancel()
+        with self._active_process_lock:
+            proc = self._active_process
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     def _run_impl(self, prompt: str, system: str, cwd: Path | None) -> RunResult:
         exe = _which_or_app("claude", CLAUDE_APP_CLI)
@@ -201,6 +213,13 @@ class ClaudeCodeRunner(ModelRunner):
             cwd=str(cwd) if cwd else None,
             start_new_session=True,
         )
+        with self._active_process_lock:
+            self._active_process = proc
+        if self.cancellation_requested:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         assert proc.stdin and proc.stdout and proc.stderr
 
         def _feed_stdin() -> None:
@@ -290,7 +309,15 @@ class ClaudeCodeRunner(ModelRunner):
             watchdog.cancel()
             heartbeat_stop.set()
             stderr_thread.join(timeout=1)
+            with self._active_process_lock:
+                if self._active_process is proc:
+                    self._active_process = None
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None and not stream.closed:
+                    stream.close()
 
+        if self.cancellation_requested:
+            raise RunnerError("claude CLI call cancelled")
         if timed_out.is_set() and returncode != 0:
             raise RunnerError(f"claude CLI timed out after {self.timeout}s")
         if returncode != 0:
@@ -319,6 +346,18 @@ class CodexRunner(ModelRunner):
         super().__init__(model, **kwargs)
         self.sandbox = "read-only" if self.readonly else sandbox
         self.reasoning_effort = reasoning_effort
+        self._active_process: subprocess.Popen[str] | None = None
+        self._active_process_lock = threading.Lock()
+
+    def cancel(self) -> None:
+        super().cancel()
+        with self._active_process_lock:
+            proc = self._active_process
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     # `codex exec` prints a "session id: <uuid>" banner line; that id is what
     # `codex exec resume <id>` accepts.
@@ -401,7 +440,16 @@ class CodexRunner(ModelRunner):
                 cwd=str(cwd) if cwd else None,
                 start_new_session=True,
             )
+            with self._active_process_lock:
+                self._active_process = proc
+            if self.cancellation_requested:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             stdout, _stderr = proc.communicate(input=full_prompt, timeout=self.timeout)
+            if self.cancellation_requested:
+                raise RunnerError("codex CLI call cancelled")
             if proc.returncode != 0:
                 tail = "\n".join((stdout or "").splitlines()[-12:])
                 detail = f": {tail}" if tail else ""
@@ -444,4 +492,11 @@ class CodexRunner(ModelRunner):
                     self.partial_text = written
             raise RunnerError(f"codex CLI timed out after {self.timeout}s") from exc
         finally:
+            with self._active_process_lock:
+                if 'proc' in locals() and self._active_process is proc:
+                    self._active_process = None
+            if 'proc' in locals():
+                for stream in (proc.stdin, proc.stdout, proc.stderr):
+                    if stream is not None and not stream.closed:
+                        stream.close()
             output_path.unlink(missing_ok=True)
