@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +28,7 @@ INVALID_TEX_ESCAPE_FIXTURE = (
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from formalize_blueprint import (  # noqa: E402
+    CallResult,
     SEMANTIC_PLAN_SCHEMA_VERSION,
     _candidate_exactly_realizes_plan,
     _findings_require_plan_revision,
@@ -129,6 +132,7 @@ class CompactSemanticPlannerTests(unittest.TestCase):
         ctx = context(nodes)
         ctx.hard_timeout = 60
         ctx.base_effort = None
+        ctx.runner_spec = "codex"
         with patch(
             "formalize_blueprint._call_model",
             side_effect=TransientRunnerError("network error after retries"),
@@ -150,6 +154,178 @@ class CompactSemanticPlannerTests(unittest.TestCase):
         ]
         self.assertEqual(result_events[0]["status"], "transport_exhausted")
         self.assertEqual(result_events[0]["fallback_count"], len(nodes))
+
+    def test_silent_planner_timeout_gets_one_fresh_recovery_call(self) -> None:
+        label = "def:widget"
+        ctx = context({label: node(label)})
+        ctx.hard_timeout = 60
+        ctx.base_effort = None
+        ctx.runner_spec = "codex"
+        response = json.dumps(
+            {
+                "contracts": [
+                    {
+                        "label": label,
+                        "representation": "a concrete widget",
+                        "vocabulary": [],
+                        "obligations": [],
+                        "provider_requirements": [],
+                    }
+                ]
+            }
+        )
+        with patch(
+            "formalize_blueprint._call_model",
+            side_effect=[
+                CallResult(status="timeout", duration_s=60),
+                CallResult(status="ok", text=response, duration_s=4),
+            ],
+        ) as call_model:
+            _ensure_phase1_semantic_plan(ctx, {label})
+
+        self.assertEqual(call_model.call_count, 2)
+        self.assertFalse(call_model.call_args_list[0].kwargs["force_fresh"])
+        self.assertTrue(call_model.call_args_list[1].kwargs["force_fresh"])
+        self.assertNotIn("fallback", ctx.semantic_plan_entries[label])
+        retries = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_semantic_plan_hedge_started"
+        ]
+        self.assertEqual(len(retries), 1)
+
+    def test_slow_primary_is_not_killed_when_hedge_starts(self) -> None:
+        label = "def:widget"
+        ctx = context({label: node(label)})
+        ctx.hard_timeout = 0.05
+        ctx.base_effort = None
+        ctx.runner_spec = "codex"
+        ctx.escalation_runner_spec = "codex:planner-escalation"
+        ctx.escalation_effort = "high"
+        ctx.planner_tier = "escalation"
+        response = json.dumps(
+            {
+                "contracts": [
+                    {
+                        "label": label,
+                        "representation": "a concrete widget",
+                        "vocabulary": [],
+                        "obligations": [],
+                        "provider_requirements": [],
+                    }
+                ]
+            }
+        )
+        primary_started = threading.Event()
+        hedge_started = threading.Event()
+        primary_cancelled = threading.Event()
+
+        def fake_call(*_args, **kwargs):
+            self.assertTrue(kwargs["escalated"])
+            self.assertEqual(kwargs["effort"], "high")
+            control = kwargs["control"]
+            if kwargs["force_fresh"]:
+                hedge_started.set()
+                return CallResult(status="ok", text=response, duration_s=0.01)
+            primary_started.set()
+            self.assertTrue(hedge_started.wait(1))
+            while not control._cancelled:
+                time.sleep(0.005)
+            primary_cancelled.set()
+            return CallResult(status="error", error="cancelled")
+
+        with patch("formalize_blueprint._call_model", side_effect=fake_call) as call_model:
+            _ensure_phase1_semantic_plan(ctx, {label})
+
+        self.assertTrue(primary_started.is_set())
+        self.assertTrue(hedge_started.is_set())
+        self.assertTrue(primary_cancelled.wait(1))
+        self.assertEqual(call_model.call_count, 2)
+        self.assertNotIn("fallback", ctx.semantic_plan_entries[label])
+        events = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_semantic_plan_hedge_result"
+        ]
+        self.assertEqual(events[0]["winner"], "hedge")
+
+    def test_primary_completion_before_threshold_does_not_start_hedge(self) -> None:
+        label = "def:widget"
+        ctx = context({label: node(label)})
+        ctx.hard_timeout = 1
+        ctx.base_effort = None
+        ctx.runner_spec = "codex"
+        response = json.dumps(
+            {
+                "contracts": [
+                    {
+                        "label": label,
+                        "representation": "a concrete widget",
+                        "vocabulary": [],
+                        "obligations": [],
+                        "provider_requirements": [],
+                    }
+                ]
+            }
+        )
+        with patch(
+            "formalize_blueprint._call_model",
+            return_value=CallResult(status="ok", text=response, duration_s=0.01),
+        ) as call_model:
+            _ensure_phase1_semantic_plan(ctx, {label})
+
+        self.assertEqual(call_model.call_count, 1)
+
+    def test_planner_uses_selected_model_tier(self) -> None:
+        label = "def:widget"
+        response = json.dumps(
+            {
+                "contracts": [
+                    {
+                        "label": label,
+                        "representation": "a concrete widget",
+                        "vocabulary": [],
+                        "obligations": [],
+                        "provider_requirements": [],
+                    }
+                ]
+            }
+        )
+        for tier, escalated, effort in (
+            ("base", False, "medium"),
+            ("escalation", True, "high"),
+        ):
+            with self.subTest(tier=tier):
+                ctx = context({label: node(label)})
+                ctx.hard_timeout = 60
+                ctx.runner_spec = "codex:base-model"
+                ctx.escalation_runner_spec = "codex:escalation-model"
+                ctx.base_effort = "medium"
+                ctx.escalation_effort = "high"
+                ctx.planner_tier = tier
+                with patch(
+                    "formalize_blueprint._call_model",
+                    return_value=CallResult(
+                        status="ok", text=response, duration_s=0.01
+                    ),
+                ) as call_model:
+                    _ensure_phase1_semantic_plan(ctx, {label})
+
+                self.assertEqual(call_model.call_count, 1)
+                self.assertEqual(
+                    call_model.call_args.kwargs["escalated"], escalated
+                )
+                self.assertEqual(call_model.call_args.kwargs["effort"], effort)
+                result = [
+                    fields
+                    for event, fields in ctx.telemetry.events
+                    if event == "phase1_semantic_plan_result"
+                ][0]
+                self.assertEqual(result["planner_tier"], tier)
+                self.assertEqual(
+                    result["runner"],
+                    "codex:escalation-model" if escalated else "codex:base-model",
+                )
 
     def test_environment_planner_failure_is_not_hidden(self) -> None:
         nodes = {"def:widget": node("def:widget")}

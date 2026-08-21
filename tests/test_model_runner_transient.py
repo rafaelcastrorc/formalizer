@@ -72,6 +72,15 @@ class SuccessfulRunner:
 
 
 class ModelRunnerTransientTests(unittest.TestCase):
+    def test_pre_cancelled_runner_never_starts_backend_work(self) -> None:
+        runner = SequenceRunner([RunResult(text="must not run")])
+        runner.cancel()
+
+        with self.assertRaisesRegex(RunnerError, "cancelled"):
+            runner.run("prompt", retries=0)
+
+        self.assertEqual(runner.calls, 0)
+
     def test_july31_websocket_failure_is_transient(self) -> None:
         fixture = json.loads(
             (
@@ -215,6 +224,49 @@ class ModelRunnerTransientTests(unittest.TestCase):
         self.assertEqual(model_events[0]["status"], "timeout")
         self.assertTrue(model_events[0]["session_captured_for_resume"])
         self.assertTrue(model_events[1]["resumed_session"])
+
+    def test_forced_fresh_call_ignores_old_sessions_but_keeps_new_session(self) -> None:
+        telemetry = FakeTelemetry()
+        ctx = SimpleNamespace(
+            telemetry=telemetry,
+            runner_spec="codex:gpt-test",
+            escalation_runner_spec="codex:gpt-test",
+            stmt_fps={"lem:test": "stmt-fp"},
+            nodes={"lem:test": object()},
+            design_plan_entries={},
+            blueprint_direct_generation={},
+            model_resume_sessions={},
+        )
+        sessions = {"codex:gpt-test": "local-old-session"}
+        resume_ids: list[str | None] = []
+
+        def make_runner(spec, **kwargs):
+            resume_ids.append(kwargs.get("resume_session_id"))
+            return SuccessfulRunner()
+
+        with patch("formalize_blueprint._make_runner", side_effect=make_runner), patch(
+            "formalize_blueprint._get_model_resume_session",
+            return_value="persisted-old-session",
+        ):
+            result = _call_model(
+                ctx,
+                "adjudicate independently",
+                purpose="phase1_statement_generation",
+                timeout=300,
+                effort=None,
+                labels=["lem:test"],
+                sessions=sessions,
+                force_fresh=True,
+            )
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(resume_ids, [None])
+        self.assertEqual(sessions["codex:gpt-test"], "session-ok-2")
+        model_event = next(
+            fields for event, fields in telemetry.events if event == "model_call"
+        )
+        self.assertFalse(model_event["resumed_session"])
+        self.assertTrue(model_event["forced_fresh_session"])
 
 
 if __name__ == "__main__":

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -9,7 +11,7 @@ from unittest.mock import patch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from model_runners.base import RunResult  # noqa: E402
+from model_runners.base import RunnerError, RunResult  # noqa: E402
 from model_runners.cli import (  # noqa: E402
     ClaudeCodeRunner,
     CodexRunner,
@@ -82,6 +84,34 @@ class CodexReadonlyTests(unittest.TestCase):
         self.assertNotIn("unified_exec", commands[0])
         self.assertNotIn("code_mode_host", commands[0])
 
+    def test_cancel_terminates_active_process(self) -> None:
+        runner = CodexRunner(readonly=True, timeout=10)
+        errors: list[Exception] = []
+
+        def invoke() -> None:
+            try:
+                runner._invoke(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    "prompt",
+                    REPO_ROOT,
+                )
+            except Exception as exc:  # noqa: BLE001 - asserted below
+                errors.append(exc)
+
+        thread = threading.Thread(target=invoke)
+        thread.start()
+        deadline = time.monotonic() + 2
+        while runner._active_process is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertIsNotNone(runner._active_process)
+        runner.cancel()
+        thread.join(timeout=2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], RunnerError)
+        self.assertIn("cancelled", str(errors[0]))
+
 
 class ClaudeReadonlyTests(unittest.TestCase):
     def test_readonly_call_disables_all_tools(self) -> None:
@@ -103,6 +133,34 @@ class ClaudeReadonlyTests(unittest.TestCase):
         blocked = command[command.index("--disallowedTools") + 1]
         for name in ("Bash", "Read", "Grep", "Glob", "Edit", "Write", "Task"):
             self.assertIn(name, blocked.split(","))
+
+    def test_cancel_terminates_active_process(self) -> None:
+        runner = ClaudeCodeRunner(readonly=True, timeout=10)
+        errors: list[Exception] = []
+
+        def invoke() -> None:
+            try:
+                runner._invoke(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    "prompt",
+                    REPO_ROOT,
+                )
+            except Exception as exc:  # noqa: BLE001 - asserted below
+                errors.append(exc)
+
+        thread = threading.Thread(target=invoke)
+        thread.start()
+        deadline = time.monotonic() + 2
+        while runner._active_process is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertIsNotNone(runner._active_process)
+        runner.cancel()
+        thread.join(timeout=2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], RunnerError)
+        self.assertIn("cancelled", str(errors[0]))
 
 
 if __name__ == "__main__":

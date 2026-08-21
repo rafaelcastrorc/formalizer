@@ -1,0 +1,142 @@
+{
+  "source": "Provider-neutral repair shapes distilled from historical Simplex blueprint-repair transactions.",
+  "valid_cases": [
+    {
+      "name": "single_target_without_helpers",
+      "requested_labels": [
+        "lem:geometric-iterated-reduction"
+      ],
+      "original_content": "PREFIX\n\\begin{lemma}\nOld geometric statement.\n\\label{lem:geometric-iterated-reduction}\n\\uses{def:base}\n\\end{lemma}\n\\begin{proof}\nOld proof.\n\\end{proof}\n\n\\begin{remark}\nUntouched sibling.\n\\label{rem:sibling}\n\\end{remark}\nSUFFIX\n",
+      "existing_blocks": {
+        "lem:geometric-iterated-reduction": "\\begin{lemma}\nOld geometric statement.\n\\label{lem:geometric-iterated-reduction}\n\\uses{def:base}\n\\end{lemma}\n\\begin{proof}\nOld proof.\n\\end{proof}",
+        "rem:sibling": "\\begin{remark}\nUntouched sibling.\n\\label{rem:sibling}\n\\end{remark}"
+      },
+      "existing_labels": [
+        "def:base",
+        "lem:geometric-iterated-reduction",
+        "rem:sibling"
+      ],
+      "response": {
+        "replacements": {
+          "lem:geometric-iterated-reduction": "\\begin{lemma}\nCorrected geometric statement.\n\\label{lem:geometric-iterated-reduction}\n\\uses{def:base}\n\\end{lemma}\n\\begin{proof}\nCorrected proof.\n\\end{proof}"
+        },
+        "notes": "Corrected the target only."
+      },
+      "expected_new_labels": [],
+      "expected_contains": [
+        "Corrected geometric statement.",
+        "\\label{rem:sibling}"
+      ],
+      "unchanged_fragments": [
+        "\\begin{remark}\nUntouched sibling.\n\\label{rem:sibling}\n\\end{remark}"
+      ]
+    },
+    {
+      "name": "multi_target_with_owned_helpers",
+      "requested_labels": [
+        "lem:claim-five-p-membership",
+        "lem:claim-five-q-membership"
+      ],
+      "original_content": "\\begin{lemma}\nOld P statement.\n\\label{lem:claim-five-p-membership}\n\\uses{def:p}\n\\end{lemma}\n\\begin{proof}\nOld P proof.\n\\end{proof}\n\n\\begin{lemma}\nOld Q statement.\n\\label{lem:claim-five-q-membership}\n\\uses{def:q}\n\\end{lemma}\n\\begin{proof}\nOld Q proof.\n\\end{proof}\n\n\\begin{theorem}\nUntouched consumer.\n\\label{thm:claim-five}\n\\uses{lem:claim-five-p-membership, lem:claim-five-q-membership}\n\\end{theorem}\n",
+      "existing_blocks": {
+        "lem:claim-five-p-membership": "\\begin{lemma}\nOld P statement.\n\\label{lem:claim-five-p-membership}\n\\uses{def:p}\n\\end{lemma}\n\\begin{proof}\nOld P proof.\n\\end{proof}",
+        "lem:claim-five-q-membership": "\\begin{lemma}\nOld Q statement.\n\\label{lem:claim-five-q-membership}\n\\uses{def:q}\n\\end{lemma}\n\\begin{proof}\nOld Q proof.\n\\end{proof}",
+        "thm:claim-five": "\\begin{theorem}\nUntouched consumer.\n\\label{thm:claim-five}\n\\uses{lem:claim-five-p-membership, lem:claim-five-q-membership}\n\\end{theorem}"
+      },
+      "existing_labels": [
+        "def:p",
+        "def:q",
+        "lem:claim-five-p-membership",
+        "lem:claim-five-q-membership",
+        "thm:claim-five"
+      ],
+      "response": {
+        "replacements": {
+          "lem:claim-five-p-membership": "\\begin{lemma}\nP helper statement.\n\\label{lem:claim-five-p-coordinate}\n\\uses{def:p}\n\\end{lemma}\n\\begin{proof}\nP helper proof.\n\\end{proof}\n\n\\begin{lemma}\nCorrected P statement.\n\\label{lem:claim-five-p-membership}\n\\uses{lem:claim-five-p-coordinate}\n\\end{lemma}\n\\begin{proof}\nCorrected P proof.\n\\end{proof}",
+          "lem:claim-five-q-membership": "\\begin{lemma}\nQ helper statement using the P helper.\n\\label{lem:claim-five-q-coordinate}\n\\uses{def:q, lem:claim-five-p-coordinate}\n\\end{lemma}\n\\begin{proof}\nQ helper proof.\n\\end{proof}\n\n\\begin{lemma}\nCorrected Q statement.\n\\label{lem:claim-five-q-membership}\n\\uses{lem:claim-five-q-coordinate}\n\\end{lemma}\n\\begin{proof}\nCorrected Q proof.\n\\end{proof}"
+        },
+        "notes": "Added two scoped helpers and repaired both targets."
+      },
+      "expected_new_labels": [
+        "lem:claim-five-p-coordinate",
+        "lem:claim-five-q-coordinate"
+      ],
+      "expected_contains": [
+        "Corrected P statement.",
+        "Corrected Q statement.",
+        "\\label{thm:claim-five}"
+      ],
+      "unchanged_fragments": [
+        "\\begin{theorem}\nUntouched consumer.\n\\label{thm:claim-five}\n\\uses{lem:claim-five-p-membership, lem:claim-five-q-membership}\n\\end{theorem}"
+      ]
+    }
+  ],
+  "invalid_cases": [
+    {
+      "name": "foreign_existing_node",
+      "requested_labels": [
+        "lem:target"
+      ],
+      "original_content": "\\begin{lemma}Old.\\label{lem:target}\\end{lemma}\n\\begin{lemma}Sibling.\\label{lem:sibling}\\end{lemma}\n",
+      "existing_blocks": {
+        "lem:target": "\\begin{lemma}Old.\\label{lem:target}\\end{lemma}",
+        "lem:sibling": "\\begin{lemma}Sibling.\\label{lem:sibling}\\end{lemma}"
+      },
+      "existing_labels": [
+        "lem:target",
+        "lem:sibling"
+      ],
+      "response": {
+        "replacements": {
+          "lem:target": "\\begin{lemma}Changed.\\label{lem:target}\\end{lemma}\n\\begin{lemma}Also changed.\\label{lem:sibling}\\end{lemma}"
+        }
+      },
+      "expected_error": "pre-existing non-target"
+    },
+    {
+      "name": "missing_requested_target",
+      "requested_labels": [
+        "lem:first",
+        "lem:second"
+      ],
+      "original_content": "\\begin{lemma}One.\\label{lem:first}\\end{lemma}\n\\begin{lemma}Two.\\label{lem:second}\\end{lemma}\n",
+      "existing_blocks": {
+        "lem:first": "\\begin{lemma}One.\\label{lem:first}\\end{lemma}",
+        "lem:second": "\\begin{lemma}Two.\\label{lem:second}\\end{lemma}"
+      },
+      "existing_labels": [
+        "lem:first",
+        "lem:second"
+      ],
+      "response": {
+        "replacements": {
+          "lem:first": "\\begin{lemma}Changed one.\\label{lem:first}\\end{lemma}"
+        }
+      },
+      "expected_error": "missing target"
+    },
+    {
+      "name": "duplicate_helper_ownership",
+      "requested_labels": [
+        "lem:first",
+        "lem:second"
+      ],
+      "original_content": "\\begin{lemma}One.\\label{lem:first}\\end{lemma}\n\\begin{lemma}Two.\\label{lem:second}\\end{lemma}\n",
+      "existing_blocks": {
+        "lem:first": "\\begin{lemma}One.\\label{lem:first}\\end{lemma}",
+        "lem:second": "\\begin{lemma}Two.\\label{lem:second}\\end{lemma}"
+      },
+      "existing_labels": [
+        "lem:first",
+        "lem:second"
+      ],
+      "response": {
+        "replacements": {
+          "lem:first": "\\begin{lemma}Helper.\\label{lem:new-helper}\\end{lemma}\n\\begin{lemma}One.\\label{lem:first}\\end{lemma}",
+          "lem:second": "\\begin{lemma}Helper again.\\label{lem:new-helper}\\end{lemma}\n\\begin{lemma}Two.\\label{lem:second}\\end{lemma}"
+        }
+      },
+      "expected_error": "returned by both"
+    }
+  ]
+}

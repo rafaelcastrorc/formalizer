@@ -5,6 +5,14 @@ Phase 1 runs that exposed retry and scheduling regressions. They are committed
 test resources: the tests do not need local `.auto-blueprint/` telemetry, R2,
 network access, or a model account.
 
+`scoped_blueprint_repair.json` preserves the response shapes needed by the
+provider-neutral blueprint-repair boundary: a singleton repair, a multi-target
+Simplex-style repair with target-owned helpers, and invalid responses that try
+to edit a pre-existing sibling, omit a requested target, or assign one helper
+to two targets. The executable regression also proves that Python applies the
+response to the immutable pre-call source even if a backend somehow changes
+the draft path before returning.
+
 `blueprint_direct_candidate_epoch.json` records the Simplex transition where
 an ordinary-plan declaration exhausted compiler correction, activated
 blueprint-direct generation, and was then incorrectly persisted as reusable
@@ -136,6 +144,17 @@ malformed Lean through retries 51-55. The paired executable regression requires
 base and escalated compiler failures to use the same bounded lifecycle as
 statement-audit failures, switch once to blueprint-direct generation, and route
 only exhaustion of that direct lifecycle to scoped decomposition.
+
+`scoped_compile_failure_attribution.json` preserves the twelve-contract
+Simplex compiler group from `run-20260820-032411`. Lean diagnostics identified
+only `def:relu-network`, but the old router advanced all eleven unrelated
+siblings through their retry lifecycle and later spent 706.4 model-seconds on
+three of them. The paired regressions require only the diagnostic owner to
+advance *and* require the exact generated declarations for the other eleven
+siblings to survive the failed all-or-nothing compile. Those siblings are
+isolated with their owned helpers, rechecked through the ordinary deterministic
+and Lean gates, and frozen without another generation call. Truly unattributed
+compiler output still uses the existing group isolation route.
 
 `simplex_precompile_deterministic_failure_lifecycle.json` preserves the
 `remark:geometric-recursion-gap` loop from `run-20260813-235136`. A

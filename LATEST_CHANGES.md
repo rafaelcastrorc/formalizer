@@ -1,5 +1,286 @@
 # Latest Changes
 
+## 2026-08-21: Publish Implemented Phase-2 Definition Bodies to Importers
+
+### Confirmed failure
+
+Phase 2 correctly wrote completed definition bodies to generated `.lean`
+files, but deliberately retained the Phase-1 `.olean` objects. That shortcut
+is valid for theorem proofs because their bodies are opaque and their public
+types do not change. It is invalid for `def`/`abbrev` implementations that a
+downstream proof must unfold. In the current Simplex run,
+`Skeleton08.lean` contained the completed recursive body of
+`def_polytope_classes`, while its older `Skeleton08.olean` still printed and
+reduced that declaration as `fun ... => sorry`. The downstream delta-four
+proof therefore could not use the accepted recursive definition and repeatedly
+requested blueprint helpers.
+
+This also explains the measured helper churn without blaming missing planning.
+All 21 helper nodes retained in the current draft have direct consumers and are
+transitively reachable from original blueprint nodes, but telemetry contains
+49 earlier repair-added helper labels that no longer exist in the draft.
+Phase-1 model time does not support amplifying the initial planner for helpers:
+original-node calls averaged 25.8 seconds (20.8-second median), while introduced
+helper calls averaged 23.4 seconds (22.5-second median), with no timeout in
+either group. Phase 2 was the divergence point: introduced-node calls averaged
+122.4 seconds and recorded twelve timeouts, concentrated in the repeatedly
+repaired delta-four component.
+
+### Correction
+
+- A Phase-2 section that accepts at least one definition-like body now rebuilds
+  and publishes its importable `.olean` before progress is persisted.
+- The existing theorem-only fast path remains unchanged; replacing an opaque
+  theorem proof does not rebuild its object.
+- Object publication and state persistence share the existing state lock. If
+  publication unexpectedly fails, the complete section source and its previous
+  object are restored, and none of that section's tentative completions count
+  as accepted.
+- No blueprint edge or helper is inferred, no model prompt changes, and no
+  provider-specific behavior is introduced.
+
+### Validation
+
+Three focused regressions cover definition refresh, theorem-only object reuse,
+and transactional rollback. A real Lean integration reproduction first built a
+Phase-1 provider with a `sorry` definition and confirmed that an importing
+module could not prove its concrete value; after the Phase-2 source change and
+object refresh, the same import compiled successfully. The full suite passed
+all 413 tests, every committed Phase-1 plan replay, the Phase-1 scheduler
+latency replay, and the Phase-2 retained-candidate replay (`2.741x` simulated
+speedup), followed by `git diff --check`.
+
+## 2026-08-21: Make the Compact Planner Model Tier Configurable
+
+The compact Phase-1 semantic planner previously always used the base runner.
+The Refine UI now offers **Base model** (the unchanged default) and
+**Escalation model** for that call, backed by `--planner-tier
+base|escalation`. The selected tier applies to both the primary planner call
+and its hedge; it does not alter statement generation, repair, or Phase-2 model
+routing. Telemetry and the generated report record the selected tier and
+runner. Routing tests cover both choices and the Web UI command mapping.
+
+## 2026-08-21: Preserve Semantic Guidance for Newly Introduced Helpers
+
+### Confirmed failure
+
+Simplex `run-20260821-001641` recorded compact semantic plans for every helper
+before statement generation, but `_design_plan_block` selected its source
+globally: if any candidate-derived typed contract existed, it rendered only
+typed entries. A helper introduced by decomposition normally has semantic
+guidance before it has a typed candidate, so neighboring typed contracts hid
+the new helper's own obligations. For
+`lem:geometric-recursion-edge-realization-preservation`, the stored plan
+required the ambient dimension, the one-hidden-layer compression block, and
+preservation of the represented function. None of those plan requirements
+appeared in its first generation prompt, and the returned statement was
+rejected for exactly those omissions.
+
+This was a mixed-state prompt-rendering bug, not evidence that helpers are
+intrinsically slower. Across 125 stored Simplex runs, helper-only Phase 1
+generation calls had a 25.4-second mean and 19.4-second median, compared with
+28.5 seconds and 21.5 seconds for original-node calls. In the affected run,
+added nodes cost more only after repeated generation, audit, and repair work.
+The geometric-recursion component accumulated 101 model calls and about 2,881
+seconds of allocated model time.
+
+### Correction
+
+- Prompt guidance is now selected independently per node. A nonempty typed
+  candidate contract wins for that node; otherwise its compact semantic plan
+  is rendered even when neighboring nodes already have typed contracts.
+- Current targets are rendered before surrounding context so their guidance
+  cannot be truncated by the existing 9,000-character prompt budget.
+- Blueprint-direct generation still suppresses both plan forms for the exact
+  target fingerprint, preserving the existing plan circuit breaker.
+- The compact planner remains advisory and untyped. This change does not
+  restore the retired global typed-planning pass or make a model plan an
+  authority over the blueprint.
+
+### Validation
+
+The regression reproduces the historical mixed state with an existing typed
+`def:relu-network` contract and only semantic guidance for the newly introduced
+geometric-recursion helper. It fails on the old all-or-nothing renderer and
+passes only when both the provider's typed interface and the helper's own
+semantic obligations reach generation.
+
+All 409 discovered tests passed, along with every committed Phase 1 plan
+replay, the Phase 1 scheduler-latency replay, Python compilation, and
+`git diff --check`. A production call through `codex:gpt-5.5` at medium effort
+using the current Simplex draft, exact frozen dependency interfaces, and the
+corrected mixed plan completed in 27.8 seconds. It returned a statement that
+quantifies the ambient dimension, consumes the later ReLU network and all
+three compression/containment dependencies, and concludes that a composed
+network computes exactly `T_{a,b+4}`. A standalone recompilation of that
+response was blocked before elaboration by a missing stale generated
+`Skeleton59.olean`; this is an existing local generated-artifact condition,
+not a diagnostic against the returned declaration.
+
+## 2026-08-20: Recover Silent Planning, Preserve Compiling Siblings, and Narrow Imports
+
+### Confirmed failures
+
+- In Simplex `run-20260820-124446`, the compact semantic-planning call emitted
+  no response for 600 seconds. The exact 57,564-character prompt had completed
+  in 246-372 seconds in the preceding recorded runs, and a real replay completed
+  successfully, so accepting an all-node fallback after that silent execution
+  outlier discarded useful coordination.
+- The same run generated twelve contracts at once and Lean diagnostics belonged
+  to only five. Telemetry reported seven preserved siblings, but the
+  all-or-nothing freezer had already deleted their generated module; all twelve
+  were later regenerated. Six of those seven historical sibling declarations
+  independently passed the production statement audit.
+- A successful broad `import Mathlib` diagnosis was persisted permanently.
+  The current generated Simplex module compiled in 13.0 seconds with the broad
+  import versus 7.1 seconds with the exact required module, and historical
+  object checks showed a 6.36-second median without broad fallback versus
+  15.06 seconds with it.
+
+### Corrections
+
+- A completely silent semantic-plan timeout gets exactly one fresh call using
+  the same base runner and timeout. Partial or malformed output still follows
+  the existing deterministic parser/fallback path; this is not a new semantic
+  repair loop.
+- Attributed compiler failures now split the exact post-correction candidate at
+  existing target/helper ownership boundaries. Unaffected siblings rerun every
+  normal deterministic and Lean gate and freeze without generation; only true
+  diagnostic owners enter the existing provider-neutral failure router.
+  Ambiguous diagnostics retain the whole-component route.
+- Broad Mathlib compilation remains a diagnostic correctness fallback. After it
+  succeeds, unresolved names are matched against selected, ready local library
+  declarations and the unchanged candidate is compiled with exact prefixed
+  module imports. Broad Mathlib is retained only if that narrower compile fails.
+
+### Validation
+
+The compact-planner suite covers the one-call silent recovery boundary. The
+committed `scoped_compile_failure_attribution.json` historical fixture now
+checks preservation of the generated sibling declarations themselves, not only
+their retry counters. Import tests cover qualified-name extraction, source-root
+prefixing for any selected Lean library, and narrow module persistence.
+
+All 403 discovered tests passed, as did every committed Phase 1 plan replay,
+the Phase 1 scheduler-latency replay, the Phase 2 latency replay, Python
+compilation, and `git diff --check`. Post-implementation production validation
+used the exact 57,564-character historical semantic-plan prompt with
+`codex:gpt-5.5` at medium effort: the first call reproduced the silent timeout,
+while the single fresh recovery returned 107/107 unique requested entries in
+413.9 seconds, with no unauthorized provider requirements. The seven
+historically discarded sibling declarations all compiled with the real project
+Lean/Mathlib toolchain. A fresh production statement audit accepted six of
+those seven and isolated the one actual semantic defect, confirming that
+candidate preservation retains usable work without bypassing alignment.
+
+## 2026-08-20: Scope Phase 1 Compiler Retries to Diagnostic Owners
+
+### Confirmed failure
+
+In Simplex `run-20260820-032411`, one twelve-contract compiler command failed
+with diagnostics owned only by `def:relu-network`. Diagnostic attribution was
+already declaration-aware, but `_route_phase1_compile_failure` subsequently
+advanced all twelve nodes through the retry lifecycle by falling back to the
+complete compiler group. Eleven unrelated siblings therefore inherited the
+same error and escalation tier. Three of those unnecessary model calls alone
+consumed 706.4 seconds. A scan of recorded compiler-failure groups found 65
+unsupported sibling advances in 20 cases across nine runs.
+
+### Correction
+
+- When compiler diagnostics are attributed to declaration ranges, only those
+  owning labels consume a retry or enter escalation/exhaustion routing.
+- Unrelated siblings retain their candidates and current retry tiers so the
+  scheduler can recheck them independently.
+- When compiler output has no attributable source location, the existing
+  whole-group isolation/bisection route remains unchanged. The fix therefore
+  does not suppress ambiguous failures.
+- The behavior is provider-neutral: it operates on Lean diagnostics after
+  generation and does not depend on Codex, Claude, or API response formats.
+- Telemetry now records both the diagnostic owners and preserved siblings in
+  `phase1_compile_unattributed_siblings_preserved`.
+
+### Validation
+
+Added the committed historical fixture
+`scoped_compile_failure_attribution.json` and executable regressions for both
+attributed and genuinely unattributed compiler failures. All 398 tests, the
+committed Phase 1 plan replay, scheduler-latency replay, Phase 2 latency replay,
+and `git diff --check` pass. The exact stored historical
+`lem:claim-five-q-membership` prompt was also replayed through the production
+`codex:gpt-5.5` runner at medium effort: the model returned a declaration in
+20.5 seconds and the project Lean/Mathlib toolchain compiled it successfully.
+
+## 2026-08-20: Give Every Phase 2 Repair Activation a Fresh Rollback Baseline
+
+### Confirmed failure
+
+The Simplex run `run-20260820-032411` activated the queued repair for
+`thm:previous-cpwl-bound` but emitted no matching
+`phase2_repair_transaction_snapshot` event. When another Phase 2 worker later
+requested decomposition during verification, rollback failed with
+`active Phase 2 blueprint repair has no pre-edit transaction snapshot` and
+terminated the run after 19,158 seconds. Repair queue IDs are content-derived,
+so an old directory for the same diagnosis could make transaction startup
+silently reuse an earlier lifecycle instead of recording the current pre-edit
+state.
+
+### Correction
+
+- A newly activated queued repair now replaces any transaction directory for
+  that request ID with the current pre-edit blueprint, generated Lean, Lake
+  artifacts, and scheduler state.
+- An already-active transaction, including one restored by `--continue`, keeps
+  its original rollback baseline instead of overwriting it.
+- Snapshot creation verifies that its manifest was committed durably.
+- A repair cannot enter the verification stage unless its pre-edit snapshot is
+  present. This catches any future lifecycle violation before another repair
+  can depend on unverified edits.
+
+### Regression
+
+Added a regression that leaves a stale snapshot for a content-derived request
+ID, reactivates the request against a new blueprint baseline, rejects the
+provisional edit, and verifies rollback restores the new baseline. A second
+regression enforces the verification-stage snapshot invariant. All 396 tests,
+the committed Phase 1 plan replay, scheduler-latency replay, Phase 2 latency
+replay, and `git diff --check` pass.
+
+## 2026-08-20: Independently Adjudicate Phase 1 Decomposition Refusals
+
+### Confirmed failure
+
+Across 33 recorded first-refusal/follow-up pairs, the initial Phase 1
+`NEEDS-DECOMPOSITION` response took a median 18.3 seconds, while the forced
+follow-up took a median 75.2 seconds and consumed 2,642.9 seconds in total.
+Thirty-two follow-ups resumed the producer session, received the refusal as
+prior candidate code, and were instructed to make a stronger attempt. That
+biased the second call toward defending or overturning its own diagnosis rather
+than independently deciding whether the blueprint actually lacked an
+interface.
+
+### Correction
+
+- The first refusal remains a generator claim and cannot mutate the blueprint.
+- The escalation call is now a neutral adjudication: it may emit the exact
+  Phase 1 declarations or independently confirm the structured decomposition
+  finding.
+- That adjudication explicitly ignores lifecycle-local and persisted producer
+  sessions. Its newly created session is still retained for later corrections.
+- The refusal is no longer passed as previous Lean code. Telemetry records the
+  fresh-session adjudication explicitly.
+- The change is provider-neutral. Session-capable CLIs start fresh; API and
+  other sessionless runners receive the same neutral adjudication prompt.
+
+### Regression
+
+Added focused tests proving that forced-fresh calls ignore both local and
+persisted sessions while retaining the new session, and that a base refusal is
+followed by exactly one fresh, neutral escalation adjudication. Historical
+four-case real-model probes reduced the adjudication total from 743.4 seconds
+under forced resumed retries to 74.5 seconds with independent calls, while all
+four retained the same missing-interface diagnosis.
+
 ## 2026-08-17: Candidate-Owned Audit Defects Switch to Blueprint-Direct Generation
 
 ### Confirmed failure
@@ -3436,3 +3717,62 @@ fingerprint, rejection, and observed retry range. Tests cover the immediate
 canonical-name case, retain rejection for placeholder-like helper names, drive
 the failure through the real parallel coordinator, and verify the complete
 bounded lifecycle through terminal decomposition.
+
+## 2026-08-20: Apply Blueprint Repairs as Scoped Returned Data
+
+**Problem.** Blueprint-repair prompts were scoped in prose but not at the
+mutation boundary. Codex and Claude Code were given the draft path, write
+permission, and instructions to edit `content.tex` in place. API providers
+received the entire file and returned a full-file replacement. In the recorded
+Simplex Claim 5 component, a four-target repair therefore carried a roughly
+31.7K-character prompt, took about 430.6 model-seconds, and returned only a
+short edit summary while the actual mutation remained outside the response.
+The later scope checks could roll back unrelated edits, but only after paying
+for an unconstrained repair and losing a trial.
+
+**Change.** Every provider now receives the same dependency-sliced,
+return-only prompt and runs read-only. The response is a JSON map from each
+requested label to that node's complete replacement TeX. A value may prepend
+brand-new, uniquely owned helper nodes; it may not contain another
+pre-existing label. Python applies all replacements to the immutable pre-call
+source in one transaction, then runs the existing validator, graph
+orientation/cycle checks, phase-specific edit-scope checks, post-repair
+boundary audit, Lean checks, and semantic audit. The separate section
+normalization path still uses its existing full-draft transaction and is not
+part of this change.
+
+**Correctness boundary.** The model still receives the complete failing nodes,
+dependency statements, immediate consumer statements, deterministic paper
+excerpt, harness rules, and exact evidence. Only mutation authority changed:
+non-target blueprint text is now mechanically immutable rather than merely
+protected by a later rollback.
+
+**Regression.** Committed fixtures cover a singleton, a multi-target repair
+with cross-referenced new helpers, an attempted sibling rewrite, a missing
+target, and duplicate helper ownership. A coordinator-level regression runs
+both the former agent and API branches and requires both to construct a
+read-only runner and use the same scoped response protocol.
+
+## 2026-08-20: Hedge Slow Compact Semantic Planning Without Killing It
+
+**Problem.** The compact planner emits one large all-node JSON response. A
+recorded 107-contract Codex call was still generating when the local 600-second
+timeout killed it, so `--output-last-message` exposed no usable partial plan. An
+identical fresh call then completed in about 414 seconds. Sequential recovery
+therefore discarded potentially useful work and paid the two calls end to end.
+
+**Change.** For the compact semantic planner only, `--hard-timeout` now marks
+the point at which one fresh identical call starts in parallel. The original
+call remains alive. The first complete successful result wins; the other call
+is explicitly cancelled. A failed lane cannot cancel a still-running lane, and
+each call retains a final safety ceiling of twice the hedge threshold. Other
+model-call stages keep their existing timeout and retry semantics.
+
+**Provider boundary.** Codex and Claude Code cancellation terminates the exact
+losing process group. API runners receive the same coordinator race and discard
+the losing response; synchronous provider APIs may continue server-side work
+when their protocol offers no cancellation endpoint.
+
+**Regression.** Tests cover a primary response that completes before the hedge
+threshold, a hedge that wins while the original remains alive, explicit loser
+cancellation, and the existing immediate silent-failure recovery path.

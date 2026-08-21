@@ -784,6 +784,10 @@ def build_command(action: str, p: dict) -> list[str]:
             if conjecture_policy not in {"record", "attempt"}:
                 raise ValueError("conjecture policy must be record or attempt")
             cmd += ["--conjecture-policy", conjecture_policy]
+            planner_tier = str(p.get("planner_tier") or "base").strip()
+            if planner_tier not in {"base", "escalation"}:
+                raise ValueError("planner model must be base or escalation")
+            cmd += ["--planner-tier", planner_tier]
             escalation_runner = runner_spec_from(
                 p,
                 "escalation_runner_backend",
@@ -1867,10 +1871,10 @@ function runnerFields(baseTimeout='3600', includeHard=false, opts={}){
   const model = opts.defaultModel || '';
   const hard = includeHard ? `
     <div class="row">
-      <div><label>Hard-node model-call timeout (seconds)</label>
+      <div><label>Hard-node timeout / planner hedge (seconds)</label>
         <input type="number" id="f_hard_timeout" value="600" min="1"></div>
       <div><label>Timeout behavior</label>
-        <div class="hint">Base applies to every model call; hard chunks may use the longer value.</div></div>
+        <div class="hint">Hard chunks use this limit. A slow compact planner starts a parallel fresh call at this threshold without killing the original.</div></div>
     </div>` : '';
   return `
     ${runnerBlock('f', 'Base', backend, effort, model)}
@@ -1949,7 +1953,15 @@ const FORMS = {
       defaultEffort: runnerDefault('base', 'effort', 'medium'),
       defaultModel: runnerDefault('base', 'model', 'gpt-5.5')
     })}
-    <div id="fastEscalationFields">${escalationRunnerFields()}</div>
+    <div id="fastEscalationFields">
+      ${escalationRunnerFields()}
+      <label>Compact planner model</label>
+      <select id="f_planner_tier">
+        <option value="base" selected>Base model</option>
+        <option value="escalation">Escalation model</option>
+      </select>
+      <div class="hint">Chooses the model for the compact Phase 1 semantic plan only. Its primary and hedge calls use the same selection.</div>
+    </div>
     <label>Lean command override (optional)</label>
     <input type="text" id="f_leancmd" placeholder="lake env lean">`,
   validate: () => `
@@ -2223,6 +2235,7 @@ function params(){
             continue_run:c('f_continue'), fast:c('f_fast'), workers:v('f_workers'),
             section_size:v('f_section_size'),
             conjecture_policy:v('f_conjecture_policy'),
+            planner_tier:v('f_planner_tier') || 'base',
             ...common};
   const names = [...document.querySelectorAll('.bpcheck:checked')].map(n=>n.value);
   if (active === 'validate') return {action:'validate', names};
