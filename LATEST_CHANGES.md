@@ -1,5 +1,93 @@
 # Latest Changes
 
+## 2026-08-21: Keep Opaque Theorem Proofs on the Phase-2 Object Fast Path
+
+### Confirmed failure
+
+Phase 2 intentionally retained Phase-1 `.olean` files after theorem-only proof
+updates because theorem proofs are opaque to importers. The later integration
+gate nevertheless hashed the complete edited `.lean` source. It therefore
+declared the retained object stale and propagated that false invalidation into
+importers. The historical transaction rebuilt 43 of 51 modules after 42
+theorem proof-body edits, contradicting the documented fast path.
+
+### Correction
+
+- Reusable-object fingerprints now erase only theorem/lemma proof bodies.
+- Exact theorem statements, complete definition-like bodies, structures,
+  instances, imports, options, preamble commands, imported object interfaces,
+  and Lean environment files remain fingerprinted.
+- Exact source SHA-256 remains a separate persisted state check, and final
+  publication still compiles the fully assembled exact source from scratch.
+- `--continue` migrates old object keys deterministically without rebuilding
+  known-good objects. No model prompt, blueprint edge, or provider behavior
+  changes.
+
+### Validation
+
+The committed historical-shape replay contains 51 modules, 42 theorem proof
+updates, and the downstream importer that made the old key rebuild 43 modules.
+It requires zero rebuilds under the object-semantic key. Focused regressions
+also require theorem statement edits and definition-body edits to invalidate
+their objects, while an exact-source hash still changes for a theorem proof
+edit. Validation completed with all 420 Python tests passing, every committed
+Phase-1 plan replay passing with progress required, both scheduler-latency
+fixtures passing, the Phase-2 retained-candidate replay retaining its `2.741x`
+logical speedup, Python compilation, and `git diff --check`.
+
+## 2026-08-21: Enforce Header-Only Phase-1 Model Output
+
+### Confirmed failure
+
+The Phase-1 prompt told models to end ordinary definitions in `:= sorry`, but
+also allowed a definition node to become a structure. In Simplex
+`run-20260821-105325`, `def:cpwl-function` was described by both the blueprint
+and compact plan as a predicate, yet generation emitted a `Prop`-valued
+structure with data fields. Lean rejected that structure. The first targeted
+repair correctly translated its fields into a completed predicate body, but
+the pipeline then persisted that entire body as the candidate-derived "exact
+typed contract" while simultaneously asking the next repair to end in
+`:= sorry`. The next response satisfied both contradictory instructions by
+moving the predicate formula into the result type, corrupting the public
+contract and triggering downstream correction work.
+
+### Correction
+
+- Phase-1 generation and patch prompts now distinguish an ordinary predicate
+  (`def ... : Prop := sorry`) from a genuinely bundled data object. A structure
+  cannot be used merely to package predicate conditions or witnesses.
+- Every Phase-1 model-response path now passes through one provider-neutral
+  ingestion boundary. Completed ordinary definition bodies and theorem proofs
+  are reduced to their public header plus terminal `:= sorry` before contract
+  realization, deterministic checking, timeout salvage, or targeted patching.
+- The exact historical malformed form `structure NAME ... : Prop where ...`
+  is normalized at that same boundary to `def NAME ... : Prop := sorry`.
+  This preserves the already-emitted public binders and result sort without a
+  Lean failure or model repair. Type-valued structures are not rewritten.
+- Candidate-derived typed contracts strip ordinary bodies independently, so a
+  missed or historical unnormalised candidate cannot feed implementation text
+  back to a model as an authoritative target signature.
+- The existing transparent alias to a same-node, candidate-owned structural
+  interface remains unchanged.
+
+### Validation
+
+The regression fixture contains the actual completed CPWL predicate returned
+by the historical repair. It verifies deterministic deferral to
+`def ... : Prop := sorry`, header-only contract extraction, telemetry, and
+preservation of the structural-alias exception.
+
+Validation completed on 2026-08-21:
+
+- the full Python suite passed: 416 tests;
+- the committed historical Phase-1 plan replay passed with progress required;
+- the committed scheduler-latency replay passed for both historical fixtures;
+- a real `codex:gpt-5.5` call through the production read-only runner returned
+  an ordinary CPWL predicate ending in `:= sorry` in 14.4 seconds, with no
+  completed body or predicate-as-structure substitution;
+- that exact declaration compiled with the repository's Lean/Mathlib
+  toolchain; Lean emitted only the expected `declaration uses sorry` warning.
+
 ## 2026-08-21: Publish Implemented Phase-2 Definition Bodies to Importers
 
 ### Confirmed failure

@@ -96,3 +96,10 @@ statement-only control: a statement timeout revises the Lean interface plan,
 whereas a passing statement control preserves the interface and corrects only
 the implementation. Neither route may weaken or edit the blueprint, and both
 must rerun the normal deterministic, Lean, semantic, and integration gates.
+
+The `run-20260821-105325` opaque-theorem fixture records a 51-module Phase-2
+integration transaction in which the old whole-source cache key rebuilt 43
+modules after 42 theorem proof-body edits reached one importer. Its regression
+requires the reusable-object key to ignore only opaque theorem/lemma bodies.
+Exact theorem statements, definition bodies, imports, the Lean environment,
+and final assembled source remain invalidating and are checked separately.

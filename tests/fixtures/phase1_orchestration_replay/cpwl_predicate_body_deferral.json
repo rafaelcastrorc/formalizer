@@ -1,0 +1,7 @@
+{
+  "label": "def:cpwl-function",
+  "malformed_predicate_structure": "structure def_cpwl_function (n : ℕ) (f : (Fin n → ℝ) → ℝ) : Prop where\n  continuous : Continuous f\n  pieces : Type\n  finite_pieces : Fintype pieces\n  carrier : pieces → Set (Fin n → ℝ)",
+  "completed_predicate": "def def_cpwl_function (n : ℕ) (f : (Fin n → ℝ) → ℝ) : Prop :=\n  Continuous f ∧\n    ∃ pieces : Type, ∃ _ : Fintype pieces, ∃ carrier : pieces → Set (Fin n → ℝ),\n      (∀ x : Fin n → ℝ, ∃ P : pieces, x ∈ carrier P)",
+  "expected_header": "def def_cpwl_function (n : ℕ) (f : (Fin n → ℝ) → ℝ) : Prop",
+  "expected_deferred": "def def_cpwl_function (n : ℕ) (f : (Fin n → ℝ) → ℝ) : Prop := sorry"
+}
