@@ -1,0 +1,3 @@
+I'll check the local Mathlib source for the pointwise Set addition instances and Finset.sum import paths needed for `def_pk`.
+
+Grep num_files=false

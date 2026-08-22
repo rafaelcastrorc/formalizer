@@ -1,0 +1,5 @@
+<function_calls>
+<invoke name="Bash">
+<parameter name="command">cd /Users/bengisugerdan/rc2/formalizer/.lake/packages/mathlib/Mathlib && ls Topology/Constructions.lean Topology/Constructions/ 2>/dev/null; ls Analysis/Convex/Topology.lean Analysis/Convex/Combination.lean Algebra/Group/Pointwise/Set/Basic.lean 2>/dev/null</parameter>
+</invoke>
+</function_calls>

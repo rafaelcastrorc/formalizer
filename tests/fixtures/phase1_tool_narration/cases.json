@@ -1,0 +1,75 @@
+[
+  {
+    "case": "seq447_sonnet_tool_markup",
+    "response_file": "seq447_sonnet_tool_markup.txt",
+    "telemetry_run": "20260821-181032-ff941587",
+    "seq": 447,
+    "backend": "claude-code",
+    "model": "sonnet",
+    "effort": "medium",
+    "timeout_s": 300,
+    "duration_s": 24.2,
+    "purpose": "phase1_statement_generation",
+    "shape": "tool-invocation markup emitted as plain text",
+    "labels": [
+      "lem:P4-flat",
+      "def:T-space",
+      "lem:tab-decomp",
+      "lem:polytope-compact",
+      "lem:hull-sum",
+      "lem:support-injective"
+    ]
+  },
+  {
+    "case": "seq449_sonnet_shell_command",
+    "response_file": "seq449_sonnet_shell_command.txt",
+    "telemetry_run": "20260821-181032-ff941587",
+    "seq": 449,
+    "backend": "claude-code",
+    "model": "sonnet",
+    "effort": "medium",
+    "timeout_s": 300,
+    "duration_s": 44.3,
+    "purpose": "phase1_statement_generation",
+    "shape": "bare shell command, no Lean",
+    "labels": [
+      "lem:support-sum",
+      "lem:support-join",
+      "lem:support-inter",
+      "def:pk"
+    ]
+  },
+  {
+    "case": "seq591_sonnet_narration",
+    "response_file": "seq591_sonnet_narration.txt",
+    "telemetry_run": "20260821-181032-ff941587",
+    "seq": 591,
+    "backend": "claude-code",
+    "model": "sonnet",
+    "effort": "medium",
+    "timeout_s": 300,
+    "duration_s": 72.4,
+    "purpose": "phase1_statement_generation",
+    "shape": "investigation narration, no Lean",
+    "labels": [
+      "lem:support-inter",
+      "def:pk"
+    ]
+  },
+  {
+    "case": "seq2236_opus_tool_markup",
+    "response_file": "seq2236_opus_tool_markup.txt",
+    "telemetry_run": "20260821-181032-ff941587",
+    "seq": 2236,
+    "backend": "claude-code",
+    "model": "opus",
+    "effort": "high",
+    "timeout_s": 600,
+    "duration_s": 488.8,
+    "purpose": "phase1_statement_generation",
+    "shape": "tool-invocation markup emitted as plain text (escalation tier)",
+    "labels": [
+      "lem:support-sum"
+    ]
+  }
+]
