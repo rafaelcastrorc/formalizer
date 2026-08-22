@@ -740,8 +740,17 @@ compact semantic plan plus candidate-derived typed contracts described above.
    `import Mathlib` diagnostic retry runs only for missing-name errors that an
    import can plausibly resolve. Type mismatches, heartbeat exhaustion, and
    unfinished tactics are never compiled a second time merely with a broader
-   import. Every generation prompt carries a write-discipline rule: spend at
-   most half the budget exploring, and always emit the requested code.
+   import. Every generation prompt carries a write-discipline rule: the call
+   is text-only — no shell, file, search, or web tool exists, tool-invocation
+   text is rejected as commentary, and the supplied module paths, dependency
+   interfaces, and API snippets are already deterministically verified — so
+   the model must reason from the prompt and always emit the requested code
+   before the budget ends. The former "spend at most half the budget
+   exploring" allowance was removed after recorded read-only Claude calls
+   answered it with tool-invocation pantomime and investigation narration
+   instead of Lean; no backend can actually explore, and the timeout
+   protections (leave time to emit, an imperfect reply beats none) are
+   retained.
 2. **Phase 2 — bodies and proofs top-down.** Phase 1
    freezes exact declaration headers/interfaces but leaves both theorem proofs
    and typed `def`/`abbrev` bodies as terminal `sorry`. Phase 2 implements every
