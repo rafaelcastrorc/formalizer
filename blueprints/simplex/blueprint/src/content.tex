@@ -1,1010 +1,1481 @@
-% Blueprint for "Better Neural Network Expressivity: Subdividing the Simplex"
-% by Egor Bakaev, Florestan Brunck, Christoph Hertrich, Jack Stade, and
-% Amir Yehudayoff.
-%
-% The blueprint follows the two-kind model:
-%   * settled library prerequisites are leaves marked \mathlibok;
-%   * paper-specific or library-missing material is stated as formalization
-%     targets with complete proofs when the paper supplies or reconstructs them;
-%   * cited external theorems whose proofs are not in the paper are retained and
-%     marked \notready with TODO comments.
+% Complete dependency blueprint for arXiv:2505.14338v3.
+% Paper-specific results are intentionally not marked \leanok/\mathlibok.
+% External results whose proofs are cited but not reproduced are marked
+% \notready rather than being silently treated as available.
 
-\chapter{Preliminaries and Expressivity Setup}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\CPWL}{\operatorname{CPWL}}
+\newcommand{\ReLU}{\operatorname{ReLU}}
+\newcommand{\MAX}{\operatorname{MAX}}
+\newcommand{\PolyC}{\mathcal{P}}
+\newcommand{\Tspace}{\mathcal{T}}
 
-\begin{definition}[Binary maximum on real numbers]
-  \label{def:binary-max}
-  \lean{max}
-  \mathlibok
-  For real numbers $a,b \in \R$, their binary maximum is
-  $\max(a,b)$, characterized by $\max(a,b) \ge a$, $\max(a,b) \ge b$, and
-  if $c \ge a$ and $c \ge b$ then $c \ge \max(a,b)$.
+\chapter{Neural-network depth and the main results}
+
+\begin{definition}[Rectified linear unit]
+  \label{def:relu-scalar}
+  The rectified linear unit is the scalar function
+  $\ReLU(t)=\max\{0,t\}$.  For a vector, $\ReLU$ denotes coordinatewise
+  application of this function.
 \end{definition}
 
-\begin{definition}[Affine maps]
-  \label{def:affine-map}
-  \lean{AffineMap}
-  \mathlibok
-  An affine map $A : \R^m \to \R^n$ has the form $A(x)=L(x)+b$ for a linear map
-  $L : \R^m \to \R^n$ and a vector $b \in \R^n$.
-\end{definition}
-
-\begin{definition}[The ReLU function]
-  \label{def:relu-function}
-  \uses{def:binary-max}
-  The rectified linear unit is the function $\ReLU : \R \to \R$ defined by
-  $\ReLU(t)=\max\{0,t\}$.  Applied to a vector, $\ReLU$ acts coordinatewise.
-\end{definition}
-
-\begin{definition}[ReLU network with $k$ hidden layers]
+\begin{definition}[ReLU network and hidden-layer depth]
   \label{def:relu-network}
-  \uses{def:relu-function, def:affine-map}
-  A ReLU network on $\R^n$ with $k$ hidden layers is specified by affine maps
-  $T^{(i)}:\R^{n_{i-1}}\to\R^{n_i}$ for $i=1,\ldots,k+1$, with
-  $n_0=n$ and $n_{k+1}=1$.  It computes
+  \uses{def:relu-scalar}
+  Let $n_0,\ldots,n_{k+1}$ be positive integers and let
+  $T^{(i)}:\R^{n_{i-1}}\to\R^{n_i}$ be affine for
+  $i=1,\ldots,k+1$.  The associated ReLU network computes
   \[
-    T^{(k+1)}\circ \ReLU \circ T^{(k)}\circ \cdots \circ
-    \ReLU \circ T^{(2)}\circ \ReLU \circ T^{(1)}.
+    T^{(k+1)}\circ\ReLU\circ T^{(k)}\circ\cdots\circ
+    \ReLU\circ T^{(1)}.
   \]
+  It has $k$ hidden layers.  Its size is the total number of hidden neurons,
+  equivalently the sum $n_1+\cdots+n_k$ in the layered presentation.
 \end{definition}
 
-\begin{definition}[Continuous piecewise linear functions]
-  \label{def:cpwl}
-  A function $f:\R^n\to\R$ is continuous piecewise linear, abbreviated CPWL,
-  if $\R^n$ admits a finite polyhedral subdivision such that $f$ restricts to an
-  affine function on every cell of the subdivision and the restrictions agree
-  continuously on common faces.
+\begin{definition}[Continuous piecewise-linear function]
+  \label{def:cpwl-function}
+  A function $f:\R^n\to\R$ is continuous piecewise linear (CPWL) if it is
+  continuous and there are finitely many polyhedra covering $\R^n$ such that
+  the restriction of $f$ to each polyhedron is affine.
 \end{definition}
 
 \begin{lemma}[ReLU networks compute CPWL functions]
-  \label{lem:relu-network-cpwl}
-  \uses{def:relu-network, def:cpwl}
-  Every function computed by a ReLU network is CPWL.
+  \label{lem:relu-network-is-cpwl}
+  \uses{def:relu-network, def:cpwl-function}
+  Every scalar-valued function computed by a finite ReLU network is CPWL.
 \end{lemma}
 \begin{proof}
-  \uses{def:relu-network, def:relu-function, def:cpwl}
-  Affine maps are CPWL.  The scalar function $t\mapsto \max\{0,t\}$ is affine
-  on the two half-lines $t\le 0$ and $t\ge 0$, and the two affine pieces agree
-  at $0$, so it is CPWL.  Coordinatewise application preserves finite
-  polyhedral subdivisions by intersecting the preimages of the coordinate
-  break hyperplanes.  Finally, a composition of CPWL maps is CPWL after
-  pulling back and refining the finitely many subdivisions.  Applying these
-  observations to each affine layer and ReLU layer in Definition~\ref{def:relu-network}
-  gives the claim.
+  \uses{def:relu-scalar, def:relu-network, def:cpwl-function}
+  Each affine coordinate function is CPWL.  If $g$ is CPWL, then the finitely
+  many cells on which $g$ is affine can be cut further by the affine
+  inequalities $g\geq0$ and $g\leq0$; on the resulting finite polyhedral
+  refinement, $\ReLU\circ g$ equals either $g$ or zero and is therefore CPWL.
+  A finite tuple of CPWL functions admits the common refinement of their
+  finitely many cell decompositions, and postcomposition of that tuple with an
+  affine map is affine on every cell of the refinement.  Starting with
+  $T^{(1)}$ and applying these two observations alternately through all hidden
+  layers proves the claim by induction on $k$.
 \end{proof}
 
-\begin{definition}[$\CPWL_n$ and $\reluset_{n,k}$]
-  \label{def:cpwl-reluset}
-  \uses{def:relu-network, def:cpwl}
-  Let $\CPWL_n$ be the set of CPWL functions $f:\R^n\to\R$.  Let
-  $\reluset_{n,k}$ be the subset of $\CPWL_n$ consisting of functions
-  representable by ReLU networks with $k$ hidden layers.
-\end{definition}
+\section{The ternary depth recursion}
 
-\begin{definition}[The maximum function $\MAX_n$]
-  \label{def:maxn}
-  \uses{def:binary-max}
-  For $n\ge 1$, define
+\begin{definition}[The functions $T_{a,b}$]
+  \label{def:t-function}
+  \uses{def:max-function}
+  For integers $a,b\geq0$, define $T_{a,b}:\R^{4a+b}\to\R$ by
   \[
-    \MAX_n(x_1,\ldots,x_n)=\max\{x_1,\ldots,x_n\}.
-  \]
-\end{definition}
-
-\begin{lemma}[Binary maximum has one hidden layer]
-  \label{lem:max2-one-hidden}
-  \uses{def:maxn, def:relu-network}
-  The function $\MAX_2(x_1,x_2)=\max\{x_1,x_2\}$ is representable by a ReLU
-  network with one hidden layer.
-\end{lemma}
-\begin{proof}
-  \uses{def:relu-function, def:maxn}
-  For all $x_1,x_2\in\R$,
-  \[
-    \max\{x_1,x_2\}=x_1+\ReLU(x_2-x_1).
-  \]
-  If $x_2\le x_1$, the ReLU term is $0$ and the expression equals $x_1$.
-  If $x_2\ge x_1$, the ReLU term is $x_2-x_1$ and the expression equals
-  $x_2$.  This is exactly one affine input to a ReLU neuron, followed by one
-  affine output map.
-\end{proof}
-
-\begin{lemma}[Binary tree computation of $\MAX_m$]
-  \label{lem:binary-tree-max}
-  \uses{lem:max2-one-hidden, def:relu-network, def:maxn}
-  For every $m\ge 1$, $\MAX_m$ can be computed with
-  $\lceil \log_2 m\rceil$ hidden layers.
-\end{lemma}
-\begin{proof}
-  \uses{lem:max2-one-hidden, def:maxn}
-  Pair the $m$ inputs and compute the maximum of each pair using
-  Lemma~\ref{lem:max2-one-hidden}.  If $m$ is odd, pass the unpaired input
-  forward by an affine coordinate.  One layer reduces the number of live
-  quantities from $m$ to at most $\lceil m/2\rceil$ while preserving their
-  maximum.  Repeating this reduction for $\lceil\log_2 m\rceil$ rounds leaves
-  one quantity, and induction over the rounds shows that the remaining quantity
-  is $\MAX_m$.
-\end{proof}
-
-\begin{theorem}[Wang--Sun max-affine representation]
-  \label{thm:wang-sun-representation}
-  \uses{def:cpwl, def:maxn, def:affine-map}
-  \notready
-  For every $f\in\CPWL_n$, there exist affine maps
-  $A_1,\ldots,A_s:\R^n\to\R^{n+1}$ and signs
-  $\sigma_1,\ldots,\sigma_s\in\{\pm 1\}$ such that
-  \[
-    f(x)=\sum_{i=1}^s \sigma_i \MAX_{n+1}(A_i(x)).
-  \]
-\end{theorem}
-% TODO: external theorem of Wang--Sun [WS05], quoted without proof in this
-% paper.  Reconstruct from generalized hinging hyperplanes before marking ready.
-
-\begin{corollary}[Classical logarithmic CPWL upper bound]
-  \label{cor:classical-cpwl-bound}
-  \uses{thm:wang-sun-representation, lem:binary-tree-max, def:cpwl-reluset}
-  Every function in $\CPWL_n$ can be represented by a ReLU network with
-  $\lceil\log_2(n+1)\rceil$ hidden layers; equivalently
-  $\CPWL_n\subseteq \reluset_{n,\lceil\log_2(n+1)\rceil}$.
-\end{corollary}
-\begin{proof}
-  \uses{thm:wang-sun-representation, lem:binary-tree-max, def:relu-network}
-  Write $f$ as the signed sum of $\MAX_{n+1}$ applied to affine maps, as in
-  Theorem~\ref{thm:wang-sun-representation}.  By
-  Lemma~\ref{lem:binary-tree-max}, each $\MAX_{n+1}$ term is computable with
-  $\lceil\log_2(n+1)\rceil$ hidden layers after the affine input map.  Running
-  the finitely many subnetworks in parallel and taking the signed affine sum in
-  the output layer preserves the same depth.  Thus $f$ has the stated depth.
-\end{proof}
-
-\begin{conjecture}[Hertrich--Basu--Di Summa--Skutella depth conjecture]
-  \label{conj:hbdss-max-depth}
-  \uses{def:maxn, def:cpwl-reluset}
-  The previously conjectured sharp bound was that $\MAX_n$ requires
-  $\lceil\log_2 n\rceil$ hidden layers, and consequently that the bound in
-  Corollary~\ref{cor:classical-cpwl-bound} is optimal for general CPWL
-  functions.
-\end{conjecture}
-
-\begin{lemma}[Known lower bound: $\MAX_3$ is not one-hidden-layer]
-  \label{lem:max3-depth-lower-bound}
-  \uses{def:maxn, def:relu-network}
-  \notready
-  The function $\MAX_3$ cannot be represented by a ReLU network with one hidden
-  layer; it needs at least two hidden layers.
-\end{lemma}
-% TODO: external lower bound due to Mukherjee--Basu [MB17], cited in the
-% introduction.  The paper uses it only to justify exactness in Proposition 3.
-
-\chapter{Computing the Maximum of Five Inputs}
-
-\begin{definition}[Auxiliary term $P_1$]
-  \label{def:p1}
-  \uses{def:maxn}
-  For $x\in\R^5$, define
-  \[
-    P_1(x)=
-    \max\big(\max(2x_5,x_1+x_2),\max(x_1,x_3)+\max(x_1,x_4)\big).
-  \]
-  Equivalently,
-  \[
-    P_1(x)=\max(2x_5,x_1+x_2,2x_1,x_1+x_3,x_1+x_4,x_3+x_4).
-  \]
-\end{definition}
-
-\begin{definition}[Auxiliary term $P_2$]
-  \label{def:p2}
-  \uses{def:maxn}
-  For $x\in\R^5$, define
-  \[
-    P_2(x)=
-    \max\big(\max(2x_5,x_1+x_2),\max(x_2,x_3)+\max(x_2,x_4)\big),
-  \]
-  equivalently
-  \[
-    P_2(x)=\max(2x_5,x_1+x_2,2x_2,x_2+x_3,x_2+x_4,x_3+x_4).
-  \]
-\end{definition}
-
-\begin{definition}[Auxiliary term $P_3$]
-  \label{def:p3}
-  \uses{def:maxn}
-  For $x\in\R^5$, define
-  \[
-    P_3(x)=
-    \max\big(\max(2x_5,x_3+x_4),\max(x_3,x_1)+\max(x_3,x_2)\big),
-  \]
-  equivalently
-  \[
-    P_3(x)=\max(2x_5,x_3+x_4,2x_3,x_3+x_1,x_3+x_2,x_1+x_2).
-  \]
-\end{definition}
-
-\begin{definition}[Auxiliary term $P_4$]
-  \label{def:p4}
-  \uses{def:maxn}
-  For $x\in\R^5$, define
-  \[
-    P_4(x)=
-    \max\big(\max(2x_5,x_3+x_4),\max(x_4,x_1)+\max(x_4,x_2)\big),
-  \]
-  equivalently
-  \[
-    P_4(x)=\max(2x_5,x_3+x_4,2x_4,x_4+x_1,x_4+x_2,x_1+x_2).
-  \]
-\end{definition}
-
-\begin{definition}[Auxiliary term $Q$]
-  \label{def:q}
-  \uses{def:maxn}
-  For $x\in\R^5$, define
-  \[
-    Q(x)=\max\big(2x_5,\max(x_1+x_2,x_3+x_4)\big)
-        =\max(2x_5,x_1+x_2,x_3+x_4).
-  \]
-\end{definition}
-
-\begin{definition}[Auxiliary term $R_{13}$]
-  \label{def:r13}
-  \uses{def:maxn}
-  For $x\in\R^5$, define
-  \[
-    R_{13}(x)=
-    \max\big(\max(2x_5,x_1+x_3),\max(x_1+x_2,x_3+x_4)\big).
-  \]
-  Thus $R_{13}(x)=\max(2x_5,x_1+x_3,x_1+x_2,x_3+x_4)$.
-\end{definition}
-
-\begin{definition}[Auxiliary term $R_{14}$]
-  \label{def:r14}
-  \uses{def:maxn}
-  For $x\in\R^5$, define
-  \[
-    R_{14}(x)=
-    \max\big(\max(2x_5,x_1+x_4),\max(x_1+x_2,x_3+x_4)\big).
-  \]
-  Thus $R_{14}(x)=\max(2x_5,x_1+x_4,x_1+x_2,x_3+x_4)$.
-\end{definition}
-
-\begin{definition}[Auxiliary term $R_{23}$]
-  \label{def:r23}
-  \uses{def:maxn}
-  For $x\in\R^5$, define
-  \[
-    R_{23}(x)=
-    \max\big(\max(2x_5,x_2+x_3),\max(x_1+x_2,x_3+x_4)\big).
-  \]
-  Thus $R_{23}(x)=\max(2x_5,x_2+x_3,x_1+x_2,x_3+x_4)$.
-\end{definition}
-
-\begin{definition}[Auxiliary term $R_{24}$]
-  \label{def:r24}
-  \uses{def:maxn}
-  For $x\in\R^5$, define
-  \[
-    R_{24}(x)=
-    \max\big(\max(2x_5,x_2+x_4),\max(x_1+x_2,x_3+x_4)\big).
-  \]
-  Thus $R_{24}(x)=\max(2x_5,x_2+x_4,x_1+x_2,x_3+x_4)$.
-\end{definition}
-
-\begin{definition}[The two-layer candidate $M$]
-  \label{def:m-function}
-  \uses{def:p1, def:p2, def:p3, def:p4, def:q, def:r13, def:r14, def:r23, def:r24}
-  Define $M:\R^5\to\R$ by
-  \[
-    M(x)=\frac12\big(P_1(x)+P_2(x)+P_3(x)+P_4(x)+Q(x)
-      -R_{13}(x)-R_{14}(x)-R_{23}(x)-R_{24}(x)\big).
-  \]
-\end{definition}
-
-\begin{lemma}[Two-hidden-layer realizability of the nine terms]
-  \label{lem:nine-terms-two-hidden}
-  \uses{def:p1, def:p2, def:p3, def:p4, def:q, def:r13, def:r14, def:r23, def:r24, lem:max2-one-hidden}
-  Each of $P_1,P_2,P_3,P_4,Q,R_{13},R_{14},R_{23},R_{24}$ can be computed by a
-  ReLU network with two hidden layers.
-\end{lemma}
-\begin{proof}
-  \uses{lem:max2-one-hidden, def:relu-network}
-  Every displayed term is obtained from affine functions by first computing a
-  finite list of binary maxima and then taking one final binary maximum between
-  affine combinations of the first-layer quantities.  For example, $P_1$ first
-  computes
-  $\max(2x_5,x_1+x_2)$, $\max(x_1,x_3)$, and $\max(x_1,x_4)$, and then computes
-  the maximum of the first quantity and the sum of the latter two.  The other
-  eight terms have the same form, with some summands omitted.  By
-  Lemma~\ref{lem:max2-one-hidden}, each binary maximum costs one hidden layer,
-  and affine sums are handled by affine maps between layers.  Hence each term
-  has depth two.
-\end{proof}
-
-\begin{lemma}[Symmetries of $M$]
-  \label{lem:m-symmetries}
-  \uses{def:m-function}
-  The expression $M$ is invariant under swapping indices $1$ and $2$, under
-  swapping indices $3$ and $4$, and under simultaneously swapping the pair
-  $(1,2)$ with the pair $(3,4)$.
-\end{lemma}
-\begin{proof}
-  \uses{def:p1, def:p2, def:p3, def:p4, def:q, def:r13, def:r14, def:r23, def:r24, def:m-function}
-  Under $1\leftrightarrow 2$, the terms $P_1$ and $P_2$ are exchanged,
-  $R_{13}$ and $R_{23}$ are exchanged, and $R_{14}$ and $R_{24}$ are exchanged;
-  $P_3$, $P_4$, and $Q$ remain fixed.  Under $3\leftrightarrow4$, the terms
-  $P_3$ and $P_4$ are exchanged, $R_{13}$ and $R_{14}$ are exchanged, and
-  $R_{23}$ and $R_{24}$ are exchanged; the other terms remain fixed.  Under
-  $(1,2)\leftrightarrow(3,4)$, the terms $P_1$ and $P_3$ are exchanged,
-  $P_2$ and $P_4$ are exchanged, and $R_{14}$ and $R_{23}$ are exchanged; the
-  remaining terms are fixed.  Since $M$ is the same signed half-sum of the
-  resulting multiset of terms, $M$ is invariant under all three operations.
-\end{proof}
-
-\begin{lemma}[The case where $x_5$ is largest]
-  \label{lem:m-x5-largest}
-  \uses{def:m-function, def:maxn}
-  If $x_5=\MAX_5(x)$, then $M(x)=x_5$.
-\end{lemma}
-\begin{proof}
-  \uses{def:p1, def:p2, def:p3, def:p4, def:q, def:r13, def:r14, def:r23, def:r24, def:m-function}
-  If $x_5$ is the largest coordinate, then for every pair $i,j$ one has
-  $x_i+x_j\le 2x_5$.  Inspecting the displayed maxima in the definitions of
-  $P_1,P_2,P_3,P_4,Q,R_{13},R_{14},R_{23},R_{24}$, each of the nine terms is
-  therefore equal to $2x_5$.  Substitution in Definition~\ref{def:m-function}
-  gives
-  \[
-    M(x)=\frac12(5\cdot 2x_5-4\cdot 2x_5)=x_5.
-  \]
-\end{proof}
-
-\begin{lemma}[The normalized case where $x_1$ is largest]
-  \label{lem:m-x1-largest}
-  \uses{def:m-function, def:maxn}
-  If $x_1=\MAX_5(x)$, then $M(x)=x_1$.
-\end{lemma}
-\begin{proof}
-  \uses{def:p1, def:p2, def:p3, def:p4, def:q, def:r13, def:r14, def:r23, def:r24, def:m-function}
-  Since $x_1$ is largest, $2x_1$ dominates all entries in $P_1$, so
-  $P_1(x)=2x_1$.  Also $x_1+x_2\ge 2x_2$ and
-  $x_1+x_2\ge x_2+x_4$, hence
-  \[
-    P_2(x)=\max(2x_5,x_1+x_2,x_2+x_3,x_3+x_4)=R_{23}(x).
-  \]
-  Similarly, $x_1+x_3\ge 2x_3$ and $x_1+x_3\ge x_2+x_3$, so
-  \[
-    P_3(x)=\max(2x_5,x_3+x_4,x_1+x_3,x_1+x_2)=R_{13}(x).
-  \]
-  Likewise $x_1+x_4\ge 2x_4$ and $x_1+x_4\ge x_2+x_4$, giving
-  \[
-    P_4(x)=\max(2x_5,x_3+x_4,x_1+x_4,x_1+x_2)=R_{14}(x).
-  \]
-  Finally $x_1+x_2\ge x_2+x_4$, so
-  \[
-    R_{24}(x)=\max(2x_5,x_1+x_2,x_3+x_4)=Q(x).
-  \]
-  In the signed half-sum defining $M$, the equal pairs
-  $P_2=R_{23}$, $P_3=R_{13}$, $P_4=R_{14}$, and $Q=R_{24}$ cancel.  Therefore
-  $M(x)=\frac12P_1(x)=x_1$.
-\end{proof}
-
-\begin{lemma}[Claim 4: identity $\MAX_5=M$]
-  \label{lem:max5-equals-m}
-  \uses{def:m-function, def:maxn}
-  For every $x\in\R^5$, $\MAX_5(x)=M(x)$.
-\end{lemma}
-\begin{proof}
-  \uses{lem:m-x5-largest, lem:m-x1-largest, lem:m-symmetries}
-  If $x_5$ is a largest coordinate, Lemma~\ref{lem:m-x5-largest} applies.
-  Otherwise some coordinate among $x_1,x_2,x_3,x_4$ is largest.  By the
-  symmetries of Lemma~\ref{lem:m-symmetries}, the four cases with a largest
-  coordinate in $\{1,2,3,4\}$ reduce to the case $x_1=\MAX_5(x)$, which is
-  Lemma~\ref{lem:m-x1-largest}.  Hence $M$ agrees with $\MAX_5$ on all inputs.
-\end{proof}
-
-\begin{proposition}[Proposition 3: exact depth of $\MAX_5$]
-  \label{prop:max5-depth-two}
-  \uses{lem:max5-equals-m, lem:nine-terms-two-hidden, lem:max3-depth-lower-bound}
-  The minimum number of hidden layers needed to compute $\MAX_5$ is exactly two.
-\end{proposition}
-\begin{proof}
-  \uses{lem:max5-equals-m, lem:nine-terms-two-hidden, lem:max3-depth-lower-bound}
-  The upper bound follows because each of the nine terms in
-  Definition~\ref{def:m-function} is computable with two hidden layers by
-  Lemma~\ref{lem:nine-terms-two-hidden}, and $M$ is an affine combination of
-  those terms.  By Lemma~\ref{lem:max5-equals-m}, this computes $\MAX_5$.
-  For the lower bound, if $\MAX_5$ had a one-hidden-layer representation, then
-  restricting to the affine subspace
-  $(x_1,x_2,x_3,x_4,x_5)=(y_1,y_2,y_3,c,c)$ with $c$ smaller than all relevant
-  $y_i$ on each translated test region would give a one-hidden-layer
-  representation of $\MAX_3$.  This contradicts
-  Lemma~\ref{lem:max3-depth-lower-bound}.  Therefore one hidden layer does not
-  suffice, while two do.
-\end{proof}
-
-\chapter{The Improved Logarithmic Upper Bound}
-
-\begin{definition}[The function $T_{a,b}$]
-  \label{def:tab}
-  \uses{def:maxn}
-  For nonnegative integers $a,b$, define $T_{a,b}:\R^{4a+b}\to\R$ by
-  \[
-  \begin{aligned}
-    T_{a,b}(x)=\max(&\max(x_1,x_2)+\max(x_3,x_4),\\
-      &\max(x_5,x_6)+\max(x_7,x_8),\ldots,\\
-      &\max(x_{4a-3},x_{4a-2})+\max(x_{4a-1},x_{4a}),\\
-      &x_{4a+1},\ldots,x_{4a+b}).
-  \end{aligned}
+  T_{a,b}(x)=\max\left(
+    \left\{\max(x_{4j+1},x_{4j+2})+
+             \max(x_{4j+3},x_{4j+4}):0\leq j<a\right\}
+    \cup\{x_{4a+1},\ldots,x_{4a+b}\}\right).
   \]
   Thus $T_{0,b}=\MAX_b$.
 \end{definition}
 
-\begin{definition}[The span $\mathcal{T}_{a,b}$]
-  \label{def:calT}
-  \uses{def:tab, def:affine-map}
-  Let $\mathcal{T}_{a,b}$ be the vector space spanned by all functions of the
-  form $T_{a,b}\circ L$, where $L:\R^{4a+b}\to\R^{4a+b}$ is linear.
+\begin{definition}[The vector spaces $\Tspace_{a,b}(N)$]
+  \label{def:t-space}
+  \uses{def:t-function}
+  For an ambient input dimension $N$, let $\Tspace_{a,b}(N)$ be the real
+  vector space spanned by all functions $T_{a,b}\circ L$, where
+  $L:\R^N\to\R^{4a+b}$ is linear.  This explicit parameter records every
+  ignored-coordinate extension used below.
 \end{definition}
 
-\begin{lemma}[Rewriting $T_{a,b+4}$ around four new coordinates]
-  \label{lem:tab-plus-four-rewrite}
-  \uses{def:tab}
-  If $i=4a+b$, then $T_{a,b+4}$ can be written as
-  \[
-    T_{a,b+4}(x)=\max(x_{i+1},x_{i+2},x_{i+3},x_{i+4},T_{a,b}(x)).
-  \]
+\begin{lemma}[Depth transfer along $\Tspace_{a,b}(N)$]
+  \label{lem:t-space-depth-transfer}
+  \uses{def:t-space, lem:affine-precomposition,
+    lem:parallel-linear-combination}
+  If $T_{a,b}$ is computable with at most $k$ hidden layers, then every
+  function in $\Tspace_{a,b}(N)$ is computable with at most $k$ hidden layers
+  on $\R^N$.
 \end{lemma}
 \begin{proof}
-  \uses{def:tab}
-  The first $4a$ coordinates of $T_{a,b+4}$ form the same $a$ paired-sum
-  blocks as in $T_{a,b}$.  The next $b$ coordinates are the extra arguments of
-  $T_{a,b}$.  The final four coordinates are exactly
-  $x_{i+1},x_{i+2},x_{i+3},x_{i+4}$.  Taking the maximum over the union of
-  these entries is therefore the displayed expression.
+  \uses{def:t-space, lem:affine-precomposition,
+    lem:parallel-linear-combination}
+  Every generator $T_{a,b}\circ L$ has depth at most $k$ by affine
+  precomposition.  Every vector of the span is a finite linear combination of
+  such generators, and the parallel linear-combination lemma preserves the
+  same depth.
 \end{proof}
 
-\begin{lemma}[Membership of the $P$-terms in $\mathcal{T}_{a+1,b+1}$]
-  \label{lem:p-terms-calT}
-  \uses{def:calT, def:p1, def:p2, def:p3, def:p4}
-  In the proof of Claim 5, the four terms corresponding to
-  $P_1,P_2,P_3,P_4$ lie in $\mathcal{T}_{a+1,b+1}$.
+\begin{lemma}[Lifted $P$-terms in Claim 5]
+  \label{lem:claim-five-p-membership}
+  \uses{def:t-function, def:t-space}
+  Put $i=4a+b$ and replace $x_5$ in $P_1,P_2,P_3,P_4$ by
+  $T_{a,b}(x_1,\ldots,x_i)$ while replacing $x_1,\ldots,x_4$ by the four new
+  coordinates $x_{i+1},\ldots,x_{i+4}$.  Each resulting function belongs to
+  $\Tspace_{a+1,b+1}(4a+b+5)$.
 \end{lemma}
 \begin{proof}
-  \uses{def:calT, def:tab}
-  The term corresponding to $P_1$ is
+  \uses{def:t-function, def:t-space}
+  For example the lifted $P_1$ is
   \[
-    \max\big(2T_{a,b},x_{i+1}+x_{i+2},
-      \max(x_{i+1},x_{i+3})+\max(x_{i+1},x_{i+4})\big).
+  2\max\left(T_{a,b},\frac{x_{i+1}+x_{i+2}}2,
+       \max\!\left(\frac{x_{i+1}}2,\frac{x_{i+3}}2\right)+
+       \max\!\left(\frac{x_{i+1}}2,\frac{x_{i+4}}2\right)\right).
   \]
-  Pulling out the factor $2$ rewrites it as
+  A linear coordinate map feeds the old $4a+b$ coordinates into the
+  $T_{a,b}$ part of $T_{a+1,b+1}$, feeds the indicated halved new coordinates
+  into its one additional four-coordinate block, and uses one unused extra
+  coordinate.  Multiplication by $2$ is allowed in the span.  The same map
+  with the evident coordinate permutations gives $P_2,P_3,P_4$.
+\end{proof}
+
+\begin{lemma}[Lifted $Q$-term in Claim 5]
+  \label{lem:claim-five-q-membership}
+  \uses{def:t-function, def:t-space}
+  Under the substitution of Lemma~\ref{lem:claim-five-p-membership}, the
+  resulting $Q$ belongs to $\Tspace_{a,b+2}(4a+b+5)$.
+\end{lemma}
+\begin{proof}
+  \uses{def:t-function, def:t-space}
+  The lifted term is
   \[
     2\max\left(T_{a,b},\frac{x_{i+1}+x_{i+2}}2,
-      \max\left(\frac{x_{i+1}}2,\frac{x_{i+3}}2\right)
-      +\max\left(\frac{x_{i+1}}2,\frac{x_{i+4}}2\right)\right).
+                         \frac{x_{i+3}+x_{i+4}}2\right).
   \]
-  This is a scalar multiple of $T_{a+1,b+1}\circ L$ for a linear map $L$: the
-  new paired-sum block is the pair of binary maxima displayed above, and the
-  extra coordinate is $(x_{i+1}+x_{i+2})/2$, while the old $T_{a,b}$ block is
-  passed through linearly.  Hence it lies in $\mathcal{T}_{a+1,b+1}$.  The same
-  argument with indices permuted proves the assertion for $P_2,P_3,P_4$.
+  A linear map supplies the two displayed half-sums as the two extra scalar
+  arguments of $T_{a,b+2}$; scaling by $2$ is allowed in its span.
 \end{proof}
 
-\begin{lemma}[Membership of the $Q$ and $R$ terms]
-  \label{lem:q-r-terms-calT}
-  \uses{def:calT, def:q, def:r13, def:r14, def:r23, def:r24}
-  In the proof of Claim 5, the term corresponding to $Q$ lies in
-  $\mathcal{T}_{a,b+2}$, and the terms corresponding to
-  $R_{13},R_{14},R_{23},R_{24}$ lie in $\mathcal{T}_{a,b+3}$.
+\begin{lemma}[Lifted $R$-terms in Claim 5]
+  \label{lem:claim-five-r-membership}
+  \uses{def:t-function, def:t-space}
+  Under the same substitution, each of the four resulting terms
+  $R_{13},R_{14},R_{23},R_{24}$ belongs to
+  $\Tspace_{a,b+3}(4a+b+5)$.
 \end{lemma}
 \begin{proof}
-  \uses{def:calT, def:tab}
-  The $Q$ term is
-  \[
-    \max(2T_{a,b},x_{i+1}+x_{i+2},x_{i+3}+x_{i+4})
-    =2\max\left(T_{a,b},\frac{x_{i+1}+x_{i+2}}2,
-      \frac{x_{i+3}+x_{i+4}}2\right),
-  \]
-  so it is a scalar multiple of an element of $\mathcal{T}_{a,b+2}$ after a
-  linear change of coordinates.  The $R_{13}$ term is
+  \uses{def:t-function, def:t-space}
+  For example, the lifted $R_{13}$ is
   \[
     2\max\left(T_{a,b},\frac{x_{i+1}+x_{i+3}}2,
-      \frac{x_{i+1}+x_{i+2}}2,\frac{x_{i+3}+x_{i+4}}2\right),
+      \frac{x_{i+1}+x_{i+2}}2,\frac{x_{i+3}+x_{i+4}}2\right).
   \]
-  so it lies in $\mathcal{T}_{a,b+3}$.  The formulas for
-  $R_{14},R_{23},R_{24}$ only replace the first displayed average by the
-  corresponding pair average, so the same argument applies.
+  Feed the last three linear half-sums to the three extra scalar slots of
+  $T_{a,b+3}$ and multiply by $2$.  Changing only the middle half-sum gives
+  the other three indexed terms.
 \end{proof}
 
-\begin{lemma}[Padding inclusions among the $\mathcal{T}_{a,b}$]
-  \label{lem:calT-padding}
-  \uses{def:calT, def:tab}
-  For all $a,b$, one has
-  $\mathcal{T}_{a,b+2}\subseteq\mathcal{T}_{a,b+3}\subseteq
-  \mathcal{T}_{a+1,b+1}$ after ignoring unused last coordinates.
+\begin{lemma}[First padding containment]
+  \label{lem:tspace-b2-b3}
+  \uses{def:t-space}
+  For every ambient $N$ and all $a,b\geq0$,
+  $\Tspace_{a,b+2}(N)\subseteq\Tspace_{a,b+3}(N)$.
 \end{lemma}
 \begin{proof}
-  \uses{def:calT, def:tab, def:binary-max}
-  The inclusion $\mathcal{T}_{a,b+2}\subseteq\mathcal{T}_{a,b+3}$ is obtained
-  by adding one dummy extra coordinate that is never selected.  For the second
-  inclusion, use
-  \[
-    \max(y_1,y_2)=\max(\max(y_1,y_2)+\max(0,0)).
-  \]
-  Thus two extra arguments may be encoded as one paired-sum block, with
-  remaining coordinates passed through and any unused coordinates fixed to
-  zero by the linear map.  Since $\mathcal{T}_{a,b}$ is closed under linear
-  changes of coordinates and finite linear combinations by definition, the
-  inclusions follow.
+  \uses{def:t-function, def:t-space}
+  Extend every generator $T_{a,b+2}\circ L$ by ignoring one final coordinate.
+  In the corresponding generator of $\Tspace_{a,b+3}(N)$, use a linear map that
+  duplicates one of the existing scalar arguments into the added slot.  A
+  duplicate does not change a maximum.  Linear combinations give the stated
+  containment.
 \end{proof}
 
-\begin{lemma}[Claim 5]
-  \label{lem:claim5}
-  \uses{def:calT, lem:tab-plus-four-rewrite}
+\begin{lemma}[Second padding containment]
+  \label{lem:tspace-b3-next}
+  \uses{def:t-space}
+  For every ambient $N$ and all $a,b\geq0$,
+  $\Tspace_{a,b+3}(N)\subseteq\Tspace_{a+1,b+1}(N)$.
+\end{lemma}
+\begin{proof}
+  \uses{def:t-function, def:t-space}
+  The identity
+  \[
+    \max(u,v)=\max\bigl(\max(u,v)+\max(0,0)\bigr)
+  \]
+  represents two scalar arguments of $T_{a,b+3}$ by the one new four-input
+  block of $T_{a+1,b+1}$: feed $(u,v,0,0)$ to that block.  Feed the remaining
+  $b+1$ scalar arguments to the remaining scalar slots.  This realizes each
+  generator by linear precomposition, and hence realizes its span.
+\end{proof}
+
+\begin{lemma}[Claim 5: the four-to-one span step]
+  \label{lem:claim-five}
+  \uses{def:t-space}
   Viewing $T_{a,b+4}$ as a function on $\R^{4a+b+5}$ that ignores the last
-  coordinate, one has $T_{a,b+4}\in\mathcal{T}_{a+1,b+1}$.
+  coordinate, one has
+  \[
+    T_{a,b+4}\circ\pi\in\Tspace_{a+1,b+1}(4a+b+5),
+  \]
+  where $\pi:\R^{4a+b+5}\to\R^{4a+b+4}$ forgets the last coordinate.
 \end{lemma}
 \begin{proof}
-  \uses{lem:max5-equals-m, lem:tab-plus-four-rewrite, lem:p-terms-calT, lem:q-r-terms-calT, lem:calT-padding}
-  By Lemma~\ref{lem:tab-plus-four-rewrite}, $T_{a,b+4}$ is the maximum of the
-  five quantities $x_{i+1},x_{i+2},x_{i+3},x_{i+4},T_{a,b}$.  Apply the identity
-  $\MAX_5=M$ from Lemma~\ref{lem:max5-equals-m} to these five inputs.  The four
-  resulting $P$ terms lie in $\mathcal{T}_{a+1,b+1}$ by
-  Lemma~\ref{lem:p-terms-calT}.  The $Q$ term lies in $\mathcal{T}_{a,b+2}$ and
-  the four $R$ terms lie in $\mathcal{T}_{a,b+3}$ by
-  Lemma~\ref{lem:q-r-terms-calT}; Lemma~\ref{lem:calT-padding} embeds both
-  spaces into $\mathcal{T}_{a+1,b+1}$.  Since
-  $\mathcal{T}_{a+1,b+1}$ is a vector space, the signed half-sum $M$ also lies
-  in it.  Therefore $T_{a,b+4}\in\mathcal{T}_{a+1,b+1}$.
+  \uses{lem:claim-four, lem:claim-five-p-membership,
+    lem:claim-five-q-membership, lem:claim-five-r-membership,
+    lem:tspace-b2-b3, lem:tspace-b3-next}
+  Write $i=4a+b$.  Then
+  $T_{a,b+4}=\max(x_{i+1},x_{i+2},x_{i+3},x_{i+4},T_{a,b})$.
+  Apply the signed identity of Claim~\ref{lem:claim-four} to these five
+  arguments.  The four $P$-terms already lie in
+  $\Tspace_{a+1,b+1}(4a+b+5)$.  The $Q$-term and the four $R$-terms lie in the
+  corresponding same-ambient spaces from the preceding lemmas; the two
+  padding containments put all of them in the target space.  Since this is a
+  vector space, their signed half-sum is
+  also in it.
 \end{proof}
 
-\begin{lemma}[Claim 6]
-  \label{lem:claim6}
-  \uses{lem:claim5, def:tab}
-  If $T_{3^n-1,2}$ can be computed in depth $k$, then $T_{0,3^n+2}$ can also be
-  computed in depth $k$.
+\begin{lemma}[Iterated Claim 5 containment]
+  \label{lem:claim-five-iterated}
+  \uses{lem:claim-five}
+  For every $a,b,t\geq0$ with $b\geq3t$, let
+  $\pi_t:\R^{4a+b+t}\to\R^{4a+b}$ forget the last $t$ coordinates.  Then
+  \[
+    T_{a,b}\circ\pi_t\in\Tspace_{a+t,b-3t}(4a+b+t).
+  \]
 \end{lemma}
 \begin{proof}
-  \uses{lem:claim5}
-  Claim 5 gives inclusions
-  \[
-    \mathcal{T}_{a,b+4}\subseteq \mathcal{T}_{a+1,b+1}.
-  \]
-  Starting from $(a,b)=(0,3^n-2)$ and applying this inclusion $3^n-1$ times
-  gives
-  \[
-    \mathcal{T}_{0,3^n+2}\subseteq
-    \mathcal{T}_{1,3^n-3+2}\subseteq
-    \mathcal{T}_{2,3^n-6+2}\subseteq \cdots \subseteq
-    \mathcal{T}_{3^n-1,2}.
-  \]
-  Therefore any depth-$k$ network for $T_{3^n-1,2}$ yields one for the member
-  $T_{0,3^n+2}$ of the smaller class.
+  \uses{lem:claim-five, def:t-space}
+  Induct on $t$.  The case $t=0$ is the defining generator with the identity
+  linear map.  For the successor, write the current scalar count as
+  $(b-3t-4)+4$ and apply Claim~\ref{lem:claim-five}, then use linearity and
+  precomposition to transport every element of the current span into the next
+  span.  The indices change from $(a+t,b-3t)$ to
+  $(a+t+1,b-3(t+1))$, as required.
 \end{proof}
 
-\begin{lemma}[Claim 7]
-  \label{lem:claim7}
-  \uses{def:tab, lem:max2-one-hidden}
-  If $T_{0,3^{n-1}+2}$ can be computed in depth $k-1$, then
-  $T_{3^{n-1},2}$ can be computed in depth $k$.
+\begin{lemma}[Claim 6: transfer from blocks to a large maximum]
+  \label{lem:claim-six}
+  \uses{def:t-function}
+  Let $r\geq1$.  If $T_{3^{r-1},2}$ is computable with at most $k$ hidden
+  layers, then $T_{0,3^r+2}=\MAX_{3^r+2}$ is computable with at most $k$
+  hidden layers.
 \end{lemma}
 \begin{proof}
-  \uses{def:tab, lem:max2-one-hidden}
-  In the first hidden layer, compute each of the $3^{n-1}$ quantities
-  \[
-    \max(x_{4j+1},x_{4j+2})+\max(x_{4j+3},x_{4j+4})
-  \]
-  for $j=0,\ldots,3^{n-1}-1$, using Lemma~\ref{lem:max2-one-hidden} for the two
-  binary maxima and an affine sum.  Keep the two extra inputs as affine
-  coordinates.  The remaining task is exactly to apply $T_{0,3^{n-1}+2}$ to
-  the $3^{n-1}$ computed paired-sum quantities and the two extra inputs.  By
-  hypothesis this costs $k-1$ further hidden layers, so the total depth is $k$.
+  \uses{lem:claim-five-iterated, lem:t-space-depth-transfer}
+  Apply Lemma~\ref{lem:claim-five-iterated} with
+  $(a,b,t)=(0,3^r+2,3^{r-1})$.  Since
+  $3^r+2-3\cdot3^{r-1}=2$, it gives
+  the ignored-coordinate extension of $T_{0,3^r+2}$ in
+  $\Tspace_{3^{r-1},2}(3^r+2+3^{r-1})$.  The depth-transfer lemma now gives
+  the same $k$-layer bound as for $T_{3^{r-1},2}$.
 \end{proof}
 
-\begin{theorem}[Theorem 1]
-  \label{thm:max-3n-plus-2}
-  \uses{def:maxn, def:cpwl-reluset}
-  For every $n\ge 1$, $\MAX_{3^n+2}\in\reluset_{3^n+2,n+1}$.
-\end{theorem}
+\begin{lemma}[Claim 7: one layer creates all four-input blocks]
+  \label{lem:claim-seven}
+  \uses{def:t-function, lem:max-two-relu}
+  Let $r\geq1$.  If $T_{0,3^{r-1}+2}$ is computable with at most $k-1$
+  hidden layers, then $T_{3^{r-1},2}$ is computable with at most $k$ hidden
+  layers.
+\end{lemma}
 \begin{proof}
-  \uses{prop:max5-depth-two, lem:claim6, lem:claim7, def:tab}
-  The proof is by induction on $n$.  For $n=1$, the statement is exactly the
-  two-hidden-layer upper bound for $\MAX_5$ from
-  Proposition~\ref{prop:max5-depth-two}.  For the induction step, assume
-  $T_{0,3^{n-1}+2}=\MAX_{3^{n-1}+2}$ can be computed with $n$ hidden layers.
-  By Claim 7, $T_{3^{n-1},2}$ can be computed with $n+1$ hidden layers.  By
-  Claim 6, $T_{0,3^n+2}=\MAX_{3^n+2}$ can then also be computed with
-  $n+1$ hidden layers.  This proves the induction.
+  \uses{lem:max-two-relu, def:t-function}
+  In one hidden layer, for each of the $3^{r-1}$ disjoint four-input blocks,
+  compute both pairwise maxima and add them affinely, yielding
+  $\max(x_{4j+1},x_{4j+2})+\max(x_{4j+3},x_{4j+4})$.
+  Carry the two extra inputs through that layer using positive/negative ReLU
+  pairs.  Apply the assumed realization of $T_{0,3^{r-1}+2}$ to the
+  $3^{r-1}$ block values and those two inputs.  This uses one plus $k-1$
+  hidden layers and computes exactly $T_{3^{r-1},2}$.
 \end{proof}
 
-\begin{corollary}[Maximum of an arbitrary number of inputs]
-  \label{cor:max-arbitrary-depth}
-  \uses{thm:max-3n-plus-2, def:maxn}
-  For every $m\ge 4$, $\MAX_m$ can be computed with
-  $\lceil\log_3(m-2)\rceil+1$ hidden layers.
+\begin{lemma}[Base-three ceiling arithmetic]
+  \label{lem:ceiling-log-three}
+  For every integer $m\geq4$, if
+  $r=\lceil\log_3(m-2)\rceil$, then $r\geq1$ and $m\leq3^r+2$.
+\end{lemma}
+\begin{proof}
+  Since $m-2\geq2>1$, its base-three logarithm is positive, hence $r\geq1$.
+  By the defining property of the ceiling,
+  $\log_3(m-2)\leq r$.  The function $t\mapsto3^t$ is increasing, so
+  $m-2\leq3^r$, and adding $2$ proves the inequality.
+\end{proof}
+
+\begin{corollary}[Maximum bound for arbitrary arity]
+  \label{cor:max-general-depth}
+  \uses{thm:main-max, lem:ceiling-log-three, lem:max-arity-restriction}
+  For every integer $m\geq4$,
+  \[
+    \MAX_m\in\ReLU_{m,\lceil\log_3(m-2)\rceil+1}.
+  \]
 \end{corollary}
 \begin{proof}
-  \uses{thm:max-3n-plus-2}
-  Let $r=\lceil\log_3(m-2)\rceil$, so $m\le 3^r+2$.  Apply
-  Theorem~\ref{thm:max-3n-plus-2} to compute $\MAX_{3^r+2}$ with $r+1$ hidden
-  layers, and feed the first $m$ inputs together with $3^r+2-m$ duplicate
-  copies of one existing input, for instance $x_1$.  Duplicating an input does
-  not change the maximum of the original $m$ inputs.  Thus $\MAX_m$ has the
-  claimed depth.
+  \uses{thm:main-max, lem:ceiling-log-three, lem:max-arity-restriction}
+  Set $r=\lceil\log_3(m-2)\rceil$.  The main maximum theorem realizes
+  $\MAX_{3^r+2}$ with $r+1$ layers, and
+  Lemma~\ref{lem:ceiling-log-three} gives $m\leq3^r+2$.  Restrict the larger
+  maximum to arity $m$.
 \end{proof}
 
-\begin{theorem}[Theorem 2]
-  \label{thm:cpwl-improved-bound}
-  \uses{def:cpwl-reluset}
-  For $n\ge 3$,
-  \[
-    \CPWL_n=\reluset_{n,\lceil\log_3(n-1)\rceil+1}.
-  \]
-\end{theorem}
+\begin{corollary}[Four-dimensional CPWL functions need at most two layers]
+  \label{cor:cpwl-four-two-layers}
+  \uses{thm:main-cpwl}
+  One has $\CPWL_4=\ReLU_{4,2}$.
+\end{corollary}
 \begin{proof}
-  \uses{thm:wang-sun-representation, cor:max-arbitrary-depth, lem:relu-network-cpwl}
-  The inclusion $\reluset_{n,\lceil\log_3(n-1)\rceil+1}\subseteq\CPWL_n$ is
-  Lemma~\ref{lem:relu-network-cpwl}.  For the reverse inclusion, take
-  $f\in\CPWL_n$ and write it by Theorem~\ref{thm:wang-sun-representation} as a
-  signed sum of $\MAX_{n+1}$ applied to affine maps.  Since $n\ge3$, one has
-  $n+1\ge4$, so Corollary~\ref{cor:max-arbitrary-depth} computes each
-  $\MAX_{n+1}$ term with
-  $\lceil\log_3((n+1)-2)\rceil+1=\lceil\log_3(n-1)\rceil+1$ hidden layers.
-  Parallelizing the finitely many terms and taking the final signed affine sum
-  preserves this depth.  Hence $f$ lies in the stated ReLU class.
+  \uses{thm:main-cpwl}
+  Substitute $n=4$ in Theorem~\ref{thm:main-cpwl}; since
+  $\lceil\log_3(3)\rceil+1=2$, the displayed equality is exactly the result.
 \end{proof}
 
-\begin{remark}[Binary-fraction weights]
-  \label{rem:binary-fraction-weights}
-  \uses{lem:claim5, lem:claim7, thm:max-3n-plus-2}
-  The inductive constructions in Claims 5 and 7 use only linear coefficients
-  obtained by repeated halving and affine copying.  Therefore all weights in
-  the resulting networks are fractions whose denominators are powers of two.
-  In particular, they are decimal fractions.
-\end{remark}
+\begin{proposition}[Remark 1: dyadic weights]
+  \label{prop:dyadic-weights}
+  \uses{lem:claim-five, lem:claim-seven, lem:max-five-upper-bound}
+  Every network produced by the induction proving Theorem~\ref{thm:main-max}
+  can be chosen with weights whose denominators are powers of two.
+\end{proposition}
 \begin{proof}
-  \uses{lem:p-terms-calT, lem:q-r-terms-calT, lem:claim7}
-  The only nonintegral coefficients introduced in Claim 5 are the displayed
-  factors $1/2$ used to express pair sums and scaled binary maxima.  Claim 7
-  introduces no new denominators beyond those already used to compute binary
-  maxima and affine sums.  Inducting through Theorem~\ref{thm:max-3n-plus-2}
-  shows that every denominator is a power of two.  Such rationals have finite
-  decimal expansions after multiplying numerator and denominator by a suitable
-  power of five.
+  \uses{def:m-expression, lem:claim-five-p-membership,
+    lem:claim-five-q-membership, lem:claim-five-r-membership,
+    lem:claim-seven}
+  The base construction uses integer affine forms and the outer coefficient
+  $1/2$.  In the Claim 5 step, every new coordinate coefficient is obtained
+  from an old coefficient by integer addition, sign change, or division by
+  $2$, as the three explicit membership formulas show.  Claim 7 introduces
+  only the integer coefficients occurring in pairwise maxima and sums.
+  Induction therefore keeps all weights in $\mathbb Z[1/2]$, precisely the
+  fractions with power-of-two denominators.
 \end{proof}
 
-\begin{lemma}[Averkov--Hojny--Merkert decimal-fraction lower bound]
-  \label{lem:ahm-lower-bound}
-  \uses{def:maxn, def:relu-network}
+\begin{corollary}[Dyadic weights are decimal fractions]
+  \label{cor:dyadic-decimal}
+  \uses{prop:dyadic-weights}
+  All weights in Proposition~\ref{prop:dyadic-weights} have a finite decimal
+  expansion.
+\end{corollary}
+\begin{proof}
+  A weight $a/2^q$ equals $a5^q/10^q$, which is a decimal fraction.
+\end{proof}
+
+\begin{proposition}[Linear neuron count]
+  \label{prop:linear-size}
+  \uses{def:relu-network, cor:max-general-depth}
   \notready
-  For ReLU networks whose weights are decimal fractions, the maximum function
-  $\MAX_m$ requires at least $\lceil\log_3 m\rceil$ hidden layers.
-\end{lemma}
-% TODO: external lower bound from Averkov--Hojny--Merkert [AHM25], not proved
-% in this paper.  The blueprint records it to explain the near-tightness claim.
+  There is an absolute constant $C$ such that the paper's construction of
+  $\MAX_m$ uses at most $Cm$ hidden neurons for every $m\geq4$.
+\end{proposition}
+% TODO: The paper says this is easy to verify but supplies neither an explicit
+% recurrence nor a constant.  Record exact widths for Claims 5 and 7 first.
 
-\begin{corollary}[Near-tightness for decimal-fraction networks]
-  \label{cor:near-tight-decimal}
-  \uses{cor:max-arbitrary-depth, rem:binary-fraction-weights, lem:ahm-lower-bound}
-  For decimal-fraction ReLU networks, the construction of
-  Corollary~\ref{cor:max-arbitrary-depth} is within at most one hidden layer of
-  the lower bound of Averkov--Hojny--Merkert.
-\end{corollary}
+\begin{definition}[The depth classes $\CPWL_n$ and $\ReLU_{n,k}$]
+  \label{def:depth-classes}
+  \uses{def:relu-network, def:cpwl-function, lem:relu-network-is-cpwl}
+  Write $\CPWL_n$ for all CPWL functions $\R^n\to\R$, and write
+  $\ReLU_{n,k}\subseteq\CPWL_n$ for those functions computable by a ReLU
+  network with at most $k$ hidden layers.
+\end{definition}
+
+\begin{definition}[Maximum function]
+  \label{def:max-function}
+  For $m\geq1$, define
+  \[
+    \MAX_m(x_1,\ldots,x_m)=\max\{x_1,\ldots,x_m\}.
+  \]
+\end{definition}
+
+\begin{theorem}[Wang--Sun signed maximum representation, Equation (1)]
+  \label{thm:wang-sun-representation}
+  \uses{def:cpwl-function, def:max-function}
+  \notready
+  If $f\in\CPWL_n$, then there are $s\geq1$, affine maps
+  $A_i:\R^n\to\R^{n+1}$, and signs $\sigma_i\in\{-1,1\}$ such that
+  \[
+    f(x)=\sum_{i=1}^s\sigma_i\MAX_{n+1}(A_i(x))
+    \qquad(x\in\R^n).
+  \]
+\end{theorem}
+% TODO: The paper cites [WS05] and does not reproduce the proof.  Import or
+% formalize the full hinging-hyperplane argument before marking this ready.
+
+\begin{lemma}[Pairwise maximum is one ReLU]
+  \label{lem:max-two-relu}
+  \uses{def:relu-scalar, def:relu-network, def:max-function}
+  For all $u,v\in\R$,
+  \[
+    \max\{u,v\}=u+\ReLU(v-u).
+  \]
+  Consequently $\MAX_2$ is computable with one hidden layer.
+\end{lemma}
 \begin{proof}
-  \uses{cor:max-arbitrary-depth, rem:binary-fraction-weights, lem:ahm-lower-bound}
-  Corollary~\ref{cor:max-arbitrary-depth} computes $\MAX_m$ using
-  $\lceil\log_3(m-2)\rceil+1$ layers and
-  Remark~\ref{rem:binary-fraction-weights} places the weights in the
-  decimal-fraction model.  Lemma~\ref{lem:ahm-lower-bound} gives the lower
-  bound $\lceil\log_3 m\rceil$.  Since
-  $\lceil\log_3(m-2)\rceil\le \lceil\log_3 m\rceil$, the difference between
-  the upper and lower bounds is at most one layer.
+  \uses{def:relu-scalar, def:relu-network}
+  If $v\leq u$, then $v-u\leq0$, so the right side is $u$.  If $u\leq v$,
+  then $\ReLU(v-u)=v-u$, so the right side is $v$.  These cases cover all
+  pairs.  The displayed formula is an affine output applied to the single
+  hidden neuron $\ReLU(v-u)$, with the affine input $u$ carried to the output;
+  the standard identity $u=\ReLU(u)-\ReLU(-u)$ supplies an ordinary
+  layer-by-layer realization if direct affine skip terms are disallowed.
 \end{proof}
 
-\chapter{Geometric Interpretation by Subdivisions}
+\begin{lemma}[Affine precomposition preserves depth]
+  \label{lem:affine-precomposition}
+  \uses{def:relu-network}
+  If $g:\R^q\to\R$ has a realization with at most $k$ hidden layers and
+  $A:\R^p\to\R^q$ is affine, then $g\circ A$ has a realization with at most
+  $k$ hidden layers.
+\end{lemma}
+\begin{proof}
+  \uses{def:relu-network}
+  In a realization of $g$, replace its first affine transformation $T^{(1)}$
+  by $T^{(1)}\circ A$.  This is affine, all later transformations are
+  unchanged, and the resulting alternating composition is exactly $g\circ A$.
+\end{proof}
 
-\begin{definition}[Convex hull]
-  \label{def:convex-hull}
-  \lean{convexHull}
-  \mathlibok
-  The convex hull $\conv(S)$ of a set $S\subseteq\R^n$ is the smallest convex
-  set containing $S$.
+\begin{lemma}[Parallel linear combinations preserve depth]
+  \label{lem:parallel-linear-combination}
+  \uses{def:relu-network}
+  Let $g_1,\ldots,g_s:\R^n\to\R$ each be computable with at most $k$ hidden
+  layers.  For arbitrary real $c_1,\ldots,c_s$, the function
+  $\sum_i c_i g_i$ is computable with at most $k$ hidden layers.
+\end{lemma}
+\begin{proof}
+  \uses{def:relu-network}
+  Pad a shallower realization by identity layers, implementing each scalar
+  identity as $z=\ReLU(z)-\ReLU(-z)$, until every branch has depth $k$.
+  At every hidden layer take the block-diagonal direct sum of the affine maps,
+  so all networks run in parallel.  The coordinatewise ReLU respects these
+  blocks.  In the final affine map take the linear combination of the branch
+  outputs with coefficients $c_i$.  No additional hidden layer is introduced.
+\end{proof}
+
+\begin{lemma}[Restriction from a larger maximum]
+  \label{lem:max-arity-restriction}
+  \uses{def:max-function, lem:affine-precomposition}
+  If $1\leq m\leq N$ and $\MAX_N$ is computable with $k$ hidden layers, then
+  $\MAX_m$ is computable with $k$ hidden layers.
+\end{lemma}
+\begin{proof}
+  \uses{lem:affine-precomposition}
+  Define the affine map
+  $A(x_1,\ldots,x_m)=(x_1,\ldots,x_m,x_1,\ldots,x_1)\in\R^N$.
+  Its last $N-m$ coordinates repeat $x_1$, so
+  $\MAX_N\circ A=\MAX_m$.  Apply Lemma~\ref{lem:affine-precomposition}.
+\end{proof}
+
+\begin{proposition}[Binary-tree maximum bound]
+  \label{prop:binary-tree-max-bound}
+  \uses{lem:max-two-relu, def:max-function}
+  For every $m\geq1$, $\MAX_m$ is computable with at most
+  $\lceil\log_2m\rceil$ hidden layers.
+\end{proposition}
+\begin{proof}
+  \uses{lem:max-two-relu, lem:max-arity-restriction}
+  Let $d=\lceil\log_2m\rceil$ and repeat $x_1$ to regard the input as a list of
+  $2^d$ numbers without changing its maximum.  In the first hidden layer use
+  Lemma~\ref{lem:max-two-relu} in parallel on adjacent pairs.  Repeat on the
+  $2^{d-1}$ outputs, then on the $2^{d-2}$ outputs, and so on.  After exactly
+  $d$ pairwise-max layers one number remains, and associativity of maximum says
+  that it is the maximum of the padded list, hence $\MAX_m$.
+\end{proof}
+
+\begin{theorem}[Previous CPWL depth bound]
+  \label{thm:previous-cpwl-bound}
+  \uses{def:depth-classes, thm:wang-sun-representation,
+    prop:binary-tree-max-bound}
+  For every $n\geq1$,
+  \[
+    \CPWL_n\subseteq\ReLU_{n,\lceil\log_2(n+1)\rceil}.
+  \]
+\end{theorem}
+\begin{proof}
+  \uses{thm:wang-sun-representation, prop:binary-tree-max-bound,
+    lem:affine-precomposition, lem:parallel-linear-combination}
+  Write $f$ in the form of Theorem~\ref{thm:wang-sun-representation}.
+  Proposition~\ref{prop:binary-tree-max-bound} realizes $\MAX_{n+1}$ with the
+  displayed depth.  Precompose each copy by $A_i$ and run all signed copies in
+  parallel.  Their affine output sum computes $f$ at the same depth.
+\end{proof}
+
+\begin{theorem}[Mukherjee--Basu lower bound for $\MAX_3$]
+  \label{thm:max-three-lower-bound}
+  \uses{def:relu-network, def:max-function}
+  \notready
+  No ReLU network with only one hidden layer computes $\MAX_3$ on all of
+  $\R^3$.
+\end{theorem}
+% TODO: The paper cites [MB17] for this lower bound and omits its proof.
+
+\begin{theorem}[Theorem 1: base-three maximum bound]
+  \label{thm:main-max}
+  \uses{def:depth-classes, def:max-function}
+  For every integer $r\geq1$,
+  \[
+    \MAX_{3^r+2}\in\ReLU_{3^r+2,r+1}.
+  \]
+\end{theorem}
+\begin{proof}
+  \uses{lem:max-five-upper-bound, lem:claim-six, lem:claim-seven,
+    def:t-function}
+  Induct on $r$.  For $r=1$, $3^r+2=5$, and
+  Lemma~\ref{lem:max-five-upper-bound} gives two hidden layers.  For the
+  induction step, assume
+  $T_{0,3^{r-1}+2}=\MAX_{3^{r-1}+2}$ is computable with $r$ hidden layers.
+  Claim~\ref{lem:claim-seven} computes $T_{3^{r-1},2}$ with $r+1$ hidden
+  layers.  Claim~\ref{lem:claim-six} then computes
+  $T_{0,3^r+2}=\MAX_{3^r+2}$ with those same $r+1$ layers.
+\end{proof}
+
+\begin{theorem}[Theorem 2: improved depth for every CPWL function]
+  \label{thm:main-cpwl}
+  \uses{def:depth-classes}
+  For every $n\geq3$,
+  \[
+    \CPWL_n=\ReLU_{n,\lceil\log_3(n-1)\rceil+1}.
+  \]
+\end{theorem}
+\begin{proof}
+  \uses{thm:wang-sun-representation, cor:max-general-depth,
+    lem:affine-precomposition, lem:parallel-linear-combination,
+    lem:relu-network-is-cpwl}
+  Let $f\in\CPWL_n$.  The Wang--Sun representation writes $f$ as a signed
+  sum of affine precompositions of $\MAX_{n+1}$.  Since $n\geq3$, the general
+  maximum bound realizes $\MAX_{n+1}$ with
+  $\lceil\log_3((n+1)-2)\rceil+1=
+  \lceil\log_3(n-1)\rceil+1$ hidden layers.  Affine precomposition and
+  parallel signed summation preserve this depth, proving
+  $\CPWL_n\subseteq\ReLU_{n,\lceil\log_3(n-1)\rceil+1}$.  The reverse
+  inclusion is Lemma~\ref{lem:relu-network-is-cpwl} together with the
+  definition of the depth class.
+\end{proof}
+
+\chapter{Direct proofs}
+
+\section{Computing the maximum of five inputs}
+
+\begin{definition}[The term $P_1$ in Equation (2)]
+  \label{def:p1}
+  Define $P_1:\R^5\to\R$ by
+  \[
+  P_1(x)=\max\!\bigl(\max(2x_5,x_1+x_2),
+               \max(x_1,x_3)+\max(x_1,x_4)\bigr).
+  \]
+  Equivalently it is the maximum of
+  $2x_5,x_1+x_2,2x_1,x_1+x_3,x_1+x_4,x_3+x_4$.
 \end{definition}
+
+\begin{definition}[The term $P_2$ in Equation (2)]
+  \label{def:p2}
+  Define
+  \[
+  P_2(x)=\max\!\bigl(\max(2x_5,x_1+x_2),
+               \max(x_2,x_3)+\max(x_2,x_4)\bigr),
+  \]
+  equivalently the maximum of
+  $2x_5,x_1+x_2,2x_2,x_2+x_3,x_2+x_4,x_3+x_4$.
+\end{definition}
+
+\begin{definition}[The term $P_3$ in Equation (2)]
+  \label{def:p3}
+  Define
+  \[
+  P_3(x)=\max\!\bigl(\max(2x_5,x_3+x_4),
+               \max(x_3,x_1)+\max(x_3,x_2)\bigr),
+  \]
+  equivalently the maximum of
+  $2x_5,x_3+x_4,2x_3,x_3+x_1,x_3+x_2,x_1+x_2$.
+\end{definition}
+
+\begin{definition}[The term $P_4$ in Equation (2)]
+  \label{def:p4}
+  Define
+  \[
+  P_4(x)=\max\!\bigl(\max(2x_5,x_3+x_4),
+               \max(x_4,x_1)+\max(x_4,x_2)\bigr),
+  \]
+  equivalently the maximum of
+  $2x_5,x_3+x_4,2x_4,x_4+x_1,x_4+x_2,x_1+x_2$.
+\end{definition}
+
+\begin{definition}[The term $Q$ in Equation (2)]
+  \label{def:q}
+  Define
+  \[
+    Q(x)=\max\bigl(2x_5,\max(x_1+x_2,x_3+x_4)\bigr)
+        =\max(2x_5,x_1+x_2,x_3+x_4).
+  \]
+\end{definition}
+
+\begin{definition}[The term $R_{13}$ in Equation (2)]
+  \label{def:r13}
+  Define
+  \[
+  R_{13}(x)=\max\bigl(\max(2x_5,x_1+x_3),
+                       \max(x_1+x_2,x_3+x_4)\bigr).
+  \]
+\end{definition}
+
+\begin{definition}[The term $R_{14}$ in Equation (2)]
+  \label{def:r14}
+  Define
+  \[
+  R_{14}(x)=\max\bigl(\max(2x_5,x_1+x_4),
+                       \max(x_1+x_2,x_3+x_4)\bigr).
+  \]
+\end{definition}
+
+\begin{definition}[The term $R_{23}$ in Equation (2)]
+  \label{def:r23}
+  Define
+  \[
+  R_{23}(x)=\max\bigl(\max(2x_5,x_2+x_3),
+                       \max(x_1+x_2,x_3+x_4)\bigr).
+  \]
+\end{definition}
+
+\begin{definition}[The term $R_{24}$ in Equation (2)]
+  \label{def:r24}
+  Define
+  \[
+  R_{24}(x)=\max\bigl(\max(2x_5,x_2+x_4),
+                       \max(x_1+x_2,x_3+x_4)\bigr).
+  \]
+\end{definition}
+
+\begin{definition}[The signed expression $M$, Equation (2)]
+  \label{def:m-expression}
+  \uses{def:p1, def:p2, def:p3, def:p4, def:q, def:r13, def:r14,
+    def:r23, def:r24}
+  Define
+  \[
+  M(x)=\frac12\bigl(P_1(x)+P_2(x)+P_3(x)+P_4(x)+Q(x)
+             -R_{13}(x)-R_{14}(x)-R_{23}(x)-R_{24}(x)\bigr).
+  \]
+\end{definition}
+
+\begin{lemma}[Two-layer max-of-maxes template]
+  \label{lem:two-layer-template}
+  \uses{def:relu-network, lem:max-two-relu}
+  If $a,b,c,d,e,f:\R^n\to\R$ are affine, then
+  \[
+    x\longmapsto
+    \max\bigl(\max(a(x),b(x)),\max(c(x),d(x))+\max(e(x),f(x))\bigr)
+  \]
+  is computable with at most two hidden layers.
+\end{lemma}
+\begin{proof}
+  \uses{lem:max-two-relu, lem:parallel-linear-combination}
+  In the first hidden layer compute the three pairwise maxima
+  $u=\max(a,b)$, $v=\max(c,d)$, and $w=\max(e,f)$ using
+  Lemma~\ref{lem:max-two-relu} in parallel.  Their sum $v+w$ is affine in the
+  first-layer outputs.  In the second hidden layer compute
+  $\max(u,v+w)$ by the same identity.  This is the required function.
+\end{proof}
+
+\begin{lemma}[Each $P_i$ has depth two]
+  \label{lem:p-terms-depth-two}
+  \uses{def:p1, def:p2, def:p3, def:p4, lem:two-layer-template}
+  Each of $P_1,P_2,P_3,P_4$ is computable with at most two hidden layers.
+\end{lemma}
+\begin{proof}
+  \uses{lem:two-layer-template}
+  For $P_1$, substitute
+  $(a,b,c,d,e,f)=(2x_5,x_1+x_2,x_1,x_3,x_1,x_4)$ in
+  Lemma~\ref{lem:two-layer-template}.  Replacing the repeated coordinate
+  $x_1$ successively by $x_2$, and then using the pair $(x_3,x_4)$ in the
+  first inner maximum and repeating $x_3$ or $x_4$, gives exactly the displayed
+  definitions of $P_2,P_3,P_4$.
+\end{proof}
+
+\begin{lemma}[$Q$ has depth two]
+  \label{lem:q-depth-two}
+  \uses{def:q, lem:two-layer-template}
+  The function $Q$ is computable with at most two hidden layers.
+\end{lemma}
+\begin{proof}
+  \uses{lem:two-layer-template}
+  Apply the template with
+  $(a,b,c,d,e,f)=(2x_5,2x_5,x_1+x_2,x_3+x_4,0,0)$.
+  Then the first pairwise maximum is $2x_5$, the last is zero, and the result
+  is $\max(2x_5,\max(x_1+x_2,x_3+x_4))=Q$.
+\end{proof}
+
+\begin{lemma}[Each $R_{ij}$ has depth two]
+  \label{lem:r-terms-depth-two}
+  \uses{def:r13, def:r14, def:r23, def:r24, lem:two-layer-template}
+  Each of $R_{13},R_{14},R_{23},R_{24}$ is computable with at most two hidden
+  layers.
+\end{lemma}
+\begin{proof}
+  \uses{lem:two-layer-template}
+  For $R_{ij}$, apply the template with
+  $(a,b)=(2x_5,x_i+x_j)$,
+  $(c,d)=(x_1+x_2,x_3+x_4)$, and $(e,f)=(0,0)$.
+  The final pairwise maximum contributes zero, leaving exactly the definition
+  of $R_{ij}$ for each of the four indicated pairs.
+\end{proof}
+
+\begin{lemma}[$x_5$-dominant case of Claim 4]
+  \label{lem:m-x5-case}
+  \uses{def:m-expression, def:max-function}
+  If $x_5=\MAX_5(x)$, then $M(x)=x_5$.
+\end{lemma}
+\begin{proof}
+  \uses{def:p1, def:p2, def:p3, def:p4, def:q, def:r13, def:r14,
+    def:r23, def:r24}
+  For $i,j\in\{1,2,3,4\}$, the hypotheses $x_i\leq x_5$ and
+  $x_j\leq x_5$ give $x_i+x_j\leq2x_5$.  Thus every displayed candidate in
+  each $P_i,Q,R_{ij}$ is at most $2x_5$, while $2x_5$ itself is a candidate.
+  All nine terms equal $2x_5$.  Equation (2) has five positive and four
+  negative such terms, so $M(x)=\tfrac12(2x_5)=x_5$.
+\end{proof}
+
+\begin{lemma}[Symmetries of $M$]
+  \label{lem:m-symmetry}
+  \uses{def:m-expression}
+  The function $M$ is invariant under swapping $1$ with $2$, under swapping
+  $3$ with $4$, and under simultaneously swapping the pairs $(1,2)$ and
+  $(3,4)$.
+\end{lemma}
+\begin{proof}
+  \uses{def:p1, def:p2, def:p3, def:p4, def:q, def:r13, def:r14,
+    def:r23, def:r24}
+  Under $1\leftrightarrow2$, the terms $P_1,P_2$ are exchanged,
+  $R_{13},R_{23}$ are exchanged, and $R_{14},R_{24}$ are exchanged; all other
+  terms are fixed.  Under $3\leftrightarrow4$, the analogous exchanges are
+  $P_3\leftrightarrow P_4$, $R_{13}\leftrightarrow R_{14}$, and
+  $R_{23}\leftrightarrow R_{24}$.  Under the pair swap,
+  $P_1\leftrightarrow P_3$, $P_2\leftrightarrow P_4$, and
+  $R_{14}\leftrightarrow R_{23}$, with all other signed terms fixed.
+  In every case the signed sum defining $M$ is unchanged.
+\end{proof}
+
+\begin{lemma}[$P_1$ in the $x_1$-dominant case]
+  \label{lem:p1-x1-case}
+  \uses{def:p1}
+  If $x_1\geq x_j$ for $j=2,3,4,5$, then $P_1(x)=2x_1$.
+\end{lemma}
+\begin{proof}
+  \uses{def:p1}
+  Each candidate other than $2x_1$ is a sum of two coordinates, both at most
+  $x_1$, or is $2x_5\leq2x_1$.  Hence every candidate is at most $2x_1$, and
+  $2x_1$ is itself present in the maximum.
+\end{proof}
+
+\begin{lemma}[$P_2$ cancels $R_{23}$]
+  \label{lem:p2-r23-x1-case}
+  \uses{def:p2, def:r23}
+  If $x_1\geq x_j$ for $j=2,3,4,5$, then $P_2(x)=R_{23}(x)$.
+\end{lemma}
+\begin{proof}
+  \uses{def:p2, def:r23}
+  We have $x_1+x_2\geq2x_2$ and
+  $x_1+x_2\geq x_2+x_4$.  Removing these dominated candidates from the
+  maximum defining $P_2$ leaves
+  $\max(2x_5,x_1+x_2,x_2+x_3,x_3+x_4)$, which is $R_{23}$.
+\end{proof}
+
+\begin{lemma}[$P_3$ cancels $R_{13}$]
+  \label{lem:p3-r13-x1-case}
+  \uses{def:p3, def:r13}
+  If $x_1\geq x_j$ for $j=2,3,4,5$, then $P_3(x)=R_{13}(x)$.
+\end{lemma}
+\begin{proof}
+  \uses{def:p3, def:r13}
+  The inequalities $x_1+x_3\geq2x_3$ and
+  $x_1+x_3\geq x_2+x_3$ show that those two candidates are redundant in
+  $P_3$.  The remaining maximum is
+  $\max(2x_5,x_3+x_4,x_1+x_3,x_1+x_2)=R_{13}$.
+\end{proof}
+
+\begin{lemma}[$P_4$ cancels $R_{14}$]
+  \label{lem:p4-r14-x1-case}
+  \uses{def:p4, def:r14}
+  If $x_1\geq x_j$ for $j=2,3,4,5$, then $P_4(x)=R_{14}(x)$.
+\end{lemma}
+\begin{proof}
+  \uses{def:p4, def:r14}
+  The inequalities $x_1+x_4\geq2x_4$ and
+  $x_1+x_4\geq x_2+x_4$ remove those dominated candidates from $P_4$.
+  What remains is
+  $\max(2x_5,x_3+x_4,x_1+x_4,x_1+x_2)=R_{14}$.
+\end{proof}
+
+\begin{lemma}[$R_{24}$ cancels $Q$]
+  \label{lem:r24-q-x1-case}
+  \uses{def:r24, def:q}
+  If $x_1\geq x_j$ for $j=2,3,4,5$, then $R_{24}(x)=Q(x)$.
+\end{lemma}
+\begin{proof}
+  \uses{def:r24, def:q}
+  Since $x_1+x_2\geq x_2+x_4$, the candidate $x_2+x_4$ is redundant in
+  $R_{24}$.  Its remaining three candidates are precisely
+  $2x_5,x_1+x_2,x_3+x_4$, the candidates defining $Q$.
+\end{proof}
+
+\begin{lemma}[$x_1$-dominant case of Claim 4]
+  \label{lem:m-x1-case}
+  \uses{def:m-expression, lem:p1-x1-case, lem:p2-r23-x1-case,
+    lem:p3-r13-x1-case, lem:p4-r14-x1-case, lem:r24-q-x1-case}
+  If $x_1\geq x_j$ for $j=2,3,4,5$, then $M(x)=x_1$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:p1-x1-case, lem:p2-r23-x1-case, lem:p3-r13-x1-case,
+    lem:p4-r14-x1-case, lem:r24-q-x1-case}
+  In Equation (2), $P_2$ cancels $R_{23}$, $P_3$ cancels $R_{13}$,
+  $P_4$ cancels $R_{14}$, and $Q$ cancels $R_{24}$.  Thus
+  $M(x)=\tfrac12P_1(x)=\tfrac12(2x_1)=x_1$.
+\end{proof}
+
+\begin{lemma}[Claim 4: the signed identity]
+  \label{lem:claim-four}
+  \uses{def:m-expression, def:max-function}
+  For every $x\in\R^5$, $M(x)=\MAX_5(x)$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:m-x5-case, lem:m-symmetry, lem:m-x1-case}
+  If $x_5$ is maximal, use Lemma~\ref{lem:m-x5-case}.  Otherwise one of
+  $x_1,x_2,x_3,x_4$ is maximal.  The three symmetries in
+  Lemma~\ref{lem:m-symmetry} act transitively on these four indices, so a
+  symmetry sends a maximal coordinate to position $1$.  The value of $M$ is
+  unchanged, and Lemma~\ref{lem:m-x1-case} gives that value as the maximal
+  coordinate.  The ordinary maximum is also invariant under the same
+  permutation, proving the identity.
+\end{proof}
+
+\begin{lemma}[Two-layer upper bound for $\MAX_5$]
+  \label{lem:max-five-upper-bound}
+  \uses{lem:claim-four, lem:p-terms-depth-two, lem:q-depth-two,
+    lem:r-terms-depth-two}
+  The function $\MAX_5$ is computable with at most two hidden layers.
+\end{lemma}
+\begin{proof}
+  \uses{def:m-expression, lem:parallel-linear-combination,
+    lem:p-terms-depth-two, lem:q-depth-two, lem:r-terms-depth-two,
+    lem:claim-four}
+  Compute the nine terms of Equation (2) in parallel at depth two, and use the
+  affine output layer to form their signed half-sum.  By
+  Lemma~\ref{lem:claim-four}, this output is $\MAX_5$.
+\end{proof}
+
+\begin{proposition}[Proposition 3: exact depth of $\MAX_5$]
+  \label{prop:max-five-depth}
+  \uses{lem:max-five-upper-bound, thm:max-three-lower-bound,
+    lem:max-arity-restriction}
+  The minimum number of hidden layers required to compute $\MAX_5$ is exactly
+  two.
+\end{proposition}
+\begin{proof}
+  \uses{lem:max-five-upper-bound, thm:max-three-lower-bound,
+    lem:max-arity-restriction}
+  The upper bound is Lemma~\ref{lem:max-five-upper-bound}.  If one hidden layer
+  computed $\MAX_5$, Lemma~\ref{lem:max-arity-restriction} with $m=3$ would
+  give a one-hidden-layer realization of $\MAX_3$, contradicting
+  Theorem~\ref{thm:max-three-lower-bound}.  Thus two layers are also necessary.
+\end{proof}
+
+\chapter{Geometric intuition}
+
+\section{Polytopes, support functions, and neural networks}
 
 \begin{definition}[Polytope]
   \label{def:polytope}
-  \uses{def:convex-hull}
-  A polytope in $\R^n$ is the convex hull of finitely many points of $\R^n$.
+  A polytope in $\R^n$ is the convex hull of a nonempty finite set of points.
 \end{definition}
 
-\begin{definition}[Support function and Newton polytope]
-  \label{def:support-newton}
+\begin{definition}[Support function]
+  \label{def:support-function}
   \uses{def:polytope}
-  The support function of a polytope $P\subseteq\R^n$ is
+  For a polytope $P\subseteq\R^n$, its support function is
   \[
     h_P(x)=\max\{\langle x,p\rangle:p\in P\}.
   \]
-  Conversely, when a convex positively homogeneous CPWL function $f$ is equal
-  to $h_P$, the unique such polytope $P$ is called the Newton polytope
-  $\Newt(f)$.
 \end{definition}
 
-\begin{lemma}[Support functions and polytopes]
-  \label{lem:support-polytope-equivalence}
-  \uses{def:support-newton, def:cpwl}
+\begin{lemma}[Support functions of polytopes]
+  \label{lem:support-function-properties}
+  \uses{def:support-function, def:cpwl-function}
+  The support function of a polytope is convex, positively homogeneous, and
+  CPWL.
+\end{lemma}
+\begin{proof}
+  \uses{def:polytope, def:support-function}
+  Write $P=\operatorname{conv}\{v_1,\ldots,v_s\}$.  A linear functional
+  attains its maximum over this convex hull at one of the listed vertices, so
+  $h_P(x)=\max_i\langle x,v_i\rangle$.  This finite maximum of linear maps is
+  positively homogeneous.  It is convex because for $0\leq t\leq1$,
+  \[
+  \max_i\langle tx+(1-t)y,v_i\rangle
+  \leq t\max_i\langle x,v_i\rangle+(1-t)\max_i\langle y,v_i\rangle.
+  \]
+  The finitely many regions on which a fixed linear form dominates are
+  polyhedra; they cover $\R^n$, and the maximum is linear on each.  A finite
+  maximum of continuous maps is continuous, hence the function is CPWL.
+\end{proof}
+
+\begin{theorem}[Polytope--support-function correspondence]
+  \label{thm:support-polytope-correspondence}
+  \uses{lem:support-function-properties}
   \notready
-  Support functions of polytopes are exactly the convex, positively
-  homogeneous CPWL functions, and the representing polytope is unique.
-\end{lemma}
-% TODO: standard theorem from polyhedral/tropical geometry, recalled but not
-% proved in the paper.  Formal proof should use exposed faces and finite normal
-% fans.
+  Every convex, positively homogeneous CPWL function $f:\R^n\to\R$ is the
+  support function of a unique polytope.
+\end{theorem}
+% TODO: This well-known correspondence is cited but not proved in the paper,
+% and no matching theorem was found in the installed Mathlib/cslib sources.
 
-\begin{lemma}[Newton polytope of $\MAX_n$]
-  \label{lem:newton-max-simplex}
-  \uses{def:support-newton, def:maxn, def:convex-hull}
-  The Newton polytope of $\MAX_n$ is the simplex
-  $\Delta_{n-1}=\conv\{e_1,\ldots,e_n\}\subseteq\R^n$.
-\end{lemma}
-\begin{proof}
-  \uses{def:support-newton, def:maxn, def:convex-hull}
-  For every $x\in\R^n$,
-  \[
-    h_{\Delta_{n-1}}(x)
-      =\max\{\langle x,p\rangle:p\in\conv(e_1,\ldots,e_n)\}.
-  \]
-  A linear functional attains its maximum over a simplex at a vertex, so this
-  equals $\max_i\langle x,e_i\rangle=\max_i x_i=\MAX_n(x)$.  Hence
-  $\Newt(\MAX_n)=\Delta_{n-1}$ by uniqueness in the definition of Newton
-  polytope.
-\end{proof}
-
-\begin{definition}[Minkowski sum and convex-hull join]
-  \label{def:minkowski-join}
-  \uses{def:convex-hull}
-  For subsets $P,Q\subseteq\R^n$, the Minkowski sum is
-  \[
-    P+Q=\{p+q:p\in P,\ q\in Q\}.
-  \]
-  The convex hull of their union is denoted
-  \[
-    P*Q=\conv(P\cup Q).
-  \]
+\begin{definition}[Newton polytope]
+  \label{def:newton-polytope}
+  \uses{thm:support-polytope-correspondence}
+  For a convex positively homogeneous CPWL function $f$, its Newton polytope
+  is the unique polytope $P$ satisfying $f=h_P$.
 \end{definition}
 
-\begin{definition}[The polytope classes $\mathcal{P}_k$]
-  \label{def:Pk}
-  \uses{def:polytope, def:minkowski-join}
-  Let $\mathcal{P}_0$ be the set of one-point polytopes in a fixed ambient
-  dimension.  For $k\ge0$, define
-  \[
-    \mathcal{P}_{k+1}=
-      \left\{\sum_i P_i*Q_i:\text{ the sum is finite and }
-      P_i,Q_i\in\mathcal{P}_k\right\}.
-  \]
-  The complexity of a polytope $P$ is the least $k$ with $P\in\mathcal{P}_k$.
+\begin{definition}[Mathlib standard simplex]
+  \label{def:standard-simplex}
+  \lean{stdSimplex}
+  \mathlibok
+  The standard simplex on a finite coordinate type is the set of nonnegative
+  coordinate vectors whose coordinates sum to one.  In Mathlib it is the
+  convex hull of the standard basis, by
+  \texttt{convexHull\_basis\_eq\_stdSimplex}.
 \end{definition}
 
-\begin{lemma}[$\mathcal{P}_k$ is closed under finite Minkowski sums]
-  \label{lem:Pk-sum-closed}
-  \uses{def:Pk, def:minkowski-join}
-  For each $k$, a finite Minkowski sum of polytopes in $\mathcal{P}_k$ again
-  belongs to $\mathcal{P}_k$.
+\begin{lemma}[Newton polytope of the maximum]
+  \label{lem:max-newton-simplex}
+  \uses{def:newton-polytope, def:standard-simplex, def:max-function}
+  The Newton polytope of $\MAX_n$ is
+  $\Delta_{n-1}=\operatorname{conv}\{e_1,\ldots,e_n\}\subseteq\R^n$.
 \end{lemma}
 \begin{proof}
-  \uses{def:Pk}
-  For $k=0$, a finite sum of one-point polytopes is a one-point polytope.  For
-  $k+1$, write each summand as a finite sum of joins $P_i*Q_i$ with
-  $P_i,Q_i\in\mathcal{P}_k$.  Concatenating all these finite lists gives a
-  single finite sum of such joins, which is precisely an element of
-  $\mathcal{P}_{k+1}$.
+  \uses{def:support-function, thm:support-polytope-correspondence}
+  A linear functional has the same maximum on a finite set and its convex
+  hull.  Hence
+  \[
+    h_{\Delta_{n-1}}(x)=\max_i\langle x,e_i\rangle=\max_i x_i=\MAX_n(x).
+  \]
+  Uniqueness in the support-function correspondence identifies the Newton
+  polytope with $\Delta_{n-1}$.
 \end{proof}
+
+\begin{definition}[Minkowski sum]
+  \label{def:minkowski-sum}
+  \uses{def:polytope}
+  For polytopes $P,Q\subseteq\R^n$, define
+  $P+Q=\{p+q:p\in P,\ q\in Q\}$.
+\end{definition}
+
+\begin{definition}[Mathlib convex join]
+  \label{def:convex-join}
+  \lean{convexJoin}
+  \mathlibok
+  The convex join of two sets is the union of all line segments joining one
+  point of the first set to one point of the second.  For convex $P,Q$, it is
+  $\operatorname{conv}(P\cup Q)$; the paper writes this polytope as $P*Q$.
+\end{definition}
+
+\begin{lemma}[Associativity of convex join]
+  \label{lem:convex-join-assoc}
+  \uses{def:convex-join}
+  \lean{convexJoin_assoc}
+  \mathlibok
+  Convex join is associative: $(P*Q)*R=P*(Q*R)$.
+\end{lemma}
+
+\begin{definition}[The recursively generated classes $\PolyC_k$]
+  \label{def:polytope-classes}
+  \uses{def:polytope, def:minkowski-sum, def:convex-join}
+  Fix an ambient dimension.  Let $\PolyC_0$ be the singleton polytopes.  For
+  $k\geq0$, let $\PolyC_{k+1}$ consist of all finite Minkowski sums
+  \[
+    \sum_{i\in I}(P_i*Q_i),\qquad P_i,Q_i\in\PolyC_k,
+  \]
+  where $I$ is finite and nonempty.
+\end{definition}
+
+\begin{lemma}[Nesting of the polytope classes]
+  \label{lem:polytope-class-monotone}
+  \uses{def:polytope-classes}
+  For every $k$, $\PolyC_k\subseteq\PolyC_{k+1}$.
+\end{lemma}
+\begin{proof}
+  \uses{def:polytope-classes}
+  If $P\in\PolyC_k$, then $P=P*P$, and this one-term sum is allowed in the
+  definition of $\PolyC_{k+1}$.
+\end{proof}
+
+\begin{lemma}[Closure under finite Minkowski sums]
+  \label{lem:polytope-class-sum-closed}
+  \uses{def:polytope-classes}
+  A finite Minkowski sum of members of $\PolyC_k$ again belongs to
+  $\PolyC_k$.
+\end{lemma}
+\begin{proof}
+  \uses{def:polytope-classes}
+  Induct on $k$.  A finite sum of singleton polytopes is a singleton.  For the
+  successor, expand every summand as a finite sum of joins of members of
+  $\PolyC_k$.  Concatenating these finite indexing families expresses the
+  total sum in exactly the defining form for $\PolyC_{k+1}$.
+\end{proof}
+
+\begin{definition}[Polytope complexity]
+  \label{def:polytope-complexity}
+  \uses{def:polytope-classes}
+  The complexity of a polytope $P$ is the least $k$ such that
+  $P\in\PolyC_k$, whenever such a $k$ exists.
+\end{definition}
 
 \begin{definition}[Formal Minkowski difference]
-  \label{def:formal-difference}
-  \uses{def:minkowski-join}
-  A polytope $X$ is a formal Minkowski difference of polytopes $P$ and $Q$ if
-  \[
-    X+P=Q.
-  \]
+  \label{def:formal-minkowski-difference}
+  \uses{def:minkowski-sum}
+  A polytope $X$ is a formal Minkowski difference of $P$ and $Q$ if
+  $X+P=Q$.
 \end{definition}
 
 \begin{lemma}[Lemma 8: ReLU depth as formal Minkowski difference]
   \label{lem:relu-depth-formal-difference}
-  \uses{def:formal-difference, def:Pk, def:support-newton}
+  \uses{def:support-function, def:polytope-classes,
+    def:formal-minkowski-difference, def:relu-network}
   \notready
-  For every polytope $X$, the required number of hidden layers for representing
-  $h_X$ is the minimum $k$ such that there exist $P,Q\in\mathcal{P}_k$ with
-  $X+P=Q$.
+  For every polytope $X$, the minimum hidden-layer depth representing $h_X$
+  equals the least $k$ for which there are $P,Q\in\PolyC_k$ with $X+P=Q$.
 \end{lemma}
-% TODO: external theorem cited as Hertrich [Her22, Theorem 3.35].  The paper
-% uses it as the bridge between geometry and ReLU depth.
+% TODO: The paper cites [Her22, Theorem 3.35] and gives no proof.  Formalize
+% the network/Newton-polytope semantics and both directions of that theorem.
 
-\begin{lemma}[Valuation identity]
-  \label{lem:valuation-identity}
-  \uses{def:minkowski-join}
-  If $P$ and $Q$ are polytopes and $P\cup Q$ is a polytope, then
+\begin{corollary}[Maximum depth as a simplex difference]
+  \label{cor:max-depth-formal-difference}
+  \uses{lem:relu-depth-formal-difference, lem:max-newton-simplex}
+  The minimum depth of $\MAX_n$ is the least $k$ for which
+  $\Delta_{n-1}+P=Q$ for some $P,Q\in\PolyC_k$.
+\end{corollary}
+\begin{proof}
+  \uses{lem:relu-depth-formal-difference, lem:max-newton-simplex}
+  Substitute the Newton polytope $\Delta_{n-1}$ of $\MAX_n$ into
+  Lemma~\ref{lem:relu-depth-formal-difference}.
+\end{proof}
+
+\section{Upper bounds from subdivisions}
+
+\begin{lemma}[Two-cell valuation identity, Equation (3)]
+  \label{lem:two-cell-valuation}
+  \uses{def:minkowski-sum}
+  If $P,Q$ are polytopes and $P\cup Q$ is a polytope, then
   \[
     (P\cup Q)+(P\cap Q)=P+Q.
   \]
 \end{lemma}
 \begin{proof}
-  \uses{def:minkowski-join, def:support-newton}
-  It suffices to compare support functions, because a polytope is determined by
-  its support function.  For every direction $u$, the support function of
-  $P\cup Q$ is $\max(h_P(u),h_Q(u))$.  Under the hypothesis that $P\cup Q$ is
-  convex, the smaller of the two exposed support values is attained on the
-  common part $P\cap Q$, so
-  $h_{P\cap Q}(u)=\min(h_P(u),h_Q(u))$.  Hence
-  \[
-    h_{P\cup Q}(u)+h_{P\cap Q}(u)
-      =\max(h_P(u),h_Q(u))+\min(h_P(u),h_Q(u))
-      =h_P(u)+h_Q(u).
-  \]
-  Support functions add under Minkowski sum, so the two Minkowski sums have the
-  same support function and are equal.
+  \uses{def:polytope, def:minkowski-sum}
+  If $u\in P\cup Q$ and $v\in P\cap Q$, then $u+v\in P+Q$, choosing the
+  two summands in the appropriate order.  This proves one inclusion.
+  Conversely, take $p\in P$ and $q\in Q$.  The segment
+  $z(t)=(1-t)p+tq$ lies in the convex set $P\cup Q$.  The closed subsets
+  $\{t:z(t)\in P\}$ and $\{t:z(t)\in Q\}$ cover the connected interval
+  $[0,1]$ and contain $0$ and $1$, respectively, so they intersect.  Choose
+  $t$ in their intersection.  Then $z(t)\in P\cap Q$, while
+  $z(1-t)\in P\cup Q$, and $z(t)+z(1-t)=p+q$.  This proves the reverse
+  inclusion.
 \end{proof}
 
 \begin{lemma}[Lemma 9: full additivity]
   \label{lem:full-additivity}
-  \uses{def:polytope, def:minkowski-join}
+  \uses{def:minkowski-sum, lem:two-cell-valuation}
   \notready
-  Let $X,Q_1,\ldots,Q_m$ be polytopes in $\R^n$ with
-  $X=\bigcup_{i\in[m]}Q_i$.  Let $\mathcal{T}_0$ be the collection of nonempty
-  subsets $S\subseteq[m]$ of even size and $\mathcal{T}_1$ the collection of
-  nonempty subsets of odd size.  For $Q_S=\bigcap_{i\in S}Q_i$,
+  Let $X,Q_1,\ldots,Q_m$ be polytopes with $X=\bigcup_{i=1}^mQ_i$.  For every
+  nonempty $S\subseteq\{1,\ldots,m\}$ put $Q_S=\bigcap_{i\in S}Q_i$, omitting
+  empty intersections, and let $\mathcal E$ and $\mathcal O$ be the nonempty
+  even- and odd-cardinality index sets.  Then
   \[
-    X+\sum_{S\in\mathcal{T}_0}Q_S
-      =\sum_{S\in\mathcal{T}_1}Q_S.
+    X+\sum_{S\in\mathcal E}Q_S=\sum_{S\in\mathcal O}Q_S.
   \]
 \end{lemma}
-% TODO: deep full-additivity theorem for the identity valuation, cited from
-% McMullen--Schneider and Schneider.  The paper sketches the topological route
-% via Euler characteristic but does not prove it.
+% TODO: The cited full-additivity theorem is not proved.  The paper's route is
+% to extend support functions to finite polyhedral unions using Euler
+% characteristic, prove full additivity there, then recover the polytope
+% identity.  Formalize those topological steps rather than naive induction.
 
-\begin{lemma}[Lemma 10: subdivision upper bound]
-  \label{lem:subdivision-upper-bound}
-  \uses{lem:full-additivity, lem:relu-depth-formal-difference, lem:Pk-sum-closed, lem:newton-max-simplex}
-  The required number of hidden layers for $\MAX_n$ is at most the minimum $k$
-  for which there are polytopes $Q_1,\ldots,Q_m$ satisfying
-  $\Delta_{n-1}=\bigcup_{i\in[m]}Q_i$ and
-  $Q_S=\bigcap_{i\in S}Q_i\in\mathcal{P}_k$ for every nonempty
-  $S\subseteq[m]$.
-\end{lemma}
-\begin{proof}
-  \uses{lem:full-additivity, lem:relu-depth-formal-difference, lem:Pk-sum-closed, lem:newton-max-simplex}
-  Apply Lemma~\ref{lem:full-additivity} to
-  $X=\Delta_{n-1}$ and the cover $Q_1,\ldots,Q_m$.  It yields
-  \[
-    \Delta_{n-1}+\sum_{S\in\mathcal{T}_0}Q_S
-      =\sum_{S\in\mathcal{T}_1}Q_S.
-  \]
-  By hypothesis every $Q_S$ lies in $\mathcal{P}_k$, and
-  Lemma~\ref{lem:Pk-sum-closed} keeps both finite sums in $\mathcal{P}_k$.
-  Thus $\Delta_{n-1}$ is a formal Minkowski difference of two polytopes in
-  $\mathcal{P}_k$.  Lemma~\ref{lem:relu-depth-formal-difference} converts this
-  into a $k$-hidden-layer representation of $h_{\Delta_{n-1}}$, which is
-  $\MAX_n$ by Lemma~\ref{lem:newton-max-simplex}.
-\end{proof}
+\begin{theorem}[Finite triangulation of a polytope]
+  \label{thm:polytope-triangulation}
+  \uses{def:polytope}
+  \notready
+  Every polytope admits a finite polyhedral subdivision into simplices.
+\end{theorem}
+% TODO: Standard background invoked by the paper, but its proof is omitted and
+% no ready general polytope-triangulation theorem was found locally.
 
-\begin{lemma}[Faces preserve $\mathcal{P}_k$ in the subdivision method]
-  \label{lem:faces-preserve-Pk}
-  \uses{def:Pk}
-  If each cell $Q_i$ of a polyhedral subdivision lies in $\mathcal{P}_k$ and
-  every nonempty intersection $Q_S$ is a face of one of the cells, then every
-  such $Q_S$ lies in $\mathcal{P}_k$.
+\begin{lemma}[Support functions turn Minkowski sums into sums]
+  \label{lem:support-minkowski-sum}
+  \uses{def:support-function, def:minkowski-sum}
+  For polytopes $P,Q$, $h_{P+Q}=h_P+h_Q$.
 \end{lemma}
 \begin{proof}
-  \uses{def:Pk}
-  The classes $\mathcal{P}_k$ are closed under taking faces: a face of a
-  one-point polytope is one point; a face of a finite Minkowski sum is the sum
-  of the corresponding exposed faces; and a face of a join is the join of the
-  exposed faces.  Induction on $k$ proves the closure claim.  Since each
-  $Q_S$ is assumed to be a face of some cell $Q_i\in\mathcal{P}_k$, it also
-  belongs to $\mathcal{P}_k$.
+  \uses{def:support-function, def:minkowski-sum}
+  For every $x$,
+  \[
+  h_{P+Q}(x)=\max_{p\in P,q\in Q}\langle x,p+q\rangle
+   =\max_{p\in P}\langle x,p\rangle+
+     \max_{q\in Q}\langle x,q\rangle.
+  \]
 \end{proof}
 
-\begin{construction}[Rhombic-pyramid subdivision of $\Delta_3$]
-  \label{constr:delta3-rhombic}
-  \uses{def:polytope, def:minkowski-join}
-  Let
+\begin{corollary}[Geometric signed-simplex representation]
+  \label{cor:geometric-signed-simplex}
+  \uses{thm:polytope-triangulation, lem:full-additivity,
+    lem:support-minkowski-sum}
+  The support function of every polytope is a finite signed sum of support
+  functions of simplices and their nonempty common faces.
+\end{corollary}
+\begin{proof}
+  \uses{thm:polytope-triangulation, lem:full-additivity,
+    lem:support-minkowski-sum}
+  Choose a finite triangulation.  Apply full additivity to its simplex cells,
+  move the even-intersection sum to the other side in the Grothendieck group,
+  and apply support functions.  Lemma~\ref{lem:support-minkowski-sum} changes
+  every Minkowski sum into an ordinary sum, giving the asserted signed sum.
+\end{proof}
+
+\begin{lemma}[Lemma 10: cover criterion for maximum depth]
+  \label{lem:cover-depth-bound}
+  \uses{lem:full-additivity, lem:relu-depth-formal-difference,
+    lem:max-newton-simplex}
+  Suppose $\Delta_{n-1}=\bigcup_{i=1}^mQ_i$ and every nonempty intersection
+  $Q_S=\bigcap_{i\in S}Q_i$ belongs to $\PolyC_k$.  Then $\MAX_n$ is
+  computable with at most $k$ hidden layers.
+\end{lemma}
+\begin{proof}
+  \uses{lem:full-additivity, lem:polytope-class-sum-closed,
+    lem:relu-depth-formal-difference, lem:max-newton-simplex}
+  Full additivity gives $\Delta_{n-1}+P=Q$, where $P$ is the finite sum of the
+  even intersections and $Q$ the finite sum of the odd intersections.  Both
+  lie in $\PolyC_k$ by closure under finite Minkowski sums.  Lemma 8 turns this
+  formal difference into a $k$-hidden-layer representation of the support
+  function of $\Delta_{n-1}$, which is $\MAX_n$.
+\end{proof}
+
+\begin{lemma}[The classes $\PolyC_k$ are closed under faces]
+  \label{lem:polytope-class-face-closed}
+  \uses{def:polytope-classes}
+  \notready
+  If $P\in\PolyC_k$ and $F$ is a nonempty face of $P$, then
+  $F\in\PolyC_k$.
+\end{lemma}
+% TODO: Asserted without proof.  Formalize faces of Minkowski sums and convex
+% joins, then induct on k.
+
+\begin{definition}[Polyhedral subdivision]
+  \label{def:polyhedral-subdivision}
+  \uses{def:polytope}
+  A finite family $(Q_i)_{i\in I}$ is a polyhedral subdivision of a polytope
+  $X$ if $X=\bigcup_iQ_i$ and every nonempty intersection of cells is a face
+  of each participating cell.
+\end{definition}
+
+\begin{corollary}[Subdivision criterion for maximum depth]
+  \label{cor:subdivision-depth-bound}
+  \uses{def:polyhedral-subdivision, lem:cover-depth-bound,
+    lem:polytope-class-face-closed}
+  If $\Delta_{n-1}$ has a polyhedral subdivision whose maximal cells belong to
+  $\PolyC_k$, then $\MAX_n$ has hidden-layer depth at most $k$.
+\end{corollary}
+\begin{proof}
+  \uses{lem:polytope-class-face-closed, lem:cover-depth-bound}
+  Every nonempty multiple intersection is a face of a participating maximal
+  cell, hence belongs to $\PolyC_k$ by face closure.  Lemma 10 applies.
+\end{proof}
+
+\section{Subdividing the four-simplex}
+
+\begin{definition}[Construction: a coordinate tetrahedron]
+  \label{constr:tetrahedron}
+  \uses{def:polytope}
+  In $\R^3$ put
   \[
-    x_1=(-1,-1,-1),\quad x_2=(1,1,-1),\quad
-    x_3=(-1,1,1),\quad x_4=(1,-1,1),
+  x_1=(-1,-1,-1),\quad x_2=(1,1,-1),\quad
+  x_3=(-1,1,1),\quad x_4=(1,-1,1),
   \]
-  and let $x_{ij}$ be the midpoint of $x_i$ and $x_j$.  The simplex
-  $\conv\{x_1,x_2,x_3,x_4\}$ is subdivided into four rhombic pyramids with
-  apex/base data
+  and let $X=\operatorname{conv}\{x_1,x_2,x_3,x_4\}$.
+\end{definition}
+
+\begin{lemma}[The coordinate hull is a three-simplex]
+  \label{lem:tetrahedron-simplex}
+  \uses{constr:tetrahedron, def:standard-simplex}
+  The points $x_1,x_2,x_3,x_4$ are affinely independent, so $X$ is affinely
+  equivalent to $\Delta_3$.
+\end{lemma}
+\begin{proof}
+  \uses{constr:tetrahedron}
+  Relative to $x_1$, the other three difference vectors are
+  $(2,2,0),(0,2,2),(2,0,2)$.  Their determinant is $16\neq0$, so they are
+  linearly independent.  Mapping the four standard simplex vertices to the
+  $x_i$ therefore extends to an affine isomorphism of their affine hulls and
+  carries $\Delta_3$ to $X$.
+\end{proof}
+
+\begin{definition}[Edge midpoints]
+  \label{def:tetrahedron-midpoints}
+  \uses{constr:tetrahedron}
+  For $1\leq i<j\leq4$, put $x_{ij}=(x_i+x_j)/2$.
+\end{definition}
+
+\begin{lemma}[Square projection]
+  \label{lem:tetrahedron-projection-square}
+  \uses{constr:tetrahedron}
+  Orthogonal projection of $x_1,x_2,x_3,x_4$ onto $e_3^\perp$ gives the four
+  vertices of the square $[-1,1]^2$.
+\end{lemma}
+\begin{proof}
+  \uses{constr:tetrahedron}
+  Projection deletes the third coordinate, giving
+  $(-1,-1),(1,1),(-1,1),(1,-1)$, exactly the four square vertices.
+\end{proof}
+
+\begin{definition}[Construction: four rhombic-pyramid cells]
+  \label{constr:rhombic-cells}
+  \uses{def:tetrahedron-midpoints}
+  Define four cells by their apex and four base vertices:
   \[
   \begin{array}{c|c}
-  \text{apex} & \text{base}\\ \hline
-  x_{12} & x_1,x_{14},x_{34},x_{13}\\
-  x_{12} & x_2,x_{23},x_{34},x_{24}\\
-  x_{34} & x_3,x_{13},x_{12},x_{23}\\
-  x_{34} & x_4,x_{14},x_{12},x_{24}.
+  x_{12}&x_1,x_{14},x_{34},x_{13}\\
+  x_{12}&x_2,x_{23},x_{34},x_{24}\\
+  x_{34}&x_3,x_{13},x_{12},x_{23}\\
+  x_{34}&x_4,x_{14},x_{12},x_{24}.
   \end{array}
   \]
-  Each piece has the form $p_i*Z_i$ where $p_i\in\mathcal{P}_0$ is a point and
-  $Z_i\in\mathcal{P}_1$ is a rhombus.
-\end{construction}
-\begin{proof}
-  \uses{def:convex-hull, def:minkowski-join, def:Pk}
-  The four vertices form an affine copy of $\Delta_3$.  Orthogonal projection
-  to the plane perpendicular to the third coordinate sends them to the four
-  vertices of a square.  Cutting the simplex by the two coordinate planes
-  perpendicular to the first and second coordinates separates this square into
-  four quadrants, and lifting these cuts back to the simplex gives the four
-  listed cells.  In each cell, the four base points form a parallelogram, hence
-  a rhombus affinely equivalent to the convex hull of two line segments and so
-  in $\mathcal{P}_1$.  Joining that base to the listed apex gives the
-  corresponding rhombic pyramid.
-\end{proof}
+  In each row $Q_i$ is the convex hull of the apex and the listed base, and
+  $Z_i$ is the convex hull of the four base vertices.
+\end{definition}
 
-\begin{construction}[Subdivision of $\Delta_4$ into $\mathcal{P}_2$ cells]
-  \label{constr:delta4-P2}
-  \uses{constr:delta3-rhombic, def:Pk}
-  Let $X$ be a three-dimensional face of $\Delta_4$ and $x_5$ the remaining
-  vertex, so $\Delta_4=x_5*X$.  Subdivide $X$ into the four rhombic pyramids
-  $p_i*Z_i$ from Construction~\ref{constr:delta3-rhombic}.  Then
-  \[
-    x_5*(p_i*Z_i)=(x_5*p_i)*Z_i\in\mathcal{P}_2
-  \]
-  gives a subdivision of $\Delta_4$ into four full-dimensional cells in
-  $\mathcal{P}_2$.
-\end{construction}
-\begin{proof}
-  \uses{constr:delta3-rhombic, def:Pk}
-  Since $\Delta_4$ is the join of $x_5$ with the face $X$, joining $x_5$ to
-  each cell of a subdivision of $X$ subdivides all of $\Delta_4$.  For each
-  cell $p_i*Z_i$, the segment $x_5*p_i$ belongs to $\mathcal{P}_1$, and
-  $Z_i$ belongs to $\mathcal{P}_1$ by Construction~\ref{constr:delta3-rhombic}.
-  Their join is therefore an allowed summand in the definition of
-  $\mathcal{P}_2$.
-\end{proof}
-
-\begin{lemma}[Equation (2) from the $\Delta_4$ subdivision]
-  \label{lem:delta4-subdivision-to-M}
-  \uses{constr:delta4-P2, def:m-function, lem:subdivision-upper-bound}
-  The four full-dimensional cells in Construction~\ref{constr:delta4-P2} have
-  support functions corresponding to $P_1,P_2,P_3,P_4$, and their
-  lower-dimensional intersections have support functions corresponding to
-  $Q,R_{13},R_{14},R_{23},R_{24}$.  Lemma~\ref{lem:full-additivity} therefore
-  yields the signed formula defining $M$.
+\begin{lemma}[The four bases are rhombi]
+  \label{lem:rhombic-bases}
+  \uses{constr:rhombic-cells}
+  Each $Z_i$ is a parallelogram with four equal edge lengths, hence a rhombus.
 \end{lemma}
 \begin{proof}
-  \uses{constr:delta4-P2, def:p1, def:p2, def:p3, def:p4, def:q, def:r13, def:r14, def:r23, def:r24, lem:full-additivity}
-  Taking support functions turns convex hulls into maxima and Minkowski sums
-  into sums.  The four cells $(x_5*p_i)*Z_i$ therefore produce the four
-  functions $P_1,P_2,P_3,P_4$, while the nonempty pairwise and higher
-  intersections of the cells are precisely the lower-dimensional faces whose
-  support functions are $Q$ and the four $R$ terms.  The alternating
-  inclusion-exclusion identity of Lemma~\ref{lem:full-additivity} is exactly
-  the signed half-sum in Definition~\ref{def:m-function}.
+  \uses{constr:tetrahedron, def:tetrahedron-midpoints}
+  For the first base,
+  $x_1+x_{34}=x_{14}+x_{13}$, so its diagonals bisect each other, while the
+  adjacent difference vectors $(1,0,1)$ and $(0,1,1)$ both have length
+  $\sqrt2$.  The coordinate symmetries swapping $1,2$, swapping $3,4$, and
+  swapping the two pairs carry this computation to the other three bases.
 \end{proof}
 
-\begin{remark}[Higher-dimensional geometric intuition]
-  \label{rem:higher-dimensional-intuition}
-  \uses{constr:delta3-rhombic, lem:claim5, thm:max-3n-plus-2}
-  The rhombic-pyramid subdivision replaces a triangular piece, encoded by
-  three point-like alternatives, by one parallelogram-like object of lower
-  polytope complexity.  Algebraically, this is the passage from
-  $T_{a,b+4}$ to $\mathcal{T}_{a+1,b+1}$ in Claim 5.  Repeating the operation
-  reduces the number of alternatives by a factor of three per layer, producing
-  the $\log_3$ upper bound of Theorem~\ref{thm:max-3n-plus-2}.
-\end{remark}
+\begin{lemma}[A rhombus belongs to $\PolyC_1$]
+  \label{lem:rhombus-class-one}
+  \uses{def:polytope-classes, def:minkowski-sum}
+  Every parallelogram, and hence every $Z_i$, belongs to $\PolyC_1$.
+\end{lemma}
 \begin{proof}
-  \uses{constr:delta3-rhombic, lem:claim5, thm:max-3n-plus-2}
-  Construction~\ref{constr:delta3-rhombic} is the geometric move: a triangle
-  in the join description is replaced by a parallelogram cell.  Claim 5 is the
-  algebraic encoding of the same move, converting four extra scalar alternatives
-  into one new paired-sum block and one extra scalar.  Claim 7 then implements
-  the paired-sum blocks by one additional ReLU layer.  Iterating these two
-  steps gives the depth bound of Theorem~\ref{thm:max-3n-plus-2}.
+  \uses{def:polytope-classes}
+  Translating if necessary, a parallelogram with edge vectors $u,v$ is
+  $p+[0,u]+[0,v]$.  Each segment is the convex join of its two singleton
+  endpoints, so the Minkowski sum of the two segments (with the translation
+  absorbed into one segment's endpoints) is a finite sum of joins of
+  $\PolyC_0$ members, hence is in $\PolyC_1$.
 \end{proof}
 
-\begin{conjecture}[Open constant-depth maximum question]
-  \label{conj:constant-depth-max}
-  \uses{def:maxn, cor:max-arbitrary-depth}
-  It remains open whether a constant number of hidden layers, perhaps even two
-  hidden layers, suffices to compute $\MAX_m$ for all $m$.
-\end{conjecture}
+\begin{lemma}[Each cell is a rhombic pyramid in $\PolyC_2$]
+  \label{lem:rhombic-cells-class-two}
+  \uses{constr:rhombic-cells, lem:rhombus-class-one,
+    lem:polytope-class-monotone}
+  For every $i$, $Q_i=p_i*Z_i$ for the listed apex $p_i$, and
+  $Q_i\in\PolyC_2$.
+\end{lemma}
+\begin{proof}
+  \uses{def:convex-join, def:polytope-classes,
+    lem:rhombus-class-one, lem:polytope-class-monotone}
+  The equality is the definition of the convex hull of the apex and base.
+  The apex is in $\PolyC_0$ and therefore in $\PolyC_1$ by monotonicity, while
+  $Z_i\in\PolyC_1$.  Their join is an allowed one-term expression in
+  $\PolyC_2$.
+\end{proof}
 
-\begin{conjecture}[Open two-layer case for $\MAX_6$]
-  \label{conj:max6-two-layers}
-  \uses{prop:max5-depth-two, def:maxn}
-  It remains open whether $\MAX_6$ can be represented with two hidden layers.
-\end{conjecture}
+\begin{lemma}[The two coordinate cuts cover the tetrahedron]
+  \label{lem:tetrahedron-cell-cover}
+  \uses{constr:tetrahedron, constr:rhombic-cells,
+    lem:tetrahedron-projection-square}
+  \notready
+  Cutting $X$ by the planes $e_1^\perp$ and $e_2^\perp$ yields exactly the
+  four cells $Q_1,Q_2,Q_3,Q_4$, and $X=\bigcup_iQ_i$.
+\end{lemma}
+% TODO: The paper establishes this with Figures 1--2 and the cell table but
+% omits a barycentric or half-space proof.  Verify the four sign regions.
+
+\begin{lemma}[The tetrahedral cells meet face-to-face]
+  \label{lem:tetrahedron-cell-faces}
+  \uses{constr:rhombic-cells}
+  \notready
+  Every nonempty intersection of the cells $Q_i$ is a common face of the
+  participating cells.
+\end{lemma}
+% TODO: Compute half-space descriptions and all nonempty incidences; the paper
+% provides only the geometric figures.
+
+\begin{corollary}[Rhombic-pyramid subdivision of $\Delta_3$]
+  \label{cor:tetrahedron-subdivision}
+  \uses{lem:tetrahedron-simplex, lem:rhombic-cells-class-two,
+    lem:tetrahedron-cell-cover, lem:tetrahedron-cell-faces,
+    def:polyhedral-subdivision}
+  The four $Q_i$ give a polyhedral subdivision of a copy of $\Delta_3$ into
+  rhombic pyramids belonging to $\PolyC_2$.
+\end{corollary}
+\begin{proof}
+  \uses{lem:tetrahedron-simplex, lem:rhombic-cells-class-two,
+    lem:tetrahedron-cell-cover, lem:tetrahedron-cell-faces}
+  The affine-simplex identification, the cover, and the face-to-face property
+  are exactly the subdivision axioms; class membership was proved separately.
+\end{proof}
+
+\begin{definition}[Construction: coning the subdivision to $\Delta_4$]
+  \label{constr:delta-four-cells}
+  \uses{cor:tetrahedron-subdivision, def:convex-join}
+  Let $X$ be a tetrahedral facet of $\Delta_4$, let $x_5$ be its opposite
+  vertex, and define $\widehat Q_i=x_5*Q_i$.
+\end{definition}
+
+\begin{lemma}[Reassociation of the coned cells]
+  \label{lem:delta-four-cell-reassociate}
+  \uses{constr:delta-four-cells, lem:convex-join-assoc}
+  For $Q_i=p_i*Z_i$,
+  $x_5*(p_i*Z_i)=(x_5*p_i)*Z_i$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:convex-join-assoc}
+  This is associativity of convex join.
+\end{proof}
+
+\begin{lemma}[The coned cells belong to $\PolyC_2$]
+  \label{lem:delta-four-cells-class-two}
+  \uses{lem:delta-four-cell-reassociate, lem:rhombus-class-one,
+    def:polytope-classes}
+  Each $\widehat Q_i$ belongs to $\PolyC_2$.
+\end{lemma}
+\begin{proof}
+  \uses{lem:delta-four-cell-reassociate, lem:rhombus-class-one,
+    def:polytope-classes}
+  The segment $x_5*p_i$ is a join of singleton polytopes and lies in
+  $\PolyC_1$; the rhombus $Z_i$ also lies in $\PolyC_1$.  Their join is an
+  allowed $\PolyC_2$ term.
+\end{proof}
+
+\begin{lemma}[The coned cells subdivide $\Delta_4$]
+  \label{lem:delta-four-subdivision}
+  \uses{constr:delta-four-cells, cor:tetrahedron-subdivision}
+  The four cells $\widehat Q_i$ form a polyhedral subdivision of
+  $\Delta_4=x_5*X$.
+\end{lemma}
+\begin{proof}
+  \uses{cor:tetrahedron-subdivision, def:polyhedral-subdivision}
+  Convex join with the common apex distributes over the union of the cells,
+  so the coned cells cover $x_5*X$.  Because the apex lies outside the affine
+  hull of $X$, intersections of cones are cones over the corresponding base
+  intersections.  A cone over a common face is a common face of the coned
+  cells.  Thus the face-to-face property is preserved.
+\end{proof}
+
+\begin{corollary}[Geometric two-layer realization of $\MAX_5$]
+  \label{cor:max-five-geometric}
+  \uses{lem:delta-four-cells-class-two, lem:delta-four-subdivision,
+    cor:subdivision-depth-bound}
+  The subdivision of $\Delta_4$ gives a two-hidden-layer realization of
+  $\MAX_5$.
+\end{corollary}
+\begin{proof}
+  \uses{lem:delta-four-cells-class-two, lem:delta-four-subdivision,
+    cor:subdivision-depth-bound}
+  Apply the subdivision criterion with $n=5$ and $k=2$.
+\end{proof}
+
+\begin{lemma}[Newton polytopes of the four positive full-dimensional terms]
+  \label{lem:newton-p-cells}
+  \uses{def:newton-polytope, def:p1, def:p2, def:p3, def:p4,
+    constr:delta-four-cells}
+  \notready
+  Under the affine coordinate identification above, the unordered family of
+  Newton polytopes of $P_1,P_2,P_3,P_4$ is the family of four full-dimensional
+  cells $\widehat Q_1,\ldots,\widehat Q_4$.
+\end{lemma}
+% TODO: The paper asserts this correspondence without listing the affine map.
+% Compare the convex hulls of the six coefficient vectors term by term.
+
+\begin{lemma}[Newton polytopes of the correction terms]
+  \label{lem:newton-correction-faces}
+  \uses{def:newton-polytope, def:q, def:r13, def:r14, def:r23, def:r24,
+    lem:newton-p-cells}
+  \notready
+  The Newton polytopes of $Q,R_{13},R_{14},R_{23},R_{24}$ are precisely the
+  lower-dimensional faces that occur in the inclusion--exclusion identity for
+  the four full-dimensional cells.
+\end{lemma}
+% TODO: The paper does not enumerate the face incidences.  Compute them from
+% the coefficient-vector convex hulls before formalization.
+
+\section{Higher-dimensional interpretation}
+
+\begin{lemma}[A tetrahedron is a point--triangle join]
+  \label{lem:tetrahedron-point-triangle}
+  \uses{def:standard-simplex, def:convex-join}
+  The simplex $\Delta_3$ is the convex join of any one vertex with the opposite
+  triangular facet.
+\end{lemma}
+\begin{proof}
+  The convex hull of all four vertices is, by associativity of convex hull,
+  the convex hull of the chosen vertex together with the convex hull of the
+  other three vertices.
+\end{proof}
+
+\begin{lemma}[Triangles have polytope complexity at most two]
+  \label{lem:triangle-class-two}
+  \uses{def:polytope-classes, lem:polytope-class-monotone}
+  Every triangle belongs to $\PolyC_2$.
+\end{lemma}
+\begin{proof}
+  \uses{def:polytope-classes, lem:polytope-class-monotone}
+  A segment is the join of two singleton polytopes and belongs to
+  $\PolyC_1$.  A third singleton also belongs to $\PolyC_1$ by monotonicity.
+  Their join is the triangle and is an allowed term in $\PolyC_2$.
+\end{proof}
+
+\begin{proposition}[Three-to-one geometric replacement]
+  \label{prop:geometric-three-to-one}
+  \uses{lem:tetrahedron-point-triangle, lem:triangle-class-two,
+    cor:tetrahedron-subdivision, lem:rhombus-class-one}
+  The rhombic-pyramid subdivision replaces the triangular component of the
+  point--triangle presentation of $\Delta_3$ (a join of three points in
+  $\PolyC_2$) by a rhombus in $\PolyC_1$ inside each cell.
+\end{proposition}
+\begin{proof}
+  \uses{lem:tetrahedron-point-triangle, lem:triangle-class-two,
+    cor:tetrahedron-subdivision, lem:rhombus-class-one}
+  The first two lemmas give the point--triangle presentation and its class.
+  The explicit subdivision writes every cell as $p_i*Z_i$, and each $Z_i$ is
+  a rhombus in $\PolyC_1$.  This is exactly the stated local replacement.
+\end{proof}
+
+\begin{proposition}[Omitted higher-dimensional geometric recursion]
+  \label{remark:geometric-recursion-gap}
+  \uses{prop:geometric-three-to-one, lem:claim-five}
+  \notready
+  A fully geometric iteration should formalize that this replacement reduces
+  the number of joined objects by a factor of three per layer and recovers the
+  $\log_3$ bound.  The paper deliberately omits the required theory of joins
+  interacting with subdivisions; Claim~\ref{lem:claim-five} is its algebraic
+  substitute.
+\end{proposition}
+% TODO: Supply the missing higher-dimensional join/subdivision theorem rather
+% than promoting the heuristic sentence to a proof.
+
+\chapter{Conclusions and external quantitative context}
+
+\begin{theorem}[Universal approximation by one hidden layer]
+  \label{thm:universal-approximation}
+  \uses{def:relu-network}
+  \notready
+  On a bounded domain, every continuous function can be uniformly approximated
+  arbitrarily well by one-hidden-layer networks under the hypotheses of the
+  cited universal-approximation theorems; the nonpolynomial-activation version
+  includes ReLU.
+\end{theorem}
+% TODO: The paper cites [Cyb89, HSW89, LLPS93]; state one precise theorem with
+% its domain, norm, and activation hypotheses, then formalize or import it.
+
+\begin{proposition}[Reported bound on the Wang--Sun term count]
+  \label{prop:wang-sun-term-count}
+  \uses{thm:wang-sun-representation}
+  \notready
+  If a CPWL function on $\R^n$ has $p$ distinct affine pieces represented
+  locally, then the reported best asymptotic upper bound for the number $s$ of
+  terms in Equation (1) is $s\in O(p^{n+1})$.
+\end{proposition}
+% TODO: The paper aggregates several references and gives no constants or
+% exact quantifiers.  Pin down the precise source theorem before formalizing.
+
+\begin{proposition}[Open depth questions]
+  \label{remark:open-depth-questions}
+  \uses{prop:max-five-depth, thm:main-cpwl}
+  It remains open whether $\MAX_6$ has a two-hidden-layer realization and
+  whether a constant number of hidden layers, possibly two, represents every
+  CPWL function in every dimension.
+\end{proposition}
+\begin{proof}
+  This records the paper's explicit open problems rather than a proposition
+  requiring proof.
+\end{proof}
