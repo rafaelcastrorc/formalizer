@@ -9430,6 +9430,33 @@ Conjecture policy (`attempt`) for: {listed}
 """
 
 
+def _text_only_budget_rule(timeout_s: int) -> str:
+    """Shared budget bullet for read-only generation calls.
+
+    Every generation backend is text-only by construction (README: read-only
+    model calls): the harness alone inspects the repository, searches
+    libraries, and compiles. The former wording licensed spending half the
+    budget "verifying library APIs or exploring" — an activity no backend can
+    perform. Because readonly Claude Code removes the tools from the schema
+    rather than denying calls, models answered that allowance with
+    tool-invocation markup, bare shell commands, or investigation narration as
+    plain text (62 of 404 stored Phase-1 statement responses), sometimes
+    hallucinating the "results". This bullet states the real contract instead;
+    the original timeout protections (leave time to emit, an imperfect reply
+    beats none, never end without code) are retained.
+    """
+    return f"""- This call has a wall-clock budget of about {timeout_s}s and is text-only: no shell,
+  file, search, or web tool is available, and tool-invocation text in a reply
+  is rejected as commentary. Never try to inspect the repository, run
+  commands, or search a library; the module paths, dependency interfaces, and
+  API snippets supplied in this prompt are already verified, so reason
+  directly from them. Always leave time to emit your complete Lean reply: an
+  imperfect reply beats no reply, because the Lean compiler and the audits
+  exist precisely to catch and correct mistakes, while a reply without the
+  requested code wastes the entire call. Never end the budget without having
+  produced the requested code."""
+
+
 def _common_rules(ctx: Ctx, labels: list[str] | None = None) -> str:
     unavailable = ""
     if ctx.unavailable_imports:
@@ -9707,12 +9734,7 @@ Generate ONE declaration per target node listed below — statements only:
 - A statement should visibly use the generated Lean declarations of the
   definition nodes it `uses`; imports of earlier skeleton modules make them
   available (do not redefine them).
-- This call has a wall-clock budget of about {timeout_s}s. Spend AT MOST half
-  of it verifying library APIs or exploring; always leave time to emit your
-  complete Lean reply. An imperfect reply beats no reply: the Lean compiler
-  and the audits exist precisely to catch and correct mistakes, while a
-  timeout wastes the entire call and its exploration. Never end the budget
-  without having produced the requested code.
+{_text_only_budget_rule(timeout_s)}
 
 {_common_rules(ctx, labels)}
 {feedback_block}
@@ -9877,12 +9899,7 @@ Rules:
 - {helper_rule}
 - Do not emit any helper `def`, `abbrev`, theorem, lemma, or instance beyond
   the exact plan-owned interfaces named above.
-- This call has a wall-clock budget of about {timeout_s}s. Spend AT MOST half
-  of it verifying library APIs or exploring; always leave time to emit your
-  complete Lean reply. An imperfect reply beats no reply: the Lean compiler
-  and the audits exist precisely to catch and correct mistakes, while a
-  timeout wastes the entire call and its exploration. Never end the budget
-  without having produced the requested code.
+{_text_only_budget_rule(timeout_s)}
 
 {_common_rules(ctx, patch_labels)}
 
@@ -10440,12 +10457,7 @@ For EACH target declaration below, return that declaration with its terminal
 - Dependency declarations may still have deferred bodies in the skeleton;
   using their frozen interfaces is exactly how the blueprint dependency graph
   is supposed to work.
-- This call has a wall-clock budget of about {timeout_s}s. Spend AT MOST half
-  of it verifying library APIs or exploring; always leave time to emit your
-  complete Lean reply. An imperfect reply beats no reply: the Lean compiler
-  and the audits exist precisely to catch and correct mistakes, while a
-  timeout wastes the entire call and its exploration. Never end the budget
-  without having produced the requested code.
+{_text_only_budget_rule(timeout_s)}
 {single_note}
 {_common_rules(ctx, [label for label, _decl in targets])}
 
@@ -16077,10 +16089,7 @@ Per-node rules:
   separate mathematical obligation requires `NEEDS-DECOMPOSITION`.
 - Emit a declaration for EVERY target node listed. Coverage is checked
   deterministically.
-- This call has a wall-clock budget of about {timeout_s}s. Spend AT MOST half
-  of it verifying library APIs; always leave time to emit the complete file.
-  An imperfect file beats no file: the compiler and the audits exist to catch
-  mistakes, while a timeout wastes the entire pass.
+{_text_only_budget_rule(timeout_s)}
 
 {_common_rules(ctx, labels)}
 

@@ -1,5 +1,94 @@
 # Latest Changes
 
+## 2026-08-22: Replace the Read-Only Exploration Allowance With a Text-Only Call Contract
+
+### Confirmed failure
+
+Every generation call is read-only by design (README: read-only model calls):
+`claude-code` removes all tools, `codex` disables execution, and API backends
+never receive tools; the harness alone inspects the repository, searches
+libraries, and compiles. The Phase-1 statement, Phase-1 patch, and Phase-2
+proof prompts nevertheless told the model to "Spend AT MOST half of it
+verifying library APIs or exploring" — an activity no backend can perform.
+Because readonly Claude Code removes the tools from the schema rather than
+denying calls at runtime, the model received no "tool unavailable" feedback:
+recorded calls emitted tool-invocation markup, bare shell commands, or
+investigation narration as plain assistant text — sometimes hallucinating the
+file contents they claimed to have read — and that text was stored as the
+model's answer.
+
+Across the stored telemetry corpus, 62 of 404 Phase-1 statement-generation
+responses (15.3%) contained no Lean declaration at all (12 tool-markup, 25
+shell-command, 19 narration, 6 other), wasting 66.5 minutes of model time
+directly (mean 64.3s, max 488.8s at the opus escalation tier). Twenty-two were
+multi-label batches, so the batch-scoped router isolated/bisected them; 61
+labels were regenerated, consuming 274 follow-up calls and 105.6 minutes
+before the next success, 110 of them at a changed model/effort tier. The
+Phase-2 proof prompt shares the same sentence and recorded 5 of 72 such
+responses.
+
+### Correction
+
+- The four prompts that carried the sentence — Phase-1 bulk statement
+  generation, Phase-1 retry generation, Phase-1 targeted declaration patch,
+  and Phase-2 proof bodies — now share one provider-neutral
+  `_text_only_budget_rule`. It states the actual contract: the call is
+  text-only, no shell/file/search/web tool exists, tool-invocation text is
+  rejected as commentary, the supplied module paths/interfaces/API snippets
+  are already verified, and the model must reason from them and never end the
+  budget without the requested code.
+- The original timeout protections are retained: leave time to emit, an
+  imperfect reply beats no reply, the compiler and audits catch mistakes.
+  Only the impossible exploration allowance is removed. This mirrors the
+  contract `_initial_declaration_prompt` already used successfully.
+- No retry policy, import handling, schema rule, or provider-specific branch
+  changes. Specific-imports guidance ("never blanket `import Mathlib`") and
+  the statements-only Phase-1 schema are untouched and now pinned by tests.
+- Follow-up evidence, deliberately not changed here: `phase2_whole_node_repair`
+  prompts never contained the exploration sentence yet recorded 45/157 (29%)
+  tool-narration responses, confirming the root cause is the model never being
+  told its tools are gone. Extending the text-only contract to those prompts
+  needs its own validation pass.
+
+### Validation
+
+A/B validation used the production `claude-code` read-only runner, ingestion
+boundary, deterministic skeleton gates, Lean compiler, and statement-alignment
+audit on four recorded failing prompts from Simplex telemetry run
+`20260821-181032` (seq 447, 449, 591 at sonnet/medium/300s; seq 2236 at
+opus/high/600s — the call that historically wasted 488.8s). Control was the
+exact recorded prompt; treatment replaced only the budget bullet. Three
+repetitions per arm per case (24 calls):
+
+- recorded tool/narration no-Lean failures: control 6/12, treatment 0/12;
+- tool pantomime anywhere in the response: control 6/12, treatment 0/12;
+- responses reaching the deterministic gates: control 6/12, treatment 11/12
+  (the one exception was an empty 300s timeout on the hardest batch, matched
+  by an equal control timeout on the same case);
+- compiled candidates 3 vs 2; audit-accepted declarations 2 vs 1; model time
+  per audit-accepted declaration 18.6 min (treatment) vs 25.5 min (control);
+- conditional on reaching the gates, deterministic-finding rates were
+  equivalent (4/6 vs 7/11), and the two partial-coverage treatment responses
+  are exactly the shape the partial-response salvage path retains.
+
+The Codex CLI and API backends are not installed or configured on this
+machine (the complete local telemetry corpus is `claude-code`/`anthropic`),
+so the mandated Codex cross-check could not run; the change is one shared
+provider-neutral sentence with no Claude-only branching, and Codex validation
+should be repeated on a codex-equipped machine before relying on that runner.
+
+Committed regression fixtures under `tests/fixtures/phase1_tool_narration/`
+preserve the four recorded responses; `tests/test_phase1_text_only_contract.py`
+verifies they stay deterministic format rejections and that all four prompts
+carry the text-only contract with the exploration wording gone and the
+specific-import rule intact. The full suite ran 427 tests with one
+pre-existing, unrelated error: `opaque_theorem_object_reuse.json`, cited by
+the 2026-08-21 fast-path entry below, was never actually committed, so its
+test fails on a clean checkout. Every committed Phase-1 plan replay passed
+with `--require-progress`, the scheduler-latency replay reproduced its
+documented bounds, the Phase-2 retained-candidate replay retained its
+`2.741x` result, and Python compilation and `git diff --check` passed.
+
 ## 2026-08-21: Keep Opaque Theorem Proofs on the Phase-2 Object Fast Path
 
 ### Confirmed failure

@@ -356,11 +356,7 @@ representation choices and vocabulary across the pending graph. It is advisory:
 it contains no Lean signatures, binder types, helper fields, constructors,
 imports, bodies, or proofs, and it is never repaired in a separate model loop.
 Malformed or missing entries fall back deterministically to blueprint-only
-guidance, so planning cannot block Phase 1. A planner call that times out after
-emitting absolutely no response receives one fresh call through the same base
-runner; this recovers a silent provider/session outlier without adding a plan
-repair loop. If that one call also produces no usable entries, the same
-blueprint-only fallback applies. The prompt includes the authoritative
+guidance, so planning cannot block Phase 1. The prompt includes the authoritative
 dependency-contract table. Only statement dependencies may shape public
 interfaces; proof-only dependencies are reserved for Phase 2, and root context
 cannot invent graph edges absent from the blueprint.
@@ -740,8 +736,17 @@ compact semantic plan plus candidate-derived typed contracts described above.
    `import Mathlib` diagnostic retry runs only for missing-name errors that an
    import can plausibly resolve. Type mismatches, heartbeat exhaustion, and
    unfinished tactics are never compiled a second time merely with a broader
-   import. Every generation prompt carries a write-discipline rule: spend at
-   most half the budget exploring, and always emit the requested code.
+   import. Every generation prompt carries a write-discipline rule: the call
+   is text-only — no shell, file, search, or web tool exists, tool-invocation
+   text is rejected as commentary, and the supplied module paths, dependency
+   interfaces, and API snippets are already deterministically verified — so
+   the model must reason from the prompt and always emit the requested code
+   before the budget ends. The former "spend at most half the budget
+   exploring" allowance was removed after recorded read-only Claude calls
+   answered it with tool-invocation pantomime and investigation narration
+   instead of Lean; no backend can actually explore, and the timeout
+   protections (leave time to emit, an imperfect reply beats none) are
+   retained.
 2. **Phase 2 — bodies and proofs top-down.** Phase 1
    freezes exact declaration headers/interfaces but leaves both theorem proofs
    and typed `def`/`abbrev` bodies as terminal `sorry`. Phase 2 implements every
