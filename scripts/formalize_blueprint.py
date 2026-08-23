@@ -87,6 +87,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -27655,6 +27656,13 @@ def logged_main(argv: list[str] | None = None) -> int:
             except (FileNotFoundError, RunnerError, subprocess.CalledProcessError) as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return 2
+            except Exception:
+                # Python normally prints an unhandled traceback only after
+                # this redirect context has unwound. Print it here so the
+                # persistent formalization log and the terminal/Web UI both
+                # receive the complete failure.
+                traceback.print_exc(file=sys.stderr)
+                return 1
             finally:
                 signal.signal(signal.SIGTERM, old_sigterm)
                 print(f"Log file: {log_path.relative_to(REPO_ROOT)}", flush=True)
