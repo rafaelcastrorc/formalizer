@@ -5,6 +5,33 @@ Phase 1 runs that exposed retry and scheduling regressions. They are committed
 test resources: the tests do not need local `.auto-blueprint/` telemetry, R2,
 network access, or a model account.
 
+`theorem_like_contract_poisoning.json` preserves the terminal Simplex loop from
+`run-20260827-131622`. A rejected theorem-like candidate was emitted as
+`def ... : Prop := sorry`, rewrote its own authoritative contract before the
+same deterministic transaction rejected it, and then lost its producing tier
+when targeted correction exhausted. Retries 33--100 consequently consumed the
+shared outer budget in ten seconds with no model call or state progress. The
+paired executable regressions require theorem-like targets to remain theorem or
+lemma declarations with a concrete proposition, make candidate contract
+realization atomic with deterministic acceptance, and preserve the producing
+tier so the existing bounded exhaustion router changes strategy immediately.
+
+`terminal_sorry_outer_let.json` preserves two legal Phase-1 declaration shapes
+observed in Simplex and unconditional-unclonable-encryption: the theorem result
+type contains an unparenthesized `let` or `letI` assignment before the final
+`:= sorry`. The regression requires ingestion and frozen-interface extraction
+to remove only the final Phase-1 marker. It also retains a completed-definition
+control proving that actual implementation bodies are still deferred.
+
+`structured_statement_audit_routing.json` preserves the exact three-node
+statement-audit response from Simplex telemetry sequence 827/829. The critic
+classified every issue as a plan-origin `lean_translation_issue`, named the
+existing required dependencies, and requested no helper or missing blueprint
+information. The former prose-keyword override nevertheless routed two labels
+to decomposition. The executable regression requires all three labels to stay
+on plan/Lean correction while retaining their deterministic dependency-edge
+evidence.
+
 `scoped_blueprint_repair.json` preserves the response shapes needed by the
 provider-neutral blueprint-repair boundary: a singleton repair, a multi-target
 Simplex-style repair with target-owned helpers, and invalid responses that try
@@ -145,6 +172,17 @@ base and escalated compiler failures to use the same bounded lifecycle as
 statement-audit failures, switch once to blueprint-direct generation, and route
 only exhaustion of that direct lifecycle to scoped decomposition.
 
+`simplex_interface_usability_lifecycle.json` preserves the Phase 1 interface
+elaboration failures from `run-20260831-022739`. Lean timed out even after the
+pipeline had replaced every target implementation and proof by `sorry`, but the
+old generic compile-failure route treated those timeouts as evidence for adding
+new mathematical helper nodes. The paired regressions require one bounded plan
+correction, one switch to blueprint-direct statement generation, and then only
+ordinary bounded retries for that unchanged statement. A compiler timeout by
+itself must never authorize blueprint repair or decomposition. Recognition is
+required at the first local Lean check, before any compiler-patch model call;
+malformed Lean continues through the existing compiler-failure lifecycle.
+
 `scoped_compile_failure_attribution.json` preserves the twelve-contract
 Simplex compiler group from `run-20260820-032411`. Lean diagnostics identified
 only `def:relu-network`, but the old router advanced all eleven unrelated
@@ -217,12 +255,38 @@ The fixtures contain hashes, outcomes, durations, timestamps, and minimal
 synthetic compiler inputs needed by the policy tests. They do not contain paper
 text, model prompts, or full generated formalizations.
 
+`explicit_open_claim.json` preserves the Simplex source shape that exposed an
+open mathematical question inside a generic `proposition` environment labeled
+`remark:open-depth-questions`. The paired negative control uses the topological
+phrase "open set". The regression requires only the explicit question to enter
+the configured conjecture policy.
+
 `blueprint_direct_sibling_evidence.json` preserves the circuit-breaker state
 corruption from Simplex `run-20260814-235036`. One unchanged statement acquired
 audit findings owned by two sibling nodes, so unrelated sibling corrections
 changed its plan fingerprint and discarded its retained candidate. The paired
 regression requires blueprint-direct evidence and fingerprints to remain
-declaration-owned while still allowing each sibling's own evidence to evolve.
+declaration-owned. Once a statement is already blueprint-direct, later findings
+are cumulative retry feedback and cannot reactivate the strategy or redefine its
+fingerprint.
+
+The Phase-2 fixture
+`../phase2_orchestration_replay/provider_contract_ownership.json` preserves two
+later Simplex failures from run `20260823-001604`: a caught queued repair that
+was activated without its required rollback snapshot, and two scoped boundary
+audits that repeatedly blamed changed consumer helpers even though both named
+the same missing capability in the unchanged dependency provider. Regressions
+require every activation path to cross the snapshot gate and require a
+provider diagnosis to remain inside the original root's existing dependency
+closure, roll back the consumer transaction, and queue the provider separately.
+
+`blueprint_direct_reactivation.json` records the repeated
+`prop:linear-size` activation from Simplex `run-20260823-001604`. The statement
+fingerprint did not change between the candidate semantic exhaustion and the
+later integrated-audit finding, but the old implementation crossed the
+generation-epoch boundary again and erased its retry state. The paired
+regression requires one activation, a continuous base/escalation lifecycle, and
+a genuinely new activation only after the blueprint statement changes.
 
 `integration_gate_reuse.json` preserves the 699-second boundary between the
 last frozen Phase 1 contract and Phase 2 in the Simplex snapshot
@@ -230,3 +294,18 @@ last frozen Phase 1 contract and Phase 2 in the Simplex snapshot
 froze. The regression requires the final integration gate to reuse all 39
 matching objects, perform no section recompilation, and retain one aggregate
 import check over the complete environment.
+
+`candidate_contract_refresh_lifecycle.json` preserves the 282 candidate-header
+epoch transitions in Simplex `run-20260825-194345`. The paired executable
+regression requires a candidate-owned typed-contract refresh to preserve the
+same candidate, retry lifecycle, and exchange history. Only a genuine
+blueprint, plan-authority, or generation-strategy change may cross the full
+Phase 1 epoch boundary.
+
+`evidence_lifecycle_matrix.json` unifies the validity boundaries demonstrated
+by the semantic/compiler handoff, immediate dependency-edge, blueprint-direct
+reactivation, sibling-isolation, and candidate contract-refresh fixtures.
+Executable regressions require statement facts to survive plan/candidate
+replacement, plan facts to expire with a changed plan, candidate diagnostics
+to expire with replaced Lean, and dependency observations to be consumed only
+by the exact graph transaction that uses them.

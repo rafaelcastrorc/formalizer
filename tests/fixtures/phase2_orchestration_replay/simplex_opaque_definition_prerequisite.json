@@ -40,6 +40,15 @@
     "repair_trial_consumed": false,
     "resume_order_after_prerequisite": "top-down"
   },
+  "pending_helper_preemption_case": {
+    "source_run": ".auto-blueprint/formalization/simplex/run-20260830-205601.log",
+    "observed_repeated_decompositions_naming_provider": 29,
+    "provider_label": "def:polyhedral-subdivision",
+    "blocked_label": "lem:subdivision-cells-cover-polytope",
+    "contract_pending_label": "lem:subdivision-intersections-are-polytopes",
+    "generated_module": "def def_polyhedral_subdivision : Prop := sorry\n\ntheorem lem_subdivision_cells_cover_polytope : True := by sorry\n",
+    "expected_declaration_work": []
+  },
   "invalidated_provider_case": {
     "source_run": ".auto-blueprint/formalization/simplex/run-20260813-125126.log",
     "nodes": {
@@ -78,6 +87,43 @@
       "unrelated_work_deferred": true,
       "blueprint_edited": false,
       "repair_trial_consumed": false
+    }
+  },
+  "duplicate_resume_owner_case": {
+    "source_run": ".auto-blueprint/formalization/simplex/run-20260901-061921.log",
+    "original_section": {
+      "number": 2,
+      "labels": [
+        "def:max-function"
+      ]
+    },
+    "duplicate_section": {
+      "number": 115,
+      "labels": [
+        "def:max-function"
+      ]
+    },
+    "importer_section": {
+      "number": 116,
+      "labels": [
+        "lem:consumer"
+      ],
+      "imports": [
+        "AutoBlueprint.Generated.Simplex.Skeleton115"
+      ]
+    },
+    "expected": {
+      "kept_sections": [
+        2,
+        116
+      ],
+      "discarded_sections": [
+        115
+      ],
+      "deferred_sections": [
+        116
+      ],
+      "retained_owner": 2
     }
   }
 }

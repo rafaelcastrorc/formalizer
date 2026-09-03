@@ -1,0 +1,24 @@
+{
+  "source": {
+    "blueprint": "simplex",
+    "label": "remark:open-depth-questions",
+    "environment": "proposition",
+    "observed_run": "20260901-002432"
+  },
+  "cases": [
+    {
+      "label": "remark:open-depth-questions",
+      "kind": "proposition",
+      "statement": "It remains open whether MAX_6 has a two-hidden-layer realization and whether the known depth bound can be improved.",
+      "expected_open_claim": true,
+      "record_target_kind": "open_conjecture"
+    },
+    {
+      "label": "prop:open-set",
+      "kind": "proposition",
+      "statement": "The inverse image of an open set under a continuous map is open.",
+      "expected_open_claim": false,
+      "record_target_kind": "proposition"
+    }
+  ]
+}

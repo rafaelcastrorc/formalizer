@@ -1,0 +1,12 @@
+{
+  "run_id": "20260823-001604-bac7d017",
+  "blueprint": "simplex",
+  "label": "prop:linear-size",
+  "statement_fp": "7055d67067a4cb92815107a0e798aaf27ef755cbeb7ad948bf278a213f8ed776",
+  "changed_statement_fp": "aaee65cfeb0374c4d23e9b60a115d02c7a0dad1229aa798b577ec40db48a0c58",
+  "first_source": "candidate_semantic_exhaustion",
+  "first_evidence": "The candidate-owned contract omitted the required explicit linear-size construction bound.",
+  "repeat_source": "integrated_alignment_candidate_plan_defect",
+  "repeat_evidence": "prop:linear-size [reject]: the direct declaration still omits the concrete network-size equation required by the blueprint.",
+  "missing_requirement": "the concrete network-size equation required by the blueprint"
+}

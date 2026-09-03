@@ -1512,6 +1512,10 @@ def _missing_olean_imports(import_lines: list[str]) -> list[str]:
 def _decl_signatures(code: str) -> str:
     signatures: list[str] = []
     for decl in _lean_declarations(code).values():
+        terminal_sorry = re.search(r":=\s*(?:by\s+)?sorry\s*\Z", decl.text)
+        if terminal_sorry is not None:
+            signatures.append(decl.text[: terminal_sorry.start()].rstrip())
+            continue
         lines = decl.text.splitlines()
         head_lines: list[str] = []
         for line in lines:
@@ -1924,7 +1928,10 @@ If anything should block publication, return:
       "reason": "specific reason",
       "missing_helpers": ["precise statement of each helper node needed"],
       "required_dependencies": [
-        "existing blueprint label required by this node's public statement"
+        "existing label absent from this node's public-statement dependency list but genuinely required"
+      ],
+      "forbidden_dependencies": [
+        "existing label referenced by generated Lean but not required by this node and therefore to remove"
       ],
       "missing_blueprint_information": [
         "exact mathematical fact absent from the blueprint"
@@ -1962,6 +1969,12 @@ existing label in `required_dependencies`. Include only public-statement
 dependencies, never proof-only conveniences, and otherwise return an empty
 list. This reports a dependency-contract mismatch; it does not by itself mean
 that the blueprint's mathematical claim is wrong.
+Use `forbidden_dependencies` for existing blueprint labels referenced by the
+generated Lean that this node does not mathematically require and that should
+be removed from the generated declaration. Never list a dependency merely
+because the generated Lean currently references it. `required_dependencies`
+and `forbidden_dependencies` must be disjoint; return an empty list for either
+action when it does not apply.
 During the statement phase, `failure_origin` locates a
 `lean_translation_issue`; it does not change whether the blueprint is correct.
 Use `lean` when the current plan already contains every obligation needed for a

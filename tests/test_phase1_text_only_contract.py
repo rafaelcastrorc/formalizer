@@ -124,6 +124,8 @@ class TextOnlyPromptContractTests(unittest.TestCase):
     def test_bulk_skeleton_prompt(self) -> None:
         labels = ["def:pk", "lem:support-sum"]
         ctx = _ctx_for(labels)
+        ctx.stmt_blocks[labels[0]] = "STRIPPED_TARGET_STATEMENT"
+        ctx.tex_blocks[labels[0]] = "FULL_TARGET_NODE_WITH_PROOF_SKETCH"
         with patch(
             "formalize_blueprint._frozen_interface_digest", return_value="-- iface"
         ), patch(
@@ -136,10 +138,14 @@ class TextOnlyPromptContractTests(unittest.TestCase):
             prompt = _bulk_skeleton_prompt(ctx, labels, [], [], timeout_s=300)
         self._assert_contract(prompt)
         self.assertIn("statements only, no proofs", prompt)
+        self.assertIn("FULL_TARGET_NODE_WITH_PROOF_SKETCH", prompt)
+        self.assertNotIn("STRIPPED_TARGET_STATEMENT", prompt)
 
     def test_skeleton_retry_prompt(self) -> None:
         labels = ["def:pk"]
         ctx = _ctx_for(labels)
+        ctx.stmt_blocks[labels[0]] = "STRIPPED_TARGET_STATEMENT"
+        ctx.tex_blocks[labels[0]] = "FULL_TARGET_NODE_WITH_PROOF_SKETCH"
         with patch(
             "formalize_blueprint._minimal_dependency_interface",
             return_value="-- iface",
@@ -157,10 +163,14 @@ class TextOnlyPromptContractTests(unittest.TestCase):
             )
         self._assert_contract(prompt)
         self.assertIn("statements only", prompt)
+        self.assertIn("FULL_TARGET_NODE_WITH_PROOF_SKETCH", prompt)
+        self.assertNotIn("STRIPPED_TARGET_STATEMENT", prompt)
 
     def test_targeted_patch_prompt(self) -> None:
         labels = ["def:pk"]
         ctx = _ctx_for(labels)
+        ctx.stmt_blocks[labels[0]] = "STRIPPED_TARGET_STATEMENT"
+        ctx.tex_blocks[labels[0]] = "FULL_TARGET_NODE_WITH_PROOF_SKETCH"
         with patch(
             "formalize_blueprint._minimal_dependency_interface",
             return_value="-- iface",
@@ -181,6 +191,8 @@ class TextOnlyPromptContractTests(unittest.TestCase):
                 timeout_s=300,
             )
         self._assert_contract(prompt)
+        self.assertIn("FULL_TARGET_NODE_WITH_PROOF_SKETCH", prompt)
+        self.assertNotIn("STRIPPED_TARGET_STATEMENT", prompt)
 
     def test_proof_prompt(self) -> None:
         labels = ["lem:support-sum"]

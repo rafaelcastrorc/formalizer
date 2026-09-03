@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "source_run": "20260823-001604-bac7d017",
+  "cases": [
+    {
+      "name": "caught_queue_activation_requires_snapshot",
+      "source_sequence": 6124,
+      "request_id": "6ad1442737571d5453b17742900c2372488a9396fd1a6e4d2c6dfef12befcd6d",
+      "repair_labels": ["cor:max-five-geometric"],
+      "observed_next_event": "blueprint_repair",
+      "observed_snapshot_event_before_edit": false,
+      "expected_snapshot_event_before_edit": true,
+      "expected_activation_gate": "start_phase2_repair_transaction"
+    },
+    {
+      "name": "unchanged_dependency_owns_contract_defect",
+      "source_sequences": [5607, 5895],
+      "consumer": "cor:geometric-signed-simplex",
+      "provider": "thm:polytope-triangulation",
+      "provider_is_in_existing_dependency_closure": true,
+      "observed_repair_roots": ["cor:geometric-signed-simplex"],
+      "observed_repeated_changed_helper_rejections": [
+        "lem:triangulation-affine-independent-cells",
+        "lem:geometric-triangulation-simplex-cells"
+      ],
+      "shared_rejection": "the unchanged provider exposes convex-hull cells but not the affine-independent simplex-cell property required by the consumer proof",
+      "expected_classification": "provider_contract_defect",
+      "expected_action": "rollback_consumer_then_queue_provider_transaction",
+      "expected_consumer_action": "reschedule_after_provider_verifies",
+      "forbidden_action": "widen_consumer_transaction_to_edit_provider"
+    }
+  ]
+}

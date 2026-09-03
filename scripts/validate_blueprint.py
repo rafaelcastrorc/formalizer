@@ -34,9 +34,26 @@ _INPUT_RE = re.compile(r"\\(?:input|include)\{([^}]*)\}")
 _LABEL_RE = re.compile(r"\\label\{([^}]*)\}")
 _LEAN_RE = re.compile(r"\\lean\{([^}]*)\}")
 _MATHLIBOK_RE = re.compile(r"\\mathlibok\b")
+_NOTREADY_RE = re.compile(r"\\notready\b")
 _NEWTHEOREM_RE = re.compile(r"\\newtheorem\*?\{([a-zA-Z]+)\}")
 _PROOF_RE = re.compile(r"\s*\\begin\{proof\}([\s\S]*?)\\end\{proof\}")
 _USES_RE = re.compile(r"\\uses\{([^}]*)\}")
+
+# Some papers place an explicitly open mathematical question in a generic
+# proposition/remark environment instead of a dedicated conjecture environment.
+# Match only explicit question/problem language here: a bare word such as
+# "open" also occurs throughout topology and must not change pipeline routing.
+_EXPLICIT_OPEN_CLAIM_RES = (
+    re.compile(r"\b(?:it|this)\s+remains?\s+open\s+(?:whether|if)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:remains?|is|are)\s+(?:an?\s+)?open\s+(?:question|problem)s?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bopen\s+(?:question|problem)s?\s*[:;,-]?\s*(?:whether|if)\b",
+        re.IGNORECASE,
+    ),
+)
 
 
 @dataclass
@@ -54,6 +71,16 @@ class Node:
     proof_uses: set[str] = field(default_factory=set)
     mathlibok: bool = False
     lean_decl: str | None = None
+    # True when the source explicitly says that the mathematical claim is an
+    # open question/problem, even if its LaTeX environment is proposition or
+    # remark rather than conjecture. The configured conjecture policy decides
+    # whether refinement records or attempts the claim.
+    open_claim: bool = False
+    # Source-authoritative marker emitted when the blueprint author could not
+    # yet give a complete formalizable statement/proof. The formalization
+    # pipeline must resolve this marker (or explicitly record an open claim)
+    # before treating the node as ordinary Phase-1 work.
+    notready: bool = False
 
 
 @dataclass
@@ -100,6 +127,16 @@ def _uses(body: str) -> set[str]:
         for item in group.split(",")
         if item.strip()
     }
+
+
+def _is_explicit_open_claim(body: str) -> bool:
+    """Return whether a node explicitly presents its claim as mathematically open.
+
+    This is source classification, not a guess from labels or mathematical
+    difficulty. In particular, terms such as ``open set`` and ``open map`` do
+    not match.
+    """
+    return any(pattern.search(body) for pattern in _EXPLICIT_OPEN_CLAIM_RES)
 
 
 def _theorem_envs(src_dir: Path) -> set[str]:
@@ -217,6 +254,8 @@ def _parse_file(path: Path, envs: set[str], result: ValidationResult) -> None:
             proof_uses=proof_uses,
             mathlibok=bool(_MATHLIBOK_RE.search(body)),
             lean_decl=lean.group(1).strip() if lean else None,
+            open_claim=_is_explicit_open_claim(body),
+            notready=bool(_NOTREADY_RE.search(body)),
         )
 
         if label in result.nodes:

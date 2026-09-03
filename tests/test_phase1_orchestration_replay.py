@@ -10,6 +10,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "phase1_orchestration_replay"
+PHASE2_FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "phase2_orchestration_replay"
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from formalize_blueprint import (  # noqa: E402
@@ -20,6 +21,10 @@ from formalize_blueprint import (  # noqa: E402
 
 def _fixture(name: str) -> dict:
     return json.loads((FIXTURE_DIR / name).read_text(encoding="utf-8"))
+
+
+def _phase2_fixture(name: str) -> dict:
+    return json.loads((PHASE2_FIXTURE_DIR / name).read_text(encoding="utf-8"))
 
 
 def _first_compiling_sample(case: dict) -> int | None:
@@ -181,6 +186,32 @@ class PhaseOneOrchestrationReplayTests(unittest.TestCase):
         self.assertEqual(
             case["expected_outer_route"], "dependency-edge-repair"
         )
+
+    def test_structured_statement_audit_classification_is_authoritative(self) -> None:
+        case = _fixture("structured_statement_audit_routing.json")
+
+        self.assertEqual(
+            case["audit_response"]["classification"],
+            "lean_translation_issue",
+        )
+        self.assertEqual(
+            set(case["observed_before_fix"]["routed_kinds"].values()),
+            {"decomposition", "lean-generation"},
+        )
+        self.assertTrue(case["observed_before_fix"]["blueprint_repair_authorized"])
+        self.assertEqual(
+            case["expected_after_fix"]["routed_kind"], "lean-generation"
+        )
+        self.assertFalse(
+            case["expected_after_fix"]["blueprint_repair_authorized"]
+        )
+        for issue in case["audit_response"]["issues"]:
+            self.assertEqual(issue["classification"], "lean_translation_issue")
+            self.assertEqual(issue["failure_origin"], "plan")
+            self.assertTrue(issue["required_dependencies"])
+            self.assertTrue(issue["missing_plan_requirements"])
+            self.assertEqual(issue["missing_helpers"], [])
+            self.assertEqual(issue["missing_blueprint_information"], [])
 
     def test_semantic_plan_defects_route_before_stale_plan_generation(self) -> None:
         cases = _fixture("semantic_origin_serialization.json")["cases"]
@@ -375,6 +406,81 @@ class PhaseOneOrchestrationReplayTests(unittest.TestCase):
             "planned structure and class members shadow bare global helper aliases throughout their declaration body",
         )
         self.assertTrue(case["downstream_alias_resolution_must_remain_enabled"])
+
+    def test_candidate_contract_refresh_fixture_requires_one_retry_lifecycle(self) -> None:
+        case = _fixture("candidate_contract_refresh_lifecycle.json")
+
+        self.assertEqual(case["source_run"], "20260825-194345")
+        self.assertEqual(
+            case["observed_before_fix"]["typed_contract_realized_epoch_transitions"],
+            282,
+        )
+        self.assertEqual(
+            case["observed_before_fix"]["claim5_component_transitions"], 21
+        )
+        self.assertEqual(
+            set(case["observed_before_fix"]["claim5_observed_retry_failure_counts"]),
+            {1},
+        )
+        self.assertFalse(case["observed_before_fix"]["claim5_reached_exhaustion"])
+        self.assertTrue(case["required_behavior"]["preserve_retry_lifecycle"])
+        self.assertTrue(case["required_behavior"]["preserve_generation_candidate"])
+
+    def test_theorem_like_contract_poisoning_fixture_cannot_burn_outer_budget(self) -> None:
+        case = _fixture("theorem_like_contract_poisoning.json")
+
+        self.assertEqual(case["source_run"], "20260827-131622")
+        self.assertEqual(case["label"], "prop:dyadic-weights")
+        self.assertEqual(
+            case["observed_before_fix"]["zero_model_call_retries"], 68
+        )
+        self.assertLessEqual(
+            case["observed_before_fix"]["zero_model_call_elapsed_seconds"],
+            10,
+        )
+        self.assertTrue(
+            case["observed_before_fix"][
+                "candidate_rewrote_authoritative_contract_before_rejection"
+            ]
+        )
+        self.assertTrue(
+            case["required_behavior"]["bare_prop_contract_rejected"]
+        )
+        self.assertFalse(
+            case["required_behavior"]["rejected_candidate_may_refresh_contract"]
+        )
+        self.assertEqual(
+            case["required_behavior"][
+                "additional_outer_retries_without_model_or_state_progress"
+            ],
+            0,
+        )
+
+    def test_phase2_invalidation_fixture_is_graph_scoped_not_file_scoped(self) -> None:
+        case = _phase2_fixture("graph_scoped_invalidation.json")
+
+        self.assertEqual(case["source_run"], "20260825-194345")
+        self.assertEqual(
+            case["dependency_graph_descendants"],
+            case["changed_labels"],
+        )
+        discarded = set(
+            case["observed_before_fix"][
+                "discarded_only_because_they_followed_the_edit_in_file_order"
+            ]
+        )
+        self.assertTrue(discarded)
+        self.assertTrue(
+            discarded.issubset(set(case["expected_after_fix"]["retained_labels"]))
+        )
+        self.assertEqual(
+            case["expected_after_fix"]["retained_source_lean_returncode"], 0
+        )
+        self.assertTrue(
+            case["expected_after_fix"][
+                "recheck_labels_do_not_gain_blueprint_helper_authority"
+            ]
+        )
 
 
 if __name__ == "__main__":

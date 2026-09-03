@@ -1,0 +1,32 @@
+{
+  "description": "Recorded-style semantic audit variants for the same rejected obligation. The prose differs, but the objective missing dependency is identical.",
+  "label": "def:upper-bound-recorded-settlement",
+  "candidate": "def def_upper_bound_recorded_settlement : Prop := by exact True.intro",
+  "first_feedback": "The declaration does not mention the required dependency thm_main_cpwl.",
+  "equivalent_feedback": "The generated interface omits blueprint dependency `thm_main_cpwl` from its public contract.",
+  "same_identity": {
+    "source": "statement_alignment",
+    "issues": [
+      {
+        "classification": "lean-generation",
+        "failure_origin": "lean",
+        "required_dependencies": [
+          "thm_main_cpwl"
+        ]
+      }
+    ]
+  },
+  "different_feedback": "The declaration omits helper def_support_polytope.",
+  "different_identity": {
+    "source": "statement_alignment",
+    "issues": [
+      {
+        "classification": "lean-generation",
+        "failure_origin": "lean",
+        "missing_helpers": [
+          "def_support_polytope"
+        ]
+      }
+    ]
+  }
+}
