@@ -905,7 +905,7 @@ def _library_roots(preferred: list[str] | None = None) -> list[tuple[str, Path]]
     # selected lean_lib target has built and passed an import probe for the
     # active revision/toolchain. Mathlib is covered by the ordinary preflight.
     try:
-        import lean_libs
+        from env_setup import lean_libs
 
         readiness = lean_libs.selected_build_status()
         ready_keys = {
@@ -2311,7 +2311,7 @@ def _run_lean(path: Path, lean_command: list[str]) -> LeanAttempt:
     except FileNotFoundError as exc:
         raise FileNotFoundError(
             "Lake/Lean is not installed for this repo. Run:\n"
-            "  uv run python scripts/setup_lean.py --install-elan"
+            "  uv run python scripts/env_setup/setup_lean.py --install-elan"
         ) from exc
 
     start = time.time()

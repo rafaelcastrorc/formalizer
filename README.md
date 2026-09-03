@@ -36,7 +36,7 @@ lakefile.lean
 To install the repo-pinned Lean/Lake/Mathlib setup locally, run:
 
 ```bash
-uv run python scripts/setup_lean.py --install-elan
+uv run python scripts/env_setup/setup_lean.py --install-elan
 ```
 
 That installs `elan` if needed, then runs `lake update` and downloads the
@@ -1189,7 +1189,7 @@ SHA-256 and the tests verify their hashes before replaying them through the
 current parser, closure scorer, and initial-frontier scheduler.
 
 ```bash
-uv run python scripts/replay_phase1_plans.py simplex --require-progress
+uv run python tests/replay/replay_phase1_plans.py simplex --require-progress
 ```
 
 With no `--run`, that command replays every committed case. Pass one or more
@@ -1221,7 +1221,7 @@ Phase 1 scheduler headroom has a separate timing replay built from committed
 task traces:
 
 ```bash
-uv run python scripts/replay_phase1_scheduler_latency.py
+uv run python tests/replay/replay_phase1_scheduler_latency.py
 ```
 
 It preserves the recorded model calls and per-label causal order while testing
@@ -1240,7 +1240,7 @@ clock compares full-generation count, model-seconds, timeout exposure, and the
 set of correctness gates reached by both policies:
 
 ```bash
-uv run python scripts/replay_phase2_latency.py --assert-improvement
+uv run python tests/replay/replay_phase2_latency.py --assert-improvement
 ```
 
 The legacy durations and outcomes are observed historical data. The focused
@@ -1262,7 +1262,7 @@ measure imports, its statement with a disposable `sorry` body, and its real body
 separately under plain checking and object generation:
 
 ```bash
-uv run python scripts/benchmark_lean_candidate.py \
+uv run python scripts/diagnostics/benchmark_lean_candidate.py \
   AutoBlueprint/Generated/<Blueprint>/SkeletonNN.lean --timeout 120
 ```
 
@@ -1940,7 +1940,7 @@ Set `AUTO_BLUEPRINT_TELEMETRY=0` to disable collection for a run.
 To flatten local telemetry into inspectable JSONL datasets:
 
 ```bash
-uv run python scripts/build_classifier_dataset.py
+uv run python scripts/diagnostics/build_classifier_dataset.py
 ```
 
 That writes:

@@ -59,7 +59,7 @@ def check_lean_environment(
     if shutil.which(command[0], path=env["PATH"]) is None:
         return LeanPreflightResult(
             False,
-            f"`{command[0]}` is not on PATH. Run `uv run python scripts/setup_lean.py --install-elan`.",
+            f"`{command[0]}` is not on PATH. Run `uv run python scripts/env_setup/setup_lean.py --install-elan`.",
             command,
         )
 
@@ -102,7 +102,7 @@ def check_lean_environment(
             or "object file" in combined
             or ".olean" in combined
         ):
-            hint += "; run `uv run python scripts/setup_lean.py --install-elan`"
+            hint += "; run `uv run python scripts/env_setup/setup_lean.py --install-elan`"
         return LeanPreflightResult(
             False,
             hint,

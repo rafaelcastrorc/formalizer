@@ -177,7 +177,7 @@ Telemetry now records data for these classifier families:
   recompilation, reactivation/failure outcomes, and the nodes that ultimately
   required new model generation.
 
-`scripts/build_classifier_dataset.py` flattens this into JSONL tables including
+`scripts/diagnostics/build_classifier_dataset.py` flattens this into JSONL tables including
 `pre_decomposition_examples.jsonl`, `decision_examples.jsonl`,
 `model_call_examples.jsonl`, `node_feature_examples.jsonl`, and
 `repair_examples.jsonl`.

@@ -21,9 +21,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from lean_preflight import check_lean_environment
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from lean_preflight import check_lean_environment  # noqa: E402
 
 
 def run(cmd: list[str], *, env: dict[str, str] | None = None) -> None:
@@ -75,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.install_elan:
             raise SystemExit(
                 "elan is not installed. Run:\n"
-                "  uv run python scripts/setup_lean.py --install-elan"
+                "  uv run python scripts/env_setup/setup_lean.py --install-elan"
             )
         install_elan()
         env = _path_with_elan_bin()

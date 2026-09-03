@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "diagnostics"))
 
 from formalize_blueprint import (  # noqa: E402
     AlignmentAuditResult,

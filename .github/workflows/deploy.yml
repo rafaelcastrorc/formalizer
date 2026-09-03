@@ -30,7 +30,7 @@ jobs:
 
       # The deploy job only renders the static site. Lean/Lake/Mathlib are
       # declared by lean-toolchain + lakefile.lean and installed by
-      # scripts/setup_lean.py for formalization jobs.
+      # scripts/env_setup/setup_lean.py for formalization jobs.
       - name: Install graphviz
         run: sudo apt-get update && sudo apt-get install -y graphviz libgraphviz-dev
 

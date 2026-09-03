@@ -1,7 +1,7 @@
 # Phase 1 planner replay fixtures
 
 These fixtures are the minimal immutable inputs needed by
-`scripts/replay_phase1_plans.py`. They preserve exact historical model response
+`tests/replay/replay_phase1_plans.py`. They preserve exact historical model response
 bytes plus the candidate selection, score, requested-label, content-hash, and
 dependency-graph context consumed by the deterministic replay. `manifest.json`
 binds each recorded run to a content-addressed graph snapshot under `contexts/`.
@@ -19,5 +19,5 @@ does not require `.auto-blueprint/`, R2, or network access.
 Replay the complete committed corpus manually with:
 
 ```bash
-uv run python scripts/replay_phase1_plans.py simplex --require-progress
+uv run python tests/replay/replay_phase1_plans.py simplex --require-progress
 ```

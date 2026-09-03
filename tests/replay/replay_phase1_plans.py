@@ -25,8 +25,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-SCRIPTS_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPTS_DIR.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS_DIR = REPO_ROOT / "scripts"
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "phase1_plan_replay"
 FIXTURE_RUNS_DIR = FIXTURE_ROOT / "runs"
 FIXTURE_MANIFEST = FIXTURE_ROOT / "manifest.json"
