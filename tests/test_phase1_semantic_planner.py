@@ -25,16 +25,35 @@ INVALID_TEX_ESCAPE_FIXTURE = (
     / "phase1_semantic_plan_replay"
     / "invalid_tex_escape.txt"
 )
+PARTIAL_COVERAGE_FIXTURE = (
+    REPO_ROOT
+    / "tests"
+    / "fixtures"
+    / "phase1_semantic_plan_replay"
+    / "partial_nonempty_20260827.json"
+)
+READINESS_FIXTURE = (
+    REPO_ROOT
+    / "tests"
+    / "fixtures"
+    / "phase1_semantic_plan_replay"
+    / "readiness_cases.json"
+)
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from formalize_blueprint import (  # noqa: E402
     CallResult,
+    RepairRequest,
     SEMANTIC_PLAN_SCHEMA_VERSION,
     _candidate_exactly_realizes_plan,
     _findings_require_plan_revision,
     _ensure_phase1_semantic_plan,
     _ingest_model_lean,
     _parse_semantic_plan_entries,
+    _phase1_advisory_readiness_request,
+    _phase1_source_readiness_request,
+    _readiness_repair_postcondition_findings,
+    _run_phase1,
     _phase1_frontier_plan_gateway,
     _semantic_plan_prompt,
     SkeletonFinding,
@@ -76,11 +95,208 @@ def context(nodes: dict[str, Node]) -> SimpleNamespace:
         unavailable_imports=set(),
         library_context="",
         library_candidates=[],
+        paper_text="",
         telemetry=FakeTelemetry(),
     )
 
 
 class CompactSemanticPlannerTests(unittest.TestCase):
+    def test_source_readiness_gate_precedes_semantic_planning(self) -> None:
+        label = "lem:unfinished"
+        pending = Node(
+            label=label,
+            kind="lemma",
+            file=Path("content.tex"),
+            line=1,
+            notready=True,
+        )
+        ctx = context({label: pending})
+        ctx.tex_blocks = {
+            label: "\\begin{lemma}Claim\\label{lem:unfinished}\\notready\\end{lemma}"
+        }
+
+        with patch("formalize_blueprint._ensure_phase1_semantic_plan") as planner:
+            with self.assertRaises(RepairRequest) as raised:
+                _run_phase1(ctx, [], {label}, "bottom-up")
+
+        planner.assert_not_called()
+        self.assertEqual(raised.exception.labels, [label])
+        self.assertTrue(raised.exception.authorizes_blueprint_repair)
+
+    def test_readiness_fixture_routes_authoritative_and_advisory_cases(self) -> None:
+        fixture = json.loads(READINESS_FIXTURE.read_text(encoding="utf-8"))
+        nodes = {
+            case["label"]: Node(
+                label=case["label"],
+                kind=case["kind"],
+                file=Path("content.tex"),
+                line=1,
+                notready=case.get("notready", False),
+                open_claim=case.get("open_claim", False),
+            )
+            for case in fixture["source_cases"]
+        }
+        ctx = context(nodes)
+        ctx.conjecture_policy = "record"
+        ctx.tex_blocks = {
+            case["label"]: case["tex"] for case in fixture["source_cases"]
+        }
+
+        request = _phase1_source_readiness_request(ctx, set(nodes))
+
+        self.assertIsInstance(request, RepairRequest)
+        self.assertEqual(set(request.labels), set(fixture["expected_repair_labels_record"]))
+        self.assertNotIn(fixture["recorded_open_label"], request.labels)
+
+        ctx.conjecture_policy = "attempt"
+        request = _phase1_source_readiness_request(ctx, set(nodes))
+        self.assertIsInstance(request, RepairRequest)
+        self.assertEqual(set(request.labels), set(fixture["expected_repair_labels_attempt"]))
+
+    def test_notready_theorem_repair_must_add_proof_before_marker_is_removed(self) -> None:
+        label = "lem:pending"
+        before = Node(
+            label=label,
+            kind="lemma",
+            file=Path("content.tex"),
+            line=1,
+            notready=True,
+        )
+        after = Node(
+            label=label,
+            kind="lemma",
+            file=Path("content.tex"),
+            line=1,
+            notready=False,
+        )
+        findings = _readiness_repair_postcondition_findings(
+            before_nodes={label: before},
+            after_nodes={label: after},
+            before_blocks={label: "\\begin{lemma}Claim\\notready\\end{lemma}"},
+            after_blocks={label: "\\begin{lemma}Claim\\end{lemma}"},
+            labels=[label],
+            conjecture_policy="record",
+        )
+        self.assertEqual(
+            findings,
+            [f"{label}: readiness repair did not add a blueprint proof"],
+        )
+
+        findings = _readiness_repair_postcondition_findings(
+            before_nodes={label: before},
+            after_nodes={label: after},
+            before_blocks={label: "\\begin{lemma}Claim\\notready\\end{lemma}"},
+            after_blocks={
+                label: (
+                    "\\begin{lemma}Claim\\end{lemma}"
+                    "\\begin{proof}A complete argument.\\end{proof}"
+                )
+            },
+            labels=[label],
+            conjecture_policy="record",
+        )
+        self.assertEqual(findings, [])
+
+    def test_planner_readiness_is_sanitized_and_defaults_to_ready(self) -> None:
+        labels = ["def:flagged", "def:legacy"]
+        ctx = context({label: node(label) for label in labels})
+        response = json.dumps(
+            {
+                "contracts": [
+                    {
+                        "label": "def:flagged",
+                        "representation": "concrete object",
+                        "vocabulary": [],
+                        "obligations": [],
+                        "provider_requirements": [],
+                        "readiness": "underspecified",
+                        "gap": "the carrier type is not identified",
+                    },
+                    {
+                        "label": "def:legacy",
+                        "representation": "older response",
+                        "vocabulary": [],
+                        "obligations": [],
+                        "provider_requirements": [],
+                    },
+                ]
+            }
+        )
+
+        parsed, _findings = _parse_semantic_plan_entries(ctx, labels, response)
+
+        self.assertEqual(parsed["def:flagged"]["readiness"], "underspecified")
+        self.assertEqual(parsed["def:flagged"]["readiness_confirmation"], "pending")
+        self.assertEqual(parsed["def:legacy"]["readiness"], "ready")
+        self.assertEqual(parsed["def:legacy"]["readiness_confirmation"], "not_needed")
+
+    def test_advisory_false_positive_is_confirmed_once_then_phase1_proceeds(self) -> None:
+        label = "def:flagged"
+        ctx = context({label: node(label)})
+        ctx.base_timeout = 30
+        ctx.base_effort = None
+        ctx.semantic_plan_entries[label] = {
+            "schema_version": SEMANTIC_PLAN_SCHEMA_VERSION,
+            "statement_fp": ctx.stmt_fps[label],
+            "readiness": "underspecified",
+            "gap": "possibly missing a carrier",
+            "readiness_confirmation": "pending",
+        }
+        response = CallResult(
+            status="ok",
+            text=json.dumps(
+                {
+                    "nodes": [
+                        {"label": label, "readiness": "ready", "gap": ""}
+                    ]
+                }
+            ),
+        )
+        with patch("formalize_blueprint._call_model", return_value=response) as call:
+            self.assertIsNone(_phase1_advisory_readiness_request(ctx, {label}))
+            self.assertIsNone(_phase1_advisory_readiness_request(ctx, {label}))
+
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(
+            ctx.semantic_plan_entries[label]["readiness_confirmation"],
+            "confirmed_ready",
+        )
+
+    def test_only_independently_confirmed_advisory_authorizes_repair(self) -> None:
+        label = "def:flagged"
+        ctx = context({label: node(label)})
+        ctx.base_timeout = 30
+        ctx.base_effort = None
+        ctx.semantic_plan_entries[label] = {
+            "schema_version": SEMANTIC_PLAN_SCHEMA_VERSION,
+            "statement_fp": ctx.stmt_fps[label],
+            "readiness": "underspecified",
+            "gap": "possibly missing a carrier",
+            "readiness_confirmation": "pending",
+        }
+        response = CallResult(
+            status="ok",
+            text=json.dumps(
+                {
+                    "nodes": [
+                        {
+                            "label": label,
+                            "readiness": "underspecified",
+                            "gap": "the quantified carrier is absent",
+                        }
+                    ]
+                }
+            ),
+        )
+
+        with patch("formalize_blueprint._call_model", return_value=response):
+            request = _phase1_advisory_readiness_request(ctx, {label})
+
+        self.assertIsInstance(request, RepairRequest)
+        self.assertTrue(request.authorizes_blueprint_repair)
+        self.assertEqual(request.labels, [label])
+        self.assertIn("quantified carrier", request.evidence_by_label[label])
+
     def test_parser_recovers_outer_plan_with_unescaped_tex_commands(self) -> None:
         label = "def:local-basis-unitary"
         ctx = context({label: node(label)})
@@ -193,6 +409,107 @@ class CompactSemanticPlannerTests(unittest.TestCase):
             if event == "phase1_semantic_plan_hedge_started"
         ]
         self.assertEqual(len(retries), 1)
+
+    def test_nonempty_partial_plan_is_merged_with_one_fresh_recovery(self) -> None:
+        fixture = json.loads(PARTIAL_COVERAGE_FIXTURE.read_text(encoding="utf-8"))
+        primary_label = fixture["primary_label"]
+        requested_count = fixture["requested_count"]
+        labels = [primary_label] + [
+            f"def:historical-missing-{index:03d}"
+            for index in range(1, requested_count)
+        ]
+        nodes = {label: node(label) for label in labels}
+        nodes[primary_label] = node(
+            primary_label,
+            uses=set(fixture["primary_statement_uses"]),
+        )
+        ctx = context(nodes)
+        ctx.hard_timeout = 60
+        ctx.base_effort = None
+        ctx.runner_spec = "codex"
+        recovery = {
+            "contracts": [
+                {
+                    "label": label,
+                    "representation": f"Recovered interface for {label}.",
+                    "vocabulary": [],
+                    "obligations": [],
+                    "provider_requirements": [],
+                }
+                for label in labels[1:]
+            ]
+        }
+
+        with patch(
+            "formalize_blueprint._call_model",
+            side_effect=[
+                CallResult(
+                    status="ok",
+                    text=json.dumps(fixture["primary_response"]),
+                    duration_s=fixture["primary_duration_s"],
+                ),
+                CallResult(status="ok", text=json.dumps(recovery), duration_s=4),
+            ],
+        ) as call_model:
+            _ensure_phase1_semantic_plan(ctx, set(labels))
+
+        self.assertEqual(call_model.call_count, 2)
+        self.assertFalse(call_model.call_args_list[0].kwargs["force_fresh"])
+        self.assertTrue(call_model.call_args_list[1].kwargs["force_fresh"])
+        self.assertEqual(set(ctx.semantic_plan_entries), set(labels))
+        self.assertTrue(
+            all("fallback" not in entry for entry in ctx.semantic_plan_entries.values())
+        )
+        result = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_semantic_plan_result"
+        ][0]
+        self.assertEqual(result["planned_count"], requested_count)
+        self.assertEqual(result["fallback_count"], 0)
+
+    def test_two_partial_plans_fall_back_only_for_uncovered_nodes(self) -> None:
+        labels = ["def:first", "def:second", "def:third"]
+        ctx = context({label: node(label) for label in labels})
+        ctx.hard_timeout = 60
+        ctx.base_effort = None
+        ctx.runner_spec = "codex"
+
+        def response(label: str) -> str:
+            return json.dumps(
+                {
+                    "contracts": [
+                        {
+                            "label": label,
+                            "representation": f"Interface for {label}.",
+                            "vocabulary": [],
+                            "obligations": [],
+                            "provider_requirements": [],
+                        }
+                    ]
+                }
+            )
+
+        with patch(
+            "formalize_blueprint._call_model",
+            side_effect=[
+                CallResult(status="ok", text=response(labels[0]), duration_s=1),
+                CallResult(status="ok", text=response(labels[1]), duration_s=1),
+            ],
+        ) as call_model:
+            _ensure_phase1_semantic_plan(ctx, set(labels))
+
+        self.assertEqual(call_model.call_count, 2)
+        self.assertNotIn("fallback", ctx.semantic_plan_entries[labels[0]])
+        self.assertNotIn("fallback", ctx.semantic_plan_entries[labels[1]])
+        self.assertTrue(ctx.semantic_plan_entries[labels[2]]["fallback"])
+        result = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_semantic_plan_result"
+        ][0]
+        self.assertEqual(result["planned_count"], 2)
+        self.assertEqual(result["fallback_count"], 1)
 
     def test_slow_primary_is_not_killed_when_hedge_starts(self) -> None:
         label = "def:widget"
@@ -327,6 +644,44 @@ class CompactSemanticPlannerTests(unittest.TestCase):
                     "codex:escalation-model" if escalated else "codex:base-model",
                 )
 
+    def test_planner_defaults_to_escalation_tier(self) -> None:
+        label = "def:widget"
+        response = json.dumps(
+            {
+                "contracts": [
+                    {
+                        "label": label,
+                        "representation": "a concrete widget",
+                        "vocabulary": [],
+                        "obligations": [],
+                        "provider_requirements": [],
+                    }
+                ]
+            }
+        )
+        ctx = context({label: node(label)})
+        ctx.hard_timeout = 60
+        ctx.runner_spec = "codex:base-model"
+        ctx.escalation_runner_spec = "codex:escalation-model"
+        ctx.base_effort = "medium"
+        ctx.escalation_effort = "high"
+
+        with patch(
+            "formalize_blueprint._call_model",
+            return_value=CallResult(status="ok", text=response, duration_s=0.01),
+        ) as call_model:
+            _ensure_phase1_semantic_plan(ctx, {label})
+
+        self.assertTrue(call_model.call_args.kwargs["escalated"])
+        self.assertEqual(call_model.call_args.kwargs["effort"], "high")
+        result = [
+            fields
+            for event, fields in ctx.telemetry.events
+            if event == "phase1_semantic_plan_result"
+        ][0]
+        self.assertEqual(result["planner_tier"], "escalation")
+        self.assertEqual(result["runner"], "codex:escalation-model")
+
     def test_environment_planner_failure_is_not_hidden(self) -> None:
         nodes = {"def:widget": node("def:widget")}
         ctx = context(nodes)
@@ -432,7 +787,10 @@ class CompactSemanticPlannerTests(unittest.TestCase):
             ctx, ["def:consumer"], response
         )
 
-        self.assertEqual(parsed["def:consumer"]["schema_version"], 1)
+        self.assertEqual(
+            parsed["def:consumer"]["schema_version"],
+            SEMANTIC_PLAN_SCHEMA_VERSION,
+        )
         self.assertEqual(
             parsed["def:consumer"]["provider_requirements"],
             [{"provider": "def:provider", "capabilities": ["provider value"]}],

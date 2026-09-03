@@ -43,6 +43,7 @@ BLUEPRINTS_DIR = REPO_ROOT / "blueprints"
 SITE_DIR = REPO_ROOT / "site"
 STATE_DIR = REPO_ROOT / ".auto-blueprint"
 WEBUI_STATE = STATE_DIR / "webui.json"
+LAST_REFINE_SETTINGS = STATE_DIR / "last-refine-settings.json"
 UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="auto-blueprint-webui-"))
 
 RUNNER_BACKENDS = ["claude-code", "codex", "anthropic", "openai", "mock"]
@@ -61,6 +62,50 @@ LIB_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 MODEL_SUGGESTION_CACHE: dict[str, object] = {"at": 0.0, "data": {}}
 MODEL_SUGGESTION_TTL_S = 30
+
+REFINE_SETTING_KEYS = {
+    "fast",
+    "workers",
+    "section_size",
+    "max_trials",
+    "conjecture_policy",
+    "planner_tier",
+    "runner_backend",
+    "runner_model",
+    "escalation_runner_backend",
+    "escalation_runner_model",
+    "reasoning_effort",
+    "escalation_reasoning_effort",
+    "timeout",
+    "hard_timeout",
+    "lean_command",
+}
+
+
+def _read_last_refine_settings() -> dict:
+    """Load the reusable Refine settings saved by the last accepted UI run."""
+    try:
+        payload = json.loads(LAST_REFINE_SETTINGS.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {key: payload[key] for key in REFINE_SETTING_KEYS if key in payload}
+
+
+def _write_last_refine_settings(payload: dict) -> None:
+    """Atomically persist configuration, never the paper/blueprint/resume target."""
+    settings = {
+        key: payload[key]
+        for key in REFINE_SETTING_KEYS
+        if key in payload and isinstance(payload[key], (str, int, float, bool))
+    }
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    pending = LAST_REFINE_SETTINGS.with_suffix(".json.pending")
+    pending.write_text(
+        json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    os.replace(pending, LAST_REFINE_SETTINGS)
 
 
 def _nonempty_suggestions(data: dict) -> bool:
@@ -784,7 +829,7 @@ def build_command(action: str, p: dict) -> list[str]:
             if conjecture_policy not in {"record", "attempt"}:
                 raise ValueError("conjecture policy must be record or attempt")
             cmd += ["--conjecture-policy", conjecture_policy]
-            planner_tier = str(p.get("planner_tier") or "base").strip()
+            planner_tier = str(p.get("planner_tier") or "escalation").strip()
             if planner_tier not in {"base", "escalation"}:
                 raise ValueError("planner model must be base or escalation")
             cmd += ["--planner-tier", planner_tier]
@@ -818,11 +863,29 @@ def build_command(action: str, p: dict) -> list[str]:
         lean_command = (p.get("lean_command") or "").strip()
         if lean_command:
             cmd += ["--lean-command", lean_command]
-        # Always send the resume decision explicitly. `--continue` is the
-        # pipeline's DEFAULT, so omitting the flag when the box is unchecked
-        # silently resumed anyway and the checkbox did nothing in the "off"
-        # position.
-        cmd.append("--continue" if p.get("continue_run") else "--fresh")
+        # Always send the starting point explicitly. `--continue` is the fast
+        # pipeline's default, so omitting the choice would make Fresh appear to
+        # work in the UI while the CLI silently resumed mutable state.
+        if "resume_mode" in p:
+            resume_mode = str(p.get("resume_mode") or "latest").strip()
+        elif "continue_run" in p:
+            # Backward compatibility for older clients and saved tests.
+            resume_mode = "latest" if p.get("continue_run") else "fresh"
+        else:
+            resume_mode = "latest"
+        if resume_mode not in {"latest", "phase1", "fresh"}:
+            raise ValueError("starting point must be latest, phase1, or fresh")
+        if resume_mode == "phase1" and not fast:
+            raise ValueError(
+                "the saved Phase 1 checkpoint is available only in the fast pipeline"
+            )
+        cmd.append(
+            {
+                "latest": "--continue",
+                "phase1": "--continue-phase1",
+                "fresh": "--fresh",
+            }[resume_mode]
+        )
         return cmd
 
     if action == "validate":
@@ -1101,6 +1164,13 @@ def list_blueprints() -> list[dict]:
             "name": d.name,
             "title": title,
             "built": (SITE_DIR / d.name / "index.html").is_file(),
+            "phase1_checkpoint": (
+                STATE_DIR
+                / "formalization"
+                / d.name
+                / "phase1-checkpoint"
+                / "manifest.json"
+            ).is_file(),
         })
     return out
 
@@ -1177,6 +1247,7 @@ class Handler(BaseHTTPRequestHandler):
                 "efforts": [e for e in REASONING_EFFORTS if e],
                 "model_suggestions": suggestions,
                 "runner_defaults": fast_runner_defaults(suggestions),
+                "last_refine_settings": _read_last_refine_settings(),
                 "job": job_status,
             })
         elif path == "/api/lean/status":
@@ -1240,6 +1311,9 @@ class Handler(BaseHTTPRequestHandler):
                 cmd = build_command(p.get("action", ""), p)
                 ok, err = start_job(p.get("action", ""), cmd)
                 if ok:
+                    if p.get("action") == "refine":
+                        with contextlib.suppress(OSError):
+                            _write_last_refine_settings(p)
                     self.send_json({"ok": True})
                 else:
                     self.send_json({"error": err}, 409)
@@ -1313,6 +1387,9 @@ PAGE = r"""<!doctype html>
   .run { background: var(--accent); color: var(--accent-text); border: none;
          padding: 8px 20px; border-radius: 7px; font-size: 14px; cursor: pointer; }
   .run:disabled { opacity: .5; cursor: default; }
+  .secondary { background: transparent; color: var(--text); border: 1px solid var(--border);
+               padding: 6px 10px; border-radius: 7px; cursor: pointer; font-size: 13px; }
+  .secondary:disabled { opacity: .45; cursor: default; }
   .stop { background: transparent; color: var(--bad); border: 1px solid var(--bad);
           padding: 7px 14px; border-radius: 7px; cursor: pointer; display: none; }
   .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
@@ -1421,7 +1498,7 @@ const TABS = [
   {id:'build',     label:'Build site'},
   {id:'libraries', label:'Lean libraries'},
 ];
-let state = {blueprints: [], backends: [], efforts: [], model_suggestions: {}, runner_defaults: {}};
+let state = {blueprints: [], backends: [], efforts: [], model_suggestions: {}, runner_defaults: {}, last_refine_settings: {}};
 let active = 'generate';
 let offset = 0;
 let jobWasRunning = false;
@@ -1513,7 +1590,7 @@ function renderProgress(){
         verifiedCount,
         recordedCount,
         provenSub),
-      metric('Repair trials left', trialsLeft == null ? '—' : String(trialsLeft),
+      metric('Repair/retry trials left', trialsLeft == null ? '—' : String(trialsLeft),
         trialsUsed == null || trialsMax == null ? '' : `${trialsUsed}/${trialsMax} used`),
     ].join('');
   } else {
@@ -1522,7 +1599,7 @@ function renderProgress(){
       metric('Blueprint nodes', total == null ? '—' : String(total), progress.currentChunk ? `chunk ${progress.currentChunk}` : ''),
       metric('Proven so far', proven == null ? '—' : String(proven), provenSub),
       metric('Nodes remaining', remaining == null ? '—' : String(remaining), total == null ? '' : `of ${total}`),
-      metric('Repair trials left', trialsLeft == null ? '—' : String(trialsLeft),
+      metric('Repair/retry trials left', trialsLeft == null ? '—' : String(trialsLeft),
         trialsUsed == null || trialsMax == null ? '' : `${trialsUsed}/${trialsMax} used`),
     ].join('');
   }
@@ -1549,7 +1626,7 @@ function ingestProgressLines(lines){
       progress.repairTrialsMax = Number(m[4]);
       changed = true;
     }
-    if ((m = line.match(/==> Progress: Phase 1 contracts (\d+)\/(\d+) frozen; Phase 2 Lean implementations (\d+)\/(\d+) complete; overall (\d+)\/(\d+) complete \((\d+) verified, (\d+) open conjectures recorded\); repairs (\d+)\/(\d+)/))){
+    if ((m = line.match(/==> Progress: Phase 1 contracts (\d+)\/(\d+) frozen; Phase 2 Lean implementations (\d+)\/(\d+) complete; overall (\d+)\/(\d+) complete \((\d+) verified, (\d+) open conjectures recorded\); (?:repairs|repair\/retries) (\d+)\/(\d+)/))){
       progress.legacyPipeline = false;
       progress.phase1Frozen = Number(m[1]);
       progress.phase1Required = Number(m[2]);
@@ -1564,7 +1641,7 @@ function ingestProgressLines(lines){
       progress.repairTrialsMax = Number(m[10]);
       changed = true;
     }
-    if ((m = line.match(/==> Progress: Phase 1 contracts (\d+)\/(\d+) frozen; Phase 2 Lean implementations (\d+)\/(\d+) complete; overall (\d+)\/(\d+) verified; repairs (\d+)\/(\d+)/))){
+    if ((m = line.match(/==> Progress: Phase 1 contracts (\d+)\/(\d+) frozen; Phase 2 Lean implementations (\d+)\/(\d+) complete; overall (\d+)\/(\d+) verified; (?:repairs|repair\/retries) (\d+)\/(\d+)/))){
       progress.legacyPipeline = false;
       progress.phase1Frozen = Number(m[1]);
       progress.phase1Required = Number(m[2]);
@@ -1579,7 +1656,7 @@ function ingestProgressLines(lines){
       progress.repairTrialsMax = Number(m[8]);
       changed = true;
     }
-    if ((m = line.match(/blueprint repairs used (\d+)\/(\d+)/))){
+    if ((m = line.match(/(?:blueprint repairs|repair\/retry trials) used (\d+)\/(\d+)/))){
       progress.repairTrialsUsed = Number(m[1]);
       progress.repairTrialsMax = Number(m[2]);
       changed = true;
@@ -1928,25 +2005,36 @@ const FORMS = {
     <select id="f_name">${bpSelect()}</select>
     <div class="check"><input type="checkbox" id="f_fast" checked><label for="f_fast">Fast statements-first pipeline (recommended; uncheck for the legacy per-chunk loop)</label></div>
     <div class="hint">Model preset: ${esc((state.runner_defaults && state.runner_defaults.source) || 'local Codex fallback')}.</div>
+    <div style="margin-top:8px">
+      <button type="button" class="secondary" id="lastSettingsBtn" onclick="applyLastRefineSettings()"
+        ${Object.keys(state.last_refine_settings || {}).length ? '' : 'disabled'}>Use last-used settings</button>
+      <span class="hint" id="lastSettingsStatus">Applies model, timeout, worker, and policy settings only.</span>
+    </div>
     <label>Parallel proof workers (Phase 2)</label>
     <input type="number" id="f_workers" value="3" min="1">
     <div class="hint">Phase 1 freezes statements bottom up; Phase 2 implements them top down.</div>
     <label>Skeleton section size (fast pipeline only; statements per Phase-1 call — shrinks automatically on timeouts)</label>
     <input type="number" id="f_section_size" value="12" min="1">
-    <label>Max blueprint-repair trials</label>
+    <label>Max repair/retry trials</label>
     <input type="number" id="f_trials" value="100" min="1">
     <label>Conjectures</label>
     <select id="f_conjecture_policy">
       <option value="record" selected>Record as open propositions (recommended)</option>
       <option value="attempt">Attempt model-generated proofs</option>
     </select>
-    <div class="hint">Attempt mode first adds a proof to the blueprint, then asks Lean to formalize that blueprint proof. Recorded conjectures are published as exact open propositions and are never counted as proved.</div>
+    <div class="hint">Attempt mode first adds a proof to the blueprint, then asks Lean to formalize that blueprint proof. Record mode publishes explicit open claims as open propositions. Other <code>\\notready</code> nodes are repaired in the unpublished blueprint before Phase 1.</div>
     <div class="leanbox" id="leanStatus">
       <details><summary>Lean setup not checked.</summary>
         <button type="button" onclick="checkLean()">Check Lean setup</button>
       </details>
     </div>
-    <div class="check"><input type="checkbox" id="f_continue" checked><label for="f_continue">Continue unpublished refinement <span class="hint">(reuses the blueprint draft, frozen statements, and accepted proofs)</span></label></div>
+    <label>Starting point</label>
+    <select id="f_resume_mode">
+      <option value="latest" selected>Continue latest unpublished refinement</option>
+      <option value="phase1">Restart Phase 2 from saved Phase 1 snapshot</option>
+      <option value="fresh">Start fresh from published blueprint</option>
+    </select>
+    <div class="hint" id="resumeHint">Reuses the current blueprint draft, frozen statements, and accepted proofs.</div>
     ${paperField(false)}
     ${runnerFields('300', true, {
       defaultBackend: runnerDefault('base', 'backend', 'codex'),
@@ -1957,8 +2045,8 @@ const FORMS = {
       ${escalationRunnerFields()}
       <label>Compact planner model</label>
       <select id="f_planner_tier">
-        <option value="base" selected>Base model</option>
-        <option value="escalation">Escalation model</option>
+        <option value="base">Base model</option>
+        <option value="escalation" selected>Escalation model</option>
       </select>
       <div class="hint">Chooses the model for the compact Phase 1 semantic plan only. Its primary and hedge calls use the same selection.</div>
     </div>
@@ -2138,6 +2226,64 @@ async function applyLibraries(libs){
   el('log').textContent = ''; offset = 0; resetStages();
 }
 
+function selectedBlueprint(){
+  const name = el('f_name') ? el('f_name').value : '';
+  return (state.blueprints || []).find(b => b.name === name) || null;
+}
+
+function updateResumeOptions(){
+  const resume = el('f_resume_mode');
+  if (!resume) return;
+  const phase1 = [...resume.options].find(o => o.value === 'phase1');
+  const bp = selectedBlueprint();
+  const fast = !el('f_fast') || el('f_fast').checked;
+  const available = !!(fast && bp && bp.phase1_checkpoint);
+  if (phase1) {
+    phase1.disabled = !available;
+    phase1.textContent = available
+      ? 'Restart Phase 2 from saved Phase 1 snapshot'
+      : 'Restart Phase 2 from saved Phase 1 snapshot (not available)';
+  }
+  if (resume.value === 'phase1' && !available) resume.value = 'latest';
+  const hint = el('resumeHint');
+  if (!hint) return;
+  if (resume.value === 'phase1') {
+    hint.textContent = 'Restores an immutable copy captured when Phase 1 completed and discards later unpublished Phase 2 changes.';
+  } else if (resume.value === 'fresh') {
+    hint.textContent = 'Discards all unpublished refinement state and starts from the published blueprint.';
+  } else {
+    hint.textContent = 'Reuses the current blueprint draft, frozen statements, and accepted proofs.';
+  }
+}
+
+function applyLastRefineSettings(){
+  const saved = state.last_refine_settings || {};
+  if (!Object.keys(saved).length) return;
+  const ids = {
+    workers:'f_workers', section_size:'f_section_size', max_trials:'f_trials',
+    conjecture_policy:'f_conjecture_policy', planner_tier:'f_planner_tier',
+    runner_backend:'f_backend', runner_model:'f_model',
+    escalation_runner_backend:'f_escalation_backend',
+    escalation_runner_model:'f_escalation_model', reasoning_effort:'f_effort',
+    escalation_reasoning_effort:'f_escalation_effort', timeout:'f_timeout',
+    hard_timeout:'f_hard_timeout', lean_command:'f_leancmd'
+  };
+  if (Object.prototype.hasOwnProperty.call(saved, 'fast') && el('f_fast')) {
+    el('f_fast').checked = !!saved.fast;
+  }
+  for (const [key, id] of Object.entries(ids)) {
+    if (Object.prototype.hasOwnProperty.call(saved, key) && el(id)) {
+      el(id).value = String(saved[key] == null ? '' : saved[key]);
+    }
+  }
+  ['f', 'f_escalation'].forEach(updateModelList);
+  effortToggle();
+  toggleFastFields();
+  updateResumeOptions();
+  const status = el('lastSettingsStatus');
+  if (status) status.textContent = 'Last-used settings applied.';
+}
+
 function renderForm(){
   el('form').innerHTML = FORMS[active]();
   el('error').textContent = '';
@@ -2149,8 +2295,13 @@ function renderForm(){
   if (active === 'libraries') loadLibraries(false);
   effortToggle();
   const fast = el('f_fast');
-  if (fast) fast.onchange = toggleFastFields;
+  if (fast) fast.onchange = () => { toggleFastFields(); updateResumeOptions(); };
+  const blueprint = el('f_name');
+  if (active === 'refine' && blueprint) blueprint.onchange = updateResumeOptions;
+  const resume = el('f_resume_mode');
+  if (resume) resume.onchange = updateResumeOptions;
   toggleFastFields();
+  updateResumeOptions();
   const drop = el('drop');
   if (drop){
     const input = document.createElement('input');
@@ -2232,10 +2383,10 @@ function params(){
   if (active === 'refine')
     return {action:'refine', name:v('f_name'), max_trials:v('f_trials'),
             paper:v('f_paper'), lean_command:v('f_leancmd'),
-            continue_run:c('f_continue'), fast:c('f_fast'), workers:v('f_workers'),
+            resume_mode:v('f_resume_mode') || 'latest', fast:c('f_fast'), workers:v('f_workers'),
             section_size:v('f_section_size'),
             conjecture_policy:v('f_conjecture_policy'),
-            planner_tier:v('f_planner_tier') || 'base',
+            planner_tier:v('f_planner_tier') || 'escalation',
             ...common};
   const names = [...document.querySelectorAll('.bpcheck:checked')].map(n=>n.value);
   if (active === 'validate') return {action:'validate', names};
@@ -2246,14 +2397,22 @@ async function run(){
   el('error').textContent = '';
   resetProgress();
   const payload = params();
-  if (active === 'refine' && !payload.continue_run) {
+  if (active === 'refine' && payload.resume_mode === 'fresh') {
     // --fresh discards both unpublished TeX and generated Lean state.
     // Either may represent hours of work; never discard them silently.
     const ok = confirm(
       'Start FRESH?\\n\\nThis discards the unpublished blueprint draft, all ' +
       'frozen Lean statements, and accepted proofs for "' +
       (payload.name || '?') + '". The published blueprint is unchanged.\\n\\n' +
-      'Leave "Continue unpublished refinement" checked to resume instead.');
+      'Choose "Continue latest unpublished refinement" to resume instead.');
+    if (!ok) return;
+  }
+  if (active === 'refine' && payload.resume_mode === 'phase1') {
+    const ok = confirm(
+      'Restart from the saved PHASE 1 snapshot?\n\nThis discards all later ' +
+      'unpublished Phase 2 changes and accepted proofs for "' +
+      (payload.name || '?') + '". The saved snapshot and published blueprint ' +
+      'remain unchanged.');
     if (!ok) return;
   }
   if (active === 'refine') {
@@ -2423,6 +2582,11 @@ async function refreshState(){
     || '<li class="hint">No blueprints yet — generate one.</li>';
   if (firstLoad){ renderTabs(); renderForm(); }
   else if (nextModelSignature !== modelStateSignature) refreshVisibleModelLists();
+  if (!firstLoad && active === 'refine') {
+    const last = el('lastSettingsBtn');
+    if (last) last.disabled = !Object.keys(state.last_refine_settings || {}).length;
+    updateResumeOptions();
+  }
   modelStateSignature = nextModelSignature;
 }
 

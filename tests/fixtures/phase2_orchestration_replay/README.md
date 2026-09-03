@@ -103,3 +103,17 @@ modules after 42 theorem proof-body edits reached one importer. Its regression
 requires the reusable-object key to ignore only opaque theorem/lemma bodies.
 Exact theorem statements, definition bodies, imports, the Lean environment,
 and final assembled source remain invalidating and are checked separately.
+
+`graph_scoped_invalidation.json` preserves the `Skeleton48.lean` declaration
+order from Simplex `run-20260825-194345`. Repairing
+`cor:geometric-signed-simplex` has no blueprint-graph descendants in that file,
+yet the old source-prefix policy discarded two later independent declarations.
+The regression requires graph-scoped invalidation, recompilation of retained
+declarations, and strict separation between repaired-label authority and
+cache-only recheck evidence.
+
+`equivalent_failure_feedback.json` preserves two differently worded statement-
+audit reports of the same missing dependency, plus a genuinely different
+missing-helper report. The regression requires the equivalent reports to share
+one retry/correction identity while the different obligation remains distinct.
+Raw report text is retained for model feedback and telemetry.

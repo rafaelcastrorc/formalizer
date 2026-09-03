@@ -1,5 +1,896 @@
 # Latest Changes
 
+## 2026-09-02: Reusable Refine Settings and Immutable Phase 1 Checkpoints
+
+The Refine with Lean UI now saves the configuration of each accepted run and
+offers **Use last-used settings**. The saved preset includes model runners,
+models, reasoning settings, timeouts, worker and section counts, conjecture and
+planner policy, and the Lean command. It intentionally excludes the blueprint,
+paper path, and resume source so applying a preset cannot target the wrong
+paper or silently choose a destructive restart.
+
+When the fast pipeline crosses the one-way Phase 1/Phase 2 boundary, it writes
+one immutable checkpoint under
+`.auto-blueprint/formalization/<name>/phase1-checkpoint/`. The checkpoint is an
+atomic copy of the unpublished blueprint draft, generated Lean source modules,
+generated compiled objects, and `skeleton_state.json`; Phase 2 continues against
+separate live files. A new `--continue-phase1` mode restores the entire bundle
+and removes later Phase 2 repair transactions before normal compatibility
+loading. Existing `--continue` still resumes the latest mutable work and
+`--fresh` still starts from the published blueprint, additionally deleting an
+older checkpoint so a new run cannot inherit the previous run's boundary.
+
+The Web UI presents those three choices as an explicit **Starting point**
+selector and enables the Phase 1 choice only when the selected blueprint has a
+checkpoint. Regression coverage verifies command construction, last-settings
+field isolation, checkpoint immutability, and coherent restoration of every
+captured artifact.
+
+## 2026-09-02: Batch Semantic Corrections and Reuse Phase 1 Objects
+
+The `20260902-130222` Simplex run spent 2,294.9 model-seconds across 72
+Phase-1 declaration-patch calls. Sixty were singletons. Historical telemetry
+across the most recent 80 runs showed that two- and three-label Phase-1 calls
+had far lower latency per label than singleton calls while retaining the same
+canonical ingestion and per-node acceptance gates. Phase 1 now coalesces only
+independent `semantic_rejected` singletons that share the same frozen import
+context and next retry tier, with a hard maximum of three labels. Per-node
+evidence, fingerprints, retry state, and audit results remain independent. An
+incomplete grouped response uses the existing ownership-aware isolation and
+bisection path; fresh work and incompatible repairs are never mixed into a
+correction wave. The implementation is below the runner boundary and therefore
+applies equally to Codex, Claude Code, and API runners.
+
+The same run also spent roughly 812 seconds compiling Phase-1 `.olean` objects
+after the corresponding source had already passed ordinary Lean elaboration.
+Benchmarks on generated Simplex modules confirmed that `lean file.lean` and
+`lean -o file.olean file.lean` have essentially the same elaboration cost, so
+the former check was not a cheap syntax pass. The mandatory pre-audit Lean
+check now emits the candidate object once. Semantic rejection removes that
+provisional source and object through the existing cleanup path; semantic
+acceptance records its source/environment/dependency fingerprint and reuses the
+same object. Any changed source, import, toolchain, or dependency fingerprint
+still triggers the existing rebuild, and the final integrated import gate is
+unchanged.
+
+Focused regressions cover correction-wave compatibility and tier separation,
+plus exact pre-audit object reuse without a second object build. The committed
+historical planner and scheduler replays remain the acceptance gates for the
+full change.
+
+## 2026-09-02: Align Fresh Phase 1 Input and Bound Retry State
+
+The Simplex run `20260902-130222` exposed two deterministic orchestration bugs.
+They are control-flow corrections, not changes to the refinement strategy.
+
+The fresh, no-feedback Phase 1 producer still rendered only the proof-stripped
+statement block even though the retry producer and independent audit rendered
+the complete blueprint node. That contradicted the September 1 producer-input
+change: obligations stated in proof prose could be absent from the first Lean
+contract, rejected by the full-node audit, and supplied only on a later retry.
+Fresh and retry generation now receive the same complete target node. Their
+output contract is unchanged: Phase 1 still emits only public interfaces with
+terminal `:= sorry`, never proof bodies.
+
+First, a Phase 1 semantic correction could render the same persisted diagnostic
+twice: once through the per-node evidence ledger and again as a synthetic
+`SkeletonFinding`. When that correction failed, the combined text was stored as
+new evidence and wrapped again by the next retry. The affected
+`constr:delta-four-cells` prompt grew to roughly 37 KB and repeated the same
+audit fact more than twenty times. Correction prompts now render persisted
+evidence once, deduplicate typed facts by their structured failure signature,
+and store only genuinely new correction output. Exact compiler and audit text
+remains available to the owning node; evidence from unrelated nodes is still
+excluded.
+
+Second, Phase 2 integration retained invalidated retry files whose
+`refined_labels` set was empty. Those files were no longer part of the accepted
+Lean environment, but the integration gate kept compiling and importing them.
+In the same run this produced an identical stale-import failure every roughly
+93 seconds while clearing zero additional labels. The integration gate now
+excludes only sections with an explicitly empty accepted-label set. Accepted
+sections and legacy sections without that metadata are unchanged.
+
+The same run also exposed misleading termination diagnostics. Concurrent model
+workers shared one global `active_stage` string, so one worker could restore a
+stale stage after another finished; a later SIGTERM then named a model call even
+while the main loop was in integration. Active stages are now tracked per
+thread, and termination reports the actual currently active operations. This
+changes logging only, not cancellation, scheduling, or refinement behavior.
+
+Focused regressions cover complete-node input on both producer paths,
+cross-boundary evidence deduplication, semantic retry prompt rendering, the
+empty-section integration loop, and concurrent active-stage reporting. The full
+suite and both committed Phase 1 historical/latency replays pass.
+
+## 2026-09-02: Resolve Blueprint Readiness Before Phase 1
+
+Historical Simplex telemetry showed two distinct source-quality cases entering
+ordinary Phase 1 as if they were Lean translation problems. Explicit
+`\notready` nodes could be repeatedly generated and decomposed even though the
+blueprint itself declared them unfinished. Separately, an unmarked but genuinely
+underspecified construction could consume statement-generation retries before
+the missing mathematical contract was identified.
+
+The validator now preserves `\notready` as node metadata. Before compact
+planning or statement generation, non-open marked nodes enter the existing
+transactional blueprint-repair path. Recorded open conjectures remain exact open
+propositions; attempt mode requires the blueprint proof first. A deterministic
+repair postcondition rejects deletion of `\notready` from a theorem-like node
+unless a nonempty blueprint proof was added, so this policy is identical for
+Codex, Claude Code, and API runners.
+
+The existing compact semantic planner gained only two advisory fields:
+`readiness` and `gap`. It remains untyped, non-authoritative, and bounded to the
+same planner call. An advisory warning cannot repair the blueprint by itself;
+one independent scoped check must confirm it. False positives and unavailable
+checks proceed to normal Phase 1, while confirmed source gaps use the same
+transactional repair route. Readiness results and confirmations persist through
+continuation and are emitted as telemetry for future classifier training.
+
+Committed regressions cover record versus attempt policy, legacy planner
+responses without the new fields, one-time false-positive confirmation,
+confirmed repair routing, validator marker preservation, and the post-repair
+proof requirement.
+
+The provider boundary was also exercised with the production compact-planner
+prompt, parser, readiness-confirmation prompt, and model-call plumbing against
+the committed historical readiness fixture. The live Codex response classified
+the fully specified definition as `ready`, both source-marked claims as
+`explicitly_unresolved`, and the independent critic confirmed only the
+non-open claim for repair. The open conjecture remained excluded under
+`--conjecture-policy record`. This validation did not mutate a blueprint.
+
+## 2026-09-02: Preserve Delivered Declarations in the Serial Fallback
+
+The serial `_freeze_parts()` fallback referenced an undefined local variable
+while determining helper ownership for an already-delivered model response.
+That branch could therefore raise `NameError` instead of checking and retaining
+valid declarations after a broader Phase 1 response was split.
+
+Helper ownership is now computed from the actual active parts, matching the
+parallel branch. A focused regression executes the serial delivered-response
+path and verifies that the declaration is frozen without another generation
+call. This is a control-flow correction only; it does not change Phase 1
+contracts, dependency semantics, model routing, or batching policy.
+
+## 2026-09-02: Separate Statement-Dependency Additions From Removals
+
+The Simplex run `20260902-000702` exposed an ambiguity in the statement-audit
+schema. For `lem:recursive-residual-parked-schedule-data`, the critic correctly
+explained that five internal construction dependencies should be removed in
+favor of the public layer-certificate interface, but the only available JSON
+field was `required_dependencies`. It therefore placed those same five labels
+in that field, and the coordinator deterministically added the opposite edges
+to the blueprint. Those edges enlarged the next contract and repair component.
+
+Statement audits now report dependency additions and removals separately.
+Only `required_dependencies` can authorize the existing cycle-checked edge
+repair; `forbidden_dependencies` becomes exact Lean-correction evidence and
+cannot edit the blueprint graph. If a malformed response puts the same label
+in both arrays, no edge is added for that label. The structured failure
+identity includes both actions, so equivalent retry evidence remains bounded.
+
+The change was validated through two real production-prompt calls using the
+same Codex runner boundary as refinement. The exact Simplex rejection returned
+zero additions and the five internal labels as removals. A historical UUE
+control, `def:local-basis-unitary`, still returned its genuinely missing
+`def:single-qubit-paulis-cliffords` edge as an addition and no removals. The
+schema and parser are shared by Codex, Claude Code, and API runners.
+
+## 2026-09-02: Preserve Conjecture Policy and Structured Evidence Through Phase 1
+
+The Simplex run `20260902-000702` exposed two deterministic orchestration bugs.
+First, the canonical conjecture-policy gate correctly translated the explicit
+open proposition `remark:open-depth-questions` to a proposition-valued `def`,
+but a later Phase-1 kind check looked at the raw blueprint environment instead
+of the policy-adjusted target kind and rejected that same `def` as if it were a
+theorem. The contradictory checks consumed retries and eventually decomposed an
+open question that the configured `record` policy should have excluded from
+proof work. All Phase-1 deterministic kind checks now use the single
+policy-adjusted target-kind function.
+
+Second, statement audits already produced structured failure identities, but
+the main-loop retry boundary forwarded only their human-readable text. Slightly
+different wrappers of the same fact were therefore stored as new evidence and
+recursively injected into later prompts. In the same run, one single-node prompt
+grew to roughly 57 KB and repeated its owner label ten times. The retry boundary
+now carries the structured identity alongside the text, and evidence rendering
+deduplicates owners. The original diagnostic remains available to correction
+calls without allowing orchestration prose to multiply it.
+
+Both corrections are below the runner boundary and apply to Codex, Claude Code,
+and API runners. Regressions cover the exact recorded-open-proposition path and
+equivalent structured audit prose crossing the outer retry boundary.
+
+## 2026-09-01: Identify Repeated Failures by Structured Facts, Not Critic Prose
+
+Retry and candidate state previously hashed the human-readable wording of a
+failure. Two statement-audit responses could report the same missing dependency
+or helper in different prose and be treated as different progress, causing the
+same candidate to receive another correction call. Deterministic findings had
+the same problem because their full display message was part of the stagnation
+fingerprint.
+
+The pipeline now derives a canonical failure identity from facts it already
+validates: audit classification and origin, missing plan requirements,
+interface defects, deferred obligations, required dependencies, and missing
+helpers; deterministic checks use their stable obligation IDs; Lean diagnostics
+use the existing location-insensitive error shape. Lists are canonicalized as
+sets, so ordering and wording cannot create a new retry state. Raw critic and
+compiler text is still retained unchanged for the next correction prompt and
+for telemetry. If a response has only free text and no structured facts, the
+pipeline does not guess that it is equivalent to another response.
+
+The identity is used by Phase 1 retained candidates, evidence, and interface-
+plan correction fingerprints, Phase 2 complete-node correction fingerprints,
+and continuation state. It is entirely below the runner boundary and therefore
+applies to Codex, Claude Code, and API runners. A committed historical-style
+replay covers differently worded reports of the same missing dependency, a
+genuinely different missing helper, and Phase 2 continuation behavior. The full
+479-test suite and all three committed historical/latency replays pass.
+
+## 2026-09-01: Complete Frozen Phase 2 Definitions in Their Owning Section
+
+The Simplex run `20260901-061921` exposed a deterministic publication bug in
+the deferred-definition prerequisite route. Phase 2 correctly identified the
+frozen `def:max-function` contract as the definition that a blocked consumer
+needed implemented, but then sent that already-frozen declaration through the
+new/changed whole-node path. That path published `def_max_function` in a new
+skeleton module while its Phase 1 `sorry` declaration remained in the original
+module. Every later consumer compile therefore failed with `environment
+already contains 'def_max_function'`; 160 prerequisite routes made no progress
+until the run was stopped.
+
+Prerequisite routing now distinguishes the two states that were previously
+collapsed. An invalidated or missing provider still uses the Phase 2
+whole-node transaction. A frozen provider with a deferred body is selected by
+the ordinary Phase 2 body frontier, which replaces `sorry` in the provider's
+owning section and rebuilds that section's `.olean`. Pending helper declarations
+remain queued until the provider body is available. This preserves the August
+31 dependency-first ordering while preventing duplicate canonical Lean names.
+The committed historical prerequisite fixture now covers the exact frozen
+provider plus pending-helper boundary.
+
+Continuation also migrates state written by the broken route. Active
+non-provisional sections must have unique canonical-label ownership. If an old
+state contains a later duplicate owner, resume keeps the earliest valid owning
+section, removes the later transaction, reschedules any otherwise-unique labels
+that shared it, and defers modules that imported the removed transaction so the
+existing dependency-rebind path can recheck them. The migration is persisted
+immediately, making repeated interrupted `--continue` runs idempotent. The
+historical fixture records the observed `Skeleton02`/`Skeleton115`
+`def:max-function` collision and an importer of the discarded module.
+
+## 2026-09-01: Route Explicitly Open Claims Through Conjecture Policy
+
+The conjecture policy previously recognized only a `conjecture` LaTeX
+environment or a `conj:` label. The Simplex blueprint instead states an open
+problem inside a proposition labeled `remark:open-depth-questions`: "It remains
+open whether ...". The default `record` policy therefore missed it, froze it as
+an ordinary theorem, and scheduled theorem proof/decomposition in Phase 2.
+
+The canonical blueprint parser now records a narrow source-level `open_claim`
+property for explicit open-question/problem language. Ordinary mathematical
+uses such as "open set" and "open map" do not match. All existing conjecture
+routing consumes that one property: `record` freezes the exact proposition as
+a proposition-valued `def`, counts it as recorded rather than verified, and
+excludes it from Phase 2; `attempt` continues to treat it as a theorem-like
+proof obligation. The change is deterministic and below the model-provider
+boundary, so it applies equally to Codex, Claude Code, and API runners.
+
+Regressions cover the historical Simplex environment shape, the topology
+negative control, both conjecture-policy branches, recorded/verified progress,
+and exclusion from Phase 2. All 474 repository tests and both committed Phase 1
+historical replays pass. A live production-prompt validation of the exact
+Simplex node generated its proposition in 27.3 seconds, compiled it with Lean
+in 30.4 seconds, and passed the independent statement-alignment audit in 16.8
+seconds. An earlier stochastic sample compiled but incorrectly restricted one
+question to dimensions at least three; the unchanged audit rejected that
+weakening, confirming that classification does not bypass fidelity checking.
+
+## 2026-09-01: Give Phase 1 Producers the Same Target Semantics as the Audit
+
+Phase 1 statement generation and targeted compiler correction previously saw
+only a proof-stripped rendering of each target node. The independent statement
+audit already saw the complete node, including its proof sketch. Consequently,
+a generator could produce a compiling declaration faithful to the displayed
+statement but omit an interface obligation stated only in the blueprint proof;
+the audit would then reject work the producer was never shown.
+
+Both producer paths now receive the complete target node. This changes target
+semantics only: dependency context is still limited to frozen direct interfaces,
+and the output contract still permits only declarations and same-node
+structural interfaces whose ordinary bodies/proofs end in `:= sorry`. Phase 1
+therefore remains statement/interface construction rather than proof search.
+
+The focused prompt/routing suite covers both paths and passes 375 tests. Before
+the source change, the exact treatment was validated through the production
+model, Lean compiler, and independent audit on four historical Simplex targets:
+`lem:claim-five-p-membership`, `lem:claim-five-q-membership`,
+`lem:full-additivity`, and `lem:two-cell-valuation`. All four passed in one
+generation call; generation took 13.5--28.8 seconds per target.
+
+## 2026-09-01: Preserve the Realized Contract Epoch When Salvaging Phase 1 Candidates
+
+Fresh Phase 1 generation may realize a target's exact typed contract from the
+same model response that produced its Lean declaration. The layer candidate was
+previously stamped with the advisory contract fingerprint captured *before*
+that realization. If a sibling declaration then failed, candidate salvage
+compared the retained declaration with the newer contract fingerprint and
+incorrectly discarded valid work as stale. The September 1 Simplex telemetry
+contains 31 `phase1_retry_candidate_epoch_rejected` events from this path.
+
+The uncompiled candidate is now stamped only after same-transaction contract
+realization. This does not weaken epoch invalidation: blueprint edits, plan
+replacement, and strategy changes still invalidate stale candidates. It only
+prevents the current transaction from rejecting its own output. A focused
+regression exercises the realization-to-salvage boundary; all 368 Phase 1
+routing tests and both committed historical Phase 1 replays pass.
+
+## 2026-09-01: Use the Escalation Model for Compact Planning by Default
+
+The compact Phase 1 semantic planner now defaults to the configured escalation
+runner/model and effort. This changes only the compact planner's primary call
+and hedge; statement generation, compiler correction, blueprint repair, and
+Phase 2 retain their existing model-routing policies. CLI and Web UI defaults
+are synchronized, and an explicit `--planner-tier base` or **Base model** UI
+selection still overrides the default. Provider selection remains generic, so
+the behavior applies to Codex, Claude Code, and API runners.
+
+## 2026-08-31: Bound Phase 1 Interface-Usability Recovery Without Blueprint Growth
+
+### Confirmed failure
+
+Simplex run `20260831-022739` spent 8h45m in Phase 1. It started normally,
+but 22 compile-exhaustion events routed public-interface elaboration failures
+to blueprint decomposition. The draft grew from 110 to 237 nodes; work on
+repair-introduced helpers accounted for 627 model calls and 558.6 model-minutes.
+Ten of the 22 events were ordinary 90-second object-check timeouts and six were
+Lean heartbeat/elaboration limits. In each case Phase 1 had already replaced
+all target implementations and proofs by `sorry`, so adding mathematical
+blueprint nodes was not justified by the compiler evidence.
+
+The same historical interface was reproduced with the production prompt. A
+real `codex:gpt-5.5` call returned a bounded representation in 48.8 seconds:
+one target-owned transition structure, one target-owned chain structure, and a
+transparent alias at the canonical blueprint name. Raw Lean compiled in about
+20 seconds. The production normalizer initially erased the inferred `abbrev`
+alias body because it recognized only aliases that redundantly wrote `: Type`;
+the independent statement audit then correctly rejected the damaged candidate.
+
+### Correction
+
+- Phase 1 recognizes only exact object/heartbeat/elaboration-budget evidence
+  after target bodies have been deferred as an interface-usability failure.
+  Syntax errors, unknown identifiers, and malformed Lean remain on the existing
+  compiler retry/decomposition lifecycle.
+- That recognition now occurs immediately after the first local Lean check,
+  before the ordinary compiler-patch loop. In the historical run, the
+  heartbeat/local-Lean-check subset was not classified until after that loop;
+  labels later implicated by all 16 interface-budget failures accumulated 123
+  skeleton-patch calls and 141.3 model-minutes.
+  Once every ordinary body is already `sorry`, those calls cannot simplify a
+  proof or implementation. They are skipped and the retained contract goes
+  directly to the interface-usability lifecycle. A paired negative regression
+  proves that an attributable syntax/type error still receives the normal
+  local compiler patch.
+- Interface usability has one statement-fingerprinted lifecycle: one bounded
+  interface-plan correction, then one switch to blueprint-direct same-node
+  representation. A compiler timeout alone never authorizes blueprint repair.
+  A separate mathematical `NEEDS-DECOMPOSITION` judgment is still required.
+- The normalized usability requirement survives candidate and plan replacement
+  so the corrected prompt sees why the prior representation failed. Raw
+  compiler diagnostics remain candidate-scoped and are still discarded with
+  obsolete Lean, preserving the typed-evidence rules below.
+- Correction prompts explicitly permit bounded named `structure`, `class`, or
+  `inductive` interfaces owned by the same blueprint target, while preserving
+  every parameter, witness, equation, and mathematical obligation. This adds
+  no blueprint node and does not move proof work into Phase 1.
+- Canonical ingestion now preserves a direct inferred
+  `abbrev target := OwnedStructure ...` as a transparent type interface. The
+  exception remains narrow: the right-hand side must be a structural helper
+  owned by that same target. Ordinary completed `def`/`abbrev` bodies are still
+  replaced by `sorry`.
+- All routing is below the model-provider boundary and applies equally to
+  Codex, Claude Code, and API runners.
+
+### Validation
+
+The exact real-model candidate was compiled both raw and after production
+canonicalization, then accepted by the independent production statement audit
+against the current Simplex blueprint. Unit regressions cover plain and
+heartbeat timeouts at both the first local Lean check and the outer router,
+evidence survival across a plan epoch, bounded non-mutating routing, inferred
+structural aliases, the ordinary-abbrev negative control, and preservation of
+the local compiler-patch path for ordinary malformed Lean.
+The historical malformed-`thm:security` fixture still reaches its existing
+decomposition route. All 470 repository tests, the committed Phase 1 plan
+replay, and the Phase 1 scheduler-latency replay pass. Replaying all 22
+compile-exhaustion records from the affected run classifies exactly the 16
+interface-budget failures for the new route and leaves the six ordinary
+compiler failures on their established path.
+
+## 2026-08-31: Make Diagnostic Evidence Lifetimes Explicit
+
+### Confirmed failure
+
+Historical Phase 1 runs exposed the same failure at several orchestration
+boundaries: an exact semantic rejection could disappear when a candidate or
+plan was replaced, while a compiler error for obsolete Lean could survive an
+outer retry and poison a new candidate. Dependency-reference evidence had a
+third lifecycle: it had to survive candidate/plan retries, but only until the
+specific graph edge was applied. Individual branches attempted to preserve or
+clear the flattened `generation_feedback` map themselves, so correctness
+depended on which failure path happened to run next.
+
+### Correction
+
+- The pipeline now has one authoritative typed diagnostic ledger. Every fact
+  records its blueprint statement fingerprint, kind, source, and explicit
+  lifetime: statement, plan, candidate, or transaction.
+- Semantic statement-audit requirements survive candidate and plan replacement
+  but expire when the blueprint statement changes or the declaration is
+  accepted. Plan defects expire with the plan. Compiler and deterministic
+  diagnostics expire with the exact Lean candidate that produced them.
+- Generated dependency references are structured statement-scoped facts. They
+  remain insufficient to edit the graph by themselves, join only with the
+  independent critic evidence required by the existing transaction, and are
+  consumed edge by edge after that transaction succeeds.
+- Outer retry handlers cannot broaden an exact candidate/plan diagnostic into
+  generic statement-scoped feedback. Candidate persistence is the
+  authoritative publication point for compiler and deterministic evidence;
+  an unattached mechanical finding is logged and discarded rather than widened
+  to the whole statement epoch.
+- State version 29 persists the typed ledger through `--continue`. Version-28
+  compatibility state is migrated using the producer's actual evidence class;
+  a mechanical diagnostic without its original candidate is discarded rather
+  than falsely widened into permanent semantic evidence.
+- `generation_feedback` and the older dependency-observation map remain only as
+  compatibility projections. Prompt construction, pruning, transitions, and
+  consumption use the typed ledger. The implementation is below the runner
+  boundary and is shared by Codex, Claude Code, and API runners.
+
+### Regression
+
+`evidence_lifecycle_matrix.json` records the historical semantic/compiler
+handoff, candidate refresh, blueprint-direct plan transition, dependency-edge
+transaction, and sibling-isolation cases. Executable tests cover all four
+validity boundaries, edge-by-edge consumption, concurrent producers, exact
+evidence precedence over generic outer retries, old-state migration, and
+acceptance of only one sibling. The complete 462-test suite and all committed
+Phase 1/Phase 2 replay suites pass.
+
+## 2026-08-31: Implement Deferred Definitions Before Phase 2 Helper Repair
+
+### Confirmed failure
+
+After Phase 1 completed in Simplex run `20260830-205601`, Phase 2 repeatedly
+reported that `def:polyhedral-subdivision` was still an opaque `sorry` body.
+The run contains 29 complete-node decomposition events naming that provider.
+Although the existing prerequisite detector eventually recognized the issue,
+it was invoked only after a blueprint repair had already added helpers. The
+new helpers were then contract-pending and preempted proof scheduling, so the
+same blocked work ran again before the provider body could be implemented.
+
+### Correction
+
+- A caught Phase 2 complete-node decomposition request now enters the existing
+  evidence-bound definition-prerequisite detector before any blueprint-repair
+  transaction starts. Evidence must still name an unimplemented definition in
+  the blocked node's existing blueprint dependency closure.
+- A persisted definition prerequisite now has priority over newly introduced
+  contract-pending helpers. The provider is completed as an ordinary Phase 2
+  whole node, after which scheduling returns to the blocked top-down work.
+- This is solely an implementation-order override. It does not edit the
+  blueprint, infer an edge, reopen Phase 1, consume a repair trial, or alter an
+  explicit decomposition request that is not caused by a deferred definition.
+  It uses the shared orchestration layer and is provider-neutral.
+
+### Regression
+
+The existing `simplex_opaque_definition_prerequisite.json` fixture now also
+records the latest run's pending-helper preemption case and its 29 repeated
+provider diagnoses. Executable tests prove that the provider body, not the new
+helper, becomes the next declaration transaction and that ordinary pending
+work is unchanged when no prerequisite exists. The complete 454-test suite and
+the Phase 2 latency replay pass.
+
+## 2026-08-31: Preserve Two-Source Dependency Evidence Across Phase 1 Retries
+
+### Confirmed failure
+
+The `20260830-205601` Simplex run showed a repeated Phase 1 failure pattern in
+which the generated Lean and the independent statement critic collectively
+identified a missing blueprint dependency, but did so at different points in
+the retry lifecycle. The deterministic closure gate first rejected the exact
+generated reference. A later plan transition discarded that candidate-owned
+observation. When the critic subsequently named the same required dependency,
+the pipeline no longer had both independent sources needed to authorize the
+existing graph transaction, so it regenerated or abstracted the declaration
+instead.
+
+For the Claim Five component this separated evidence by roughly 23 minutes of
+wall time. The committed UUE replay records the same shape: the target's public
+interface helper refers to `def:channel-povm`, the critic independently requires
+that dependency, and the old lifecycle spent 11 calls and 275 model-seconds
+before adding the edge.
+
+### Correction
+
+- The deterministic closure gate now retains exact generated dependency
+  references by target statement fingerprint. The observation survives
+  candidate and plan epochs, but a changed blueprint statement removes it.
+- The scan covers the canonical target and every transitively target-owned
+  helper declaration in its public interface. A dependency hidden in a helper
+  structure is therefore not lost merely because the target returns that
+  structure by name.
+- Retained candidate evidence is not sufficient to edit the blueprint. It is
+  joined only with an independent critic report naming the same existing
+  blueprint dependency. The intersection enters the pre-existing
+  transactional dependency-edge writer, including graph validation, cycle
+  rejection, scoped invalidation, and rollback.
+- Confirmed observations are consumed after the edge transaction. Rejected
+  cyclic observations are cleared and routed with the existing cycle evidence.
+  No model call, new repair path, or provider-specific behavior was added.
+- The observations are persisted through `--continue`, keyed by statement
+  fingerprint, so a restart cannot split the two evidence sources again.
+
+### Regression
+
+`immediate_dependency_edge.json` now contains the exact historical UUE Lean
+candidate and response hash. The executable regression proves that a reference
+inside a target-owned helper is detected, survives a plan epoch, joins only
+with the matching critic dependency, and reaches the existing edge transaction.
+Additional tests cover stale-fingerprint pruning, persistence, and cycle
+rejection. The complete 452-test suite, the committed Phase 1 plan replay, and
+the Phase 1 scheduler-latency replay pass.
+
+## 2026-08-28: Preserve Valid Scoped Repairs and Per-Node Audit Evidence
+
+### Confirmed failures
+
+Simplex run `20260828-165947` exposed two provider-neutral repair bugs. A
+five-node scoped blueprint-repair call completed in 132 seconds and returned
+all five requested replacements, but its TeX strings contained ordinary JSON
+backslash mistakes such as `\b` and `\u`. The generic response extractor
+discarded the entire paid response as "not a JSON object" even though the
+existing key-aware extractor can recover this exact model-output defect. Two
+recorded responses from the same run reproduce the problem and recover all
+requested replacements with that extractor.
+
+The same run also showed that a multi-node statement audit stored its complete
+combined rejection under every individual node. Although the immediate retry
+prompt used `reason_for([label])`, persisted candidate and retry-lifecycle state
+still received criticism belonging to unrelated siblings. Later retries could
+therefore carry a much larger and semantically incorrect failure context.
+
+Finally, the run aggregated three independent authorized repair requests into
+one five-target model call. That call took `132.47s`. A production-prompt replay
+ran the original three scopes concurrently through `codex:gpt-5.5`: the calls
+took `78.14s`, `59.31s`, and `50.44s`, for `78.15s` wall time. All five targets
+were returned; merging their disjoint replacement maps against one immutable
+draft produced a valid 178-node blueprint with globally unique helper labels.
+This is a measured 41% reduction for the recorded transaction, not a simulated
+scheduler estimate.
+
+### Correction
+
+- Scoped blueprint repair now uses the existing key-aware JSON extractor for
+  the required `replacements` object. It repairs only invalid JSON escaping;
+  target authorization, duplicate-label checks, immutable-source application,
+  full blueprint validation, and rollback remain unchanged.
+- Scoped-repair telemetry records the number of recovered backslashes so this
+  transport defect remains measurable instead of looking like a model no-op.
+- Batched statement-audit evidence is split with the audit's native
+  `reason_for([label])` operation before candidate storage, retry-lifecycle
+  recording, and feedback persistence. Component records contain only their
+  member labels; node records contain only that node's finding.
+- Aggregation now preserves each independently authorized model-repair scope.
+  Two or more disjoint scopes run as concurrent read-only proposals through the
+  configured runner, so this works for Codex, Claude Code, and API backends.
+  Python requires exact target coverage, rejects overlap, merges against the
+  immutable pre-call source, and enters the existing transactional application
+  path once. Blueprint edits remain serialized and all previous scope, graph,
+  validation, downstream invalidation, and rollback gates remain authoritative.
+
+### Regression
+
+Unit tests replay malformed TeX-in-JSON and prove that the authorized
+replacement is recovered without broadening edit scope. A second regression
+proves that two rejected nodes receive distinct persisted semantic evidence.
+Further tests prove that aggregation preserves independent repair scopes and
+that concurrent proposals produce exactly one merged atomic commit. The live
+five-target replay above validates the provider call, parser, merge, and full
+blueprint validator together.
+
+## 2026-08-28: Admit Compact Semantic Plans by Coverage
+
+### Confirmed failure
+
+Simplex run `20260827-170917` requested 107 compact semantic contracts. The
+first planner response was valid, nonempty JSON but contained only one contract
+(`cor:cpwl-four-two-layers`). The orchestration accepted the first nonempty
+response before parsing its coverage, immediately assigned blueprint-only
+fallback guidance to the other 106 nodes, and never used its already-bounded
+fresh recovery lane.
+The same blueprint and prompt had produced complete plans in 20 of 22 recorded
+production calls, so treating this rare partial transport/model result as a
+complete plan created avoidable Phase 1 repair work.
+
+### Correction
+
+- Every returned planner response is parsed before it can win the planner
+  transaction. Nonempty output is no longer synonymous with complete coverage.
+- Valid partial entries are retained. If the primary call leaves labels
+  uncovered, the existing single fresh recovery lane starts immediately; its
+  valid entries are merged with the primary entries.
+- The transaction still permits at most two model calls and introduces no
+  planner-repair loop, typed planning, or provider-specific behavior. After
+  both calls finish, deterministic fallback applies only to labels absent from
+  their union.
+- Telemetry now reports merged coverage and the actual number of response
+  characters considered, while loser cancellation is reported only when a
+  still-running incomplete lane was really cancelled.
+
+### Regression
+
+`partial_nonempty_20260827.json` commits the observed 1-of-107 production
+response shape. Executable tests prove that one fresh response can complete the
+coverage without discarding the first entry, and that two incomplete responses
+fall back only for their still-uncovered remainder.
+
+## 2026-08-27: Prevent Rejected Phase 1 Candidates From Poisoning Their Contracts
+
+### Confirmed failure
+
+Simplex run `20260827-131622` reached `123/125` Phase 1 contracts, then became
+trapped on `prop:dyadic-weights`. A targeted response changed this theorem-like
+blueprint node into `def prop_dyadic_weights : Prop := sorry`. The deterministic
+gate rejected that output, but it had already refreshed the candidate-derived
+contract from the invalid declaration. Subsequent corrections were therefore
+asked to preserve the same invalid interface.
+
+When the targeted correction exchange exhausted, its `escalation` provenance
+was also dropped. The shared deterministic exhaustion router could not advance
+the node to blueprint-direct generation or decomposition. Outer retries
+33--100 then consumed the remaining shared repair/retry budget in ten seconds
+without a model call, a blueprint edit, or any state change. The run did not
+perform 100 model-backed blueprint repairs; the counter also includes ordinary
+generation retries, so the former UI label was inaccurate.
+
+### Correction
+
+- Candidate-derived contracts are now realized only after every deterministic
+  check on that candidate succeeds. Rejected code cannot become the contract
+  used by its next correction prompt.
+- Theorem-like blueprint nodes must generate `theorem` or `lemma` declarations
+  whose result states a concrete proposition. `def ... : Prop` and the bare
+  sort `theorem ... : Prop` are rejected before contract realization.
+- A failed targeted semantic correction retains the tier that produced the
+  candidate and per-label evidence. It therefore enters the existing bounded
+  base/escalation/blueprint-direct/decomposition lifecycle instead of repeatedly
+  consuming the outer budget without progress.
+- The UI now calls this shared limit `repair/retry trials`; actual blueprint
+  edits remain separately identifiable in logs and telemetry.
+
+### Regression
+
+`theorem_like_contract_poisoning.json` records the exact 68-retry zero-call tail
+and invalid declaration from the production run. Unit tests prove that neither
+wrong declaration form can rewrite the accepted contract and that semantic
+patch exhaustion carries its producing tier into the shared router.
+
+## 2026-08-27: Preserve Phase 1 Retry State and Graph-Scoped Phase 2 Work
+
+### Confirmed failures
+
+Simplex run `20260825-194345` exposed two provider-neutral orchestration bugs.
+In Phase 1, every candidate-derived header refresh crossed the same generation
+epoch boundary reserved for an actual authority change. The run recorded 282
+such transitions; the Claim 5 component crossed it 21 times and repeatedly
+reported failure count 1 instead of ever advancing to bounded exhaustion.
+The refresh erased the candidate, retry lifecycle, and exchange history owned
+by the transaction that had just produced it.
+
+In Phase 2, a changed declaration caused every later declaration in its Lean
+file to be discarded, even when those later declarations were not descendants
+in the blueprint dependency graph. The historical `Skeleton48.lean` case
+discarded two independent declarations solely because they followed
+`cor:geometric-signed-simplex` in source order. A real Lean control retained
+those declarations, removed only the changed one, and compiled successfully.
+The same verification boundary also allowed cache-only recheck evidence to add
+decomposition helpers to the active blueprint-repair transaction.
+
+### Correction
+
+- Candidate-derived contract refresh now updates the compatibility plan view
+  inside the current Phase 1 transaction. It preserves that transaction's
+  generated candidate, retry state, and exchange history. Full epoch
+  invalidation remains mandatory for real authority changes: blueprint edits,
+  plan replacement, and first activation of blueprint-direct generation.
+- A targeted Phase 1 correction is canonicalized against its complete owning
+  component so accepted sibling names remain canonical. Replacement authority
+  is still restricted to the explicitly rejected declarations.
+- Direct Phase 2 repair invalidation now removes the changed labels and their
+  actual dependency-graph descendants, independent of Lean source order.
+  Retained declarations are recompiled; a real undeclared coupling still makes
+  Lean reject and discard them.
+- Repaired labels and cache-only recheck labels are persisted separately.
+  Recheck failures may invalidate cached Lean, but cannot add helpers or widen
+  the blueprint edit transaction.
+
+### Regression
+
+`candidate_contract_refresh_lifecycle.json` preserves the observed Phase 1
+reset counts, and `graph_scoped_invalidation.json` preserves the historical
+Phase 2 declaration order, graph descendants, and successful retained-source
+Lean control. Executable tests assert lifecycle preservation, sibling-name
+canonicalization without broader replacement, graph-scoped invalidation, and
+repair-helper ownership.
+
+## 2026-08-25: Make Structured Statement-Audit Routing Authoritative
+
+### Confirmed failure
+
+Simplex telemetry run `20260824-000913-261f5ebf`, sequences 827--829,
+contained three statement-audit rejections. Every issue was explicitly a
+plan-origin `lean_translation_issue`, named existing required blueprint
+dependencies, supplied concrete missing plan requirements, and supplied no
+missing helper or missing blueprint information. A second free-text heuristic
+nevertheless interpreted phrases such as "erases the mathematical content" and
+"does not state the concrete terms" as decomposition evidence. Two labels were
+therefore sent to blueprint repair while their identically structured sibling
+correctly remained a plan/Lean correction.
+
+### Correction
+
+- The structured per-node audit classification is now authoritative.
+  `needs_decomposition` remains the explicit decomposition route;
+  `lean_translation_issue` remains plan/Lean correction regardless of prose.
+- Existing required dependencies continue through the deterministic,
+  cycle-checked dependency-edge transaction. Plan-origin requirements remain
+  attached to the scoped plan correction.
+- The redundant keyword classifier and its vocabulary tables were removed.
+  This is provider-neutral because it consumes the common JSON audit schema,
+  not backend-specific output behavior.
+
+### Regression
+
+`structured_statement_audit_routing.json` stores the exact production critic
+payload and the previously incorrect routing event. The executable routing
+test replays that payload through `_model_alignment_audit` and verifies that
+all three labels retain plan origin, exact dependency evidence, and plan
+requirements without authorizing blueprint repair. Existing explicit
+`needs_decomposition` coverage remains unchanged.
+
+## 2026-08-24: Preserve Outer `let` Contracts at the Phase 1 Boundary
+
+### Confirmed failure
+
+The Phase 1 ingestion boundary found a declaration body by taking the first
+lexically top-level `:=`. That is not a valid Lean declaration boundary: a
+theorem result type may legally start with an unparenthesized `let` or `letI`
+assignment and still end in the required Phase 1 `:= sorry`. The model output
+was valid, but ingestion truncated it at the inner assignment and produced an
+invalid declaration. The resulting `unexpected end of input` compiler errors
+were then charged to model correction and decomposition.
+
+The failure is preserved from the Simplex response artifact
+`e997e209310a7c6eef7ec7e5c9429355455116f7125cd88050b6c576fceb0b57`
+and the accepted UUE `Skeleton18.lean`. In the latest Simplex telemetry, every
+one of the ten compile-exhaustion decompositions with this shape ended in
+`unexpected end of input`.
+
+### Correction
+
+- A terminal `:= sorry` is now the authoritative Phase 1 boundary. A model
+  declaration that already has that shape is preserved byte-for-byte.
+- Phase 1 interface extraction removes only the final marker, retaining every
+  `let`/`letI` assignment in the public result type.
+- Planned result-type extraction uses that same exact terminal boundary.
+- The optional legacy loop's audit-signature summarizer now follows the same
+  terminal-marker rule instead of truncating an outer `let` contract.
+- The older lexical body scanner remains only as the fallback for genuinely
+  completed model bodies that Phase 1 must discard; that behavior is covered
+  by a separate control regression.
+
+This is provider-neutral and does not change planning, scheduling, auditing,
+or Phase 2 semantics.
+
+### Regression
+
+`terminal_sorry_outer_let.json` records both the outer-`let` and outer-`letI`
+production shapes. Tests exercise shared ingestion, interface extraction,
+result-type extraction, and the completed-body control. The real UUE section
+also compiles with Lean unchanged.
+
+## 2026-08-23: Preserve Phase 2 Repair Transactions and Route Provider Defects
+
+### Confirmed failures
+
+Simplex run `20260823-001604` exposed two distinct Phase 2 ownership bugs.
+First, a `RepairRequest` caught while completing pending declarations called
+the queue activator directly. Telemetry sequence 6124 therefore recorded an
+active repair for `cor:max-five-geometric` without the durable pre-edit
+snapshot required by the later verification gate, which produced the terminal
+`cannot verify ... without its pre-edit transaction snapshot` exception.
+
+Second, post-repair audits at sequences 5607 and 5895 repeatedly rejected new
+helpers below `cor:geometric-signed-simplex` for the same missing capability:
+`thm:polytope-triangulation` exposed convex-hull cells but not the
+affine-independent simplex-cell property used by the blueprint proof. The
+audit prompt required every issue to name a changed label and its parser
+dropped unchanged labels, so the critic could not assign the defect to the
+existing provider contract. The pipeline rebuilt consumer components instead.
+
+### Correction
+
+- A caught queued Phase 2 request now crosses the same
+  `_start_phase2_repair_transaction` gate as an iteration-start request. The
+  gate persists scheduler state and a complete rollback snapshot before any
+  blueprint edit. No activation path may call the lightweight active-writer
+  marker as a substitute for that gate.
+- The scoped post-repair boundary audit may now return
+  `provider_contract_defect`, but only for an unchanged provider already in the
+  original repaired root's existing dependency closure. Unrelated labels,
+  consumers, siblings, and invented edges remain ineligible.
+- Provider ownership never widens the current consumer transaction. The
+  provisional consumer component is rolled back, its request is retired, and
+  the named provider is queued as a separate ordinary Phase 2 transaction.
+  After that provider verifies, the still-unproved consumer returns to normal
+  top-down scheduling under the changed dependency contract.
+- This route does not reopen Phase 1, skip compilation/alignment/integration,
+  or grant mutation authority from Lean-only failures. It is shared by Codex,
+  Claude, and API runners because it is implemented at the provider-neutral
+  audit/transaction boundary.
+
+### Regression
+
+`provider_contract_ownership.json` records the exact Simplex activation at
+sequence 6124 and the repeated boundary-audit shape from sequences 5607 and
+5895. Tests require snapshot creation on the caught-exception path, reject a
+provider outside the dependency closure, and verify rollback plus a separate
+provider queue item while retaining the existing provisional-component
+rollback and active-queue barriers.
+
+## 2026-08-23: Make Blueprint-Direct Activation Idempotent
+
+### Confirmed failure
+
+Simplex `run-20260823-001604` activated blueprint-direct generation 41 times
+for only 26 distinct Phase 1 statement versions. Fifteen activations repeated
+an already-active strategy without a statement change. For example,
+`prop:linear-size` switched at telemetry sequence 3381 and switched again at
+3472 under the same statement fingerprint. Each duplicate crossed the shared
+generation-epoch boundary, clearing the retained candidate, retry lifecycle,
+and exchange history. The node therefore restarted instead of exhausting its
+bounded blueprint-direct lifecycle.
+
+### Correction
+
+- Blueprint-direct activation is now idempotent for an exact statement
+  fingerprint. Only the first switch clears obsolete plan-owned state.
+- Later declaration-owned findings are stored as cumulative generation
+  feedback. They do not alter the strategy fingerprint or discard the current
+  correction seed.
+- Candidate-plan audit routing excludes already-direct statements. Their
+  rejection remains an ordinary Lean-generation failure, advances the existing
+  base/escalation lifecycle, and reaches decomposition only after that direct
+  lifecycle genuinely exhausts.
+- A changed blueprint statement fingerprint still starts a fresh direct
+  lifecycle and crosses the normal generation-epoch boundary.
+
+### Regression
+
+The committed `blueprint_direct_reactivation.json` fixture records the exact
+Simplex statement fingerprints and routing sequence. Its regression requires
+one activation for the unchanged statement, retained strategy provenance,
+advancement to escalation on the repeated audit, and a fresh activation after
+the statement changes. The older sibling-evidence fixture now also verifies
+that later evidence remains declaration-owned retry feedback without redefining
+an already-active strategy.
+
 ## 2026-08-22: Replace the Read-Only Exploration Allowance With a Text-Only Call Contract
 
 ### Confirmed failure
@@ -3953,3 +4844,22 @@ when their protocol offers no cancellation endpoint.
 **Regression.** Tests cover a primary response that completes before the hedge
 threshold, a hedge that wins while the original remains alive, explicit loser
 cancellation, and the existing immediate silent-failure recovery path.
+# 2026-09-02: Phase-1 Semantic Retry Evidence Is Rendered Once
+
+The diagnostic ledger already deduplicated structured failure identities, but
+the semantic-correction path converted the complete persisted ledger back into
+a synthetic deterministic finding. The targeted patch prompt then rendered
+both copies, and an unsuccessful outer retry could persist that wrapper again.
+In the `20260902-130222` Simplex run this produced a 36 KB singleton prompt
+containing the same `constr:delta-four-cells` rejection repeatedly; the model
+spent 216 seconds returning 628 characters.
+
+Semantic correction now passes node-scoped ledger evidence separately from
+the findings used only to select patch ownership. The prompt renders the ledger
+once, failed correction routing preserves the original node-owned evidence
+instead of storing another wrapper, duplicate input labels are normalized, and
+records sharing an existing structured failure identity are rendered once.
+Differently worded unstructured evidence is still kept distinct; the pipeline
+does not guess semantic equivalence. This is provider-neutral and does not
+change Phase 1's statement-only contract, retry limits, or blueprint-repair
+authority.

@@ -1,0 +1,24 @@
+{
+  "source": {
+    "simplex_response_artifact": "response_skeleton_declaration_patch/e997e209310a7c6eef7ec7e5c9429355455116f7125cd88050b6c576fceb0b57.txt",
+    "uue_section": "AutoBlueprint/Generated/UnconditionalUnclonableEncryption/Skeleton18.lean",
+    "failure_shape": "A valid Phase-1 theorem ended in := sorry but its result type contained an earlier unparenthesized let or letI assignment. The ingestion boundary truncated the declaration at that inner assignment."
+  },
+  "cases": [
+    {
+      "label": "lem:outer-let-contract",
+      "declaration": "theorem lem_outer_let_contract (n : Nat) :\n    let doubled : Nat := n + n\n    doubled = n + n := sorry",
+      "expected_header": "theorem lem_outer_let_contract (n : Nat) :\n    let doubled : Nat := n + n\n    doubled = n + n"
+    },
+    {
+      "label": "lem:outer-let-instance-contract",
+      "declaration": "theorem lem_outer_let_instance_contract\n    (R : Type) [Fintype R] :\n    letI : DecidableEq R := Classical.decEq R\n    forall x : R, x = x := sorry",
+      "expected_header": "theorem lem_outer_let_instance_contract\n    (R : Type) [Fintype R] :\n    letI : DecidableEq R := Classical.decEq R\n    forall x : R, x = x"
+    }
+  ],
+  "completed_body_control": {
+    "label": "def:completed-body",
+    "declaration": "def def_completed_body (n : Nat) : Nat :=\n  let doubled := n + n\n  doubled",
+    "expected_deferred": "def def_completed_body (n : Nat) : Nat := sorry"
+  }
+}

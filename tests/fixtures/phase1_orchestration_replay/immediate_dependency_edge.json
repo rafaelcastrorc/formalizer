@@ -15,6 +15,8 @@
           "def:single-qubit-paulis-cliffords"
         ]
       },
+      "candidate_response_sha256": "df7f74448404e8e1a63ffec8149bff86a517df2bc38d0f181b5b9730f0c55eff",
+      "candidate_code": "structure LocalBasisUnitarySpec where\n  local_unitary : Bool → Bool → Matrix (Fin 2) (Fin 2) ℂ\n  case_00 : local_unitary false false = def_single_qubit_paulis_cliffords.paulis.I\n  case_10 : local_unitary true false = def_single_qubit_paulis_cliffords.hadamard.H\n  case_11 :\n    local_unitary true true =\n      def_single_qubit_paulis_cliffords.phase.S * def_single_qubit_paulis_cliffords.hadamard.H\n  case_01 : local_unitary false true = def_single_qubit_paulis_cliffords.paulis.I\n  q_indicator : Bool → Bool → Bool\n  tensor_unitary :\n    ∀ n, ((Fin n → Bool) × (Fin n → Bool)) → Matrix (Fin (2 ^ n)) (Fin (2 ^ n)) ℂ\n\ndef def_local_basis_unitary : LocalBasisUnitarySpec := sorry",
       "eventual_edge_application_elapsed_s": 2467,
       "model_calls_before_edge_application": 11,
       "model_seconds_before_edge_application": 275.19603445599205,

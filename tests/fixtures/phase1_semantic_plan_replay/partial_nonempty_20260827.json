@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "source_run": "simplex/run-20260827-170917",
+  "source_event_sequence": 116,
+  "response_sha256": "b2179103a367bd8c15149b7f79dbb41d709d20871e3d612af2a4fdd9f64c3218",
+  "requested_count": 107,
+  "primary_duration_s": 24.5,
+  "primary_label": "cor:cpwl-four-two-layers",
+  "primary_statement_uses": [
+    "thm:main-cpwl"
+  ],
+  "primary_response": {
+    "contracts": [
+      {
+        "label": "cor:cpwl-four-two-layers",
+        "representation": "dimension-specific equality of CPWL and two-hidden-layer ReLU classes",
+        "vocabulary": [
+          {
+            "name": "cor_cpwl_four_two_layers",
+            "purpose": "records CPWL_4 equals ReLU depth 2"
+          }
+        ],
+        "obligations": [
+          "Preserve the exact equality CPWL_4 = ReLU_{4,2}.",
+          "State the claim as a four-dimensional specialization of the main CPWL theorem."
+        ],
+        "provider_requirements": [
+          {
+            "provider": "thm:main-cpwl",
+            "capabilities": [
+              "CPWL_n equals the stated ReLU depth class for n >= 3",
+              "specialization to n = 4 yields depth 2"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "expected_old_behavior": {
+    "planned_count": 1,
+    "fallback_count": 106
+  },
+  "expected_new_behavior": {
+    "maximum_calls": 2,
+    "preserve_primary_entry": true,
+    "recover_only_missing_entries": true
+  }
+}

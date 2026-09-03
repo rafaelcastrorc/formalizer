@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "source": {
+    "run_id": "20260824-000913-261f5ebf",
+    "model_call_sequence": 827,
+    "routing_sequence": 829,
+    "response_sha256": "f9986ac6a655f6863000605f4e01b65e3fdf86e4e57c81b7d3cb99badfaf534c"
+  },
+  "audit_response": {
+    "accepted": false,
+    "classification": "lean_translation_issue",
+    "issues": [
+      {
+        "node": "lem:claim-five-p-membership",
+        "severity": "reject",
+        "classification": "lean_translation_issue",
+        "reason": "The Lean statement quantifies over arbitrary functions P1 P2 P3 P4, so it asserts membership for every possible four functions rather than for the concrete lifted P-terms from Claim 5. This erases the mathematical content of the blueprint lemma.",
+        "missing_helpers": [],
+        "required_dependencies": ["def:p1", "def:p2", "def:p3", "def:p4"],
+        "missing_blueprint_information": [],
+        "failure_origin": "plan",
+        "missing_plan_requirements": [
+          "P1, P2, P3, and P4 must be the concrete functions defined by the paper's P-term formulas, not arbitrary parameters of type (Fin 5 → ℝ) → ℝ.",
+          "The statement must assert membership of the four concrete lifted P-terms obtained by substituting T_{a,b} for x5 and x_{i+1},...,x_{i+4} for x1,...,x4."
+        ],
+        "interface_defects": [],
+        "deferred_body_obligations": []
+      },
+      {
+        "node": "lem:claim-five-q-membership",
+        "severity": "reject",
+        "classification": "lean_translation_issue",
+        "reason": "The Lean statement quantifies over an arbitrary function Q, so it proves a placeholder-style universal membership claim instead of the membership of the concrete lifted Q-term from Claim 5.",
+        "missing_helpers": [],
+        "required_dependencies": ["def:q"],
+        "missing_blueprint_information": [],
+        "failure_origin": "plan",
+        "missing_plan_requirements": [
+          "Q must be the concrete function defined by the paper's Q formula, not an arbitrary parameter of type (Fin 5 → ℝ) → ℝ.",
+          "The statement must assert membership of the concrete lifted Q obtained under the Claim 5 substitution."
+        ],
+        "interface_defects": [],
+        "deferred_body_obligations": []
+      },
+      {
+        "node": "lem:claim-five-r-membership",
+        "severity": "reject",
+        "classification": "lean_translation_issue",
+        "reason": "The Lean statement quantifies over arbitrary functions R13 R14 R23 R24, so it does not state the blueprint's concrete membership claims for the lifted R-terms.",
+        "missing_helpers": [],
+        "required_dependencies": ["def:r13", "def:r14", "def:r23", "def:r24"],
+        "missing_blueprint_information": [],
+        "failure_origin": "plan",
+        "missing_plan_requirements": [
+          "R13, R14, R23, and R24 must be the concrete functions defined by the paper's R-term formulas, not arbitrary parameters of type (Fin 5 → ℝ) → ℝ.",
+          "The statement must assert membership of the four concrete lifted R-terms obtained under the Claim 5 substitution."
+        ],
+        "interface_defects": [],
+        "deferred_body_obligations": []
+      }
+    ]
+  },
+  "observed_before_fix": {
+    "routed_kinds": {
+      "lem:claim-five-p-membership": "decomposition",
+      "lem:claim-five-q-membership": "lean-generation",
+      "lem:claim-five-r-membership": "decomposition"
+    },
+    "blueprint_repair_authorized": true
+  },
+  "expected_after_fix": {
+    "routed_kind": "lean-generation",
+    "routed_labels": [
+      "lem:claim-five-p-membership",
+      "lem:claim-five-q-membership",
+      "lem:claim-five-r-membership"
+    ],
+    "failure_origin": "plan",
+    "blueprint_repair_authorized": false
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "source": "historical Phase-2 integration transaction from run-20260821-105325",
+  "module_count": 51,
+  "theorem_body_changes": 42,
+  "downstream_importers_reached_by_legacy_hash": 1,
+  "observed_legacy_rebuilt_modules": 43,
+  "expected_object_semantic_rebuilt_modules": 0,
+  "invariant": "opaque theorem proof changes retain objects; statement and definition-body changes invalidate them"
+}

@@ -1,0 +1,30 @@
+{
+  "source_log": ".auto-blueprint/formalization/simplex/run-20260825-194345.log",
+  "source_run": "20260825-194345",
+  "historical_section": "Skeleton48.lean",
+  "declaration_order": [
+    "def:depth-classes",
+    "cor:geometric-signed-simplex",
+    "lem:delta-three-triangular-component",
+    "thm:universal-approximation"
+  ],
+  "changed_labels": ["cor:geometric-signed-simplex"],
+  "dependency_graph_descendants": ["cor:geometric-signed-simplex"],
+  "observed_before_fix": {
+    "retained_labels": ["def:depth-classes"],
+    "discarded_only_because_they_followed_the_edit_in_file_order": [
+      "lem:delta-three-triangular-component",
+      "thm:universal-approximation"
+    ]
+  },
+  "expected_after_fix": {
+    "retained_labels": [
+      "def:depth-classes",
+      "lem:delta-three-triangular-component",
+      "thm:universal-approximation"
+    ],
+    "invalidated_labels": ["cor:geometric-signed-simplex"],
+    "retained_source_lean_returncode": 0,
+    "recheck_labels_do_not_gain_blueprint_helper_authority": true
+  }
+}

@@ -87,6 +87,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -161,7 +162,11 @@ OPEN_CONJECTURE_TARGET_KIND = "open-conjecture-proposition"
 
 
 def _is_theorem_like_kind(kind: str | None) -> bool:
-    return bool(kind) and kind not in DEFINITION_LIKE_KINDS
+    return (
+        bool(kind)
+        and kind != OPEN_CONJECTURE_TARGET_KIND
+        and kind not in DEFINITION_LIKE_KINDS
+    )
 DEFAULT_SECTION_SIZE = 12
 DEFAULT_PROOF_BATCH = 12
 DEFAULT_WORKERS = 3
@@ -200,29 +205,50 @@ OBJECT_IMPLEMENTATION_FAILURE_PREFIX = "Lean implementation object-generation ga
 # full-regeneration loop.
 PHASE2_COMPLETE_CORRECTION_TIMEOUT = 300
 
+# Diagnostic facts have different validity boundaries.  Keeping all of them in
+# one statement-scoped text field caused both historical failure modes: semantic
+# requirements disappeared at unrelated transaction boundaries, while fixed
+# compiler errors continued to contaminate replacement candidates.  The ledger
+# below is the authority for diagnostic lifetime; candidate state, retry policy,
+# and model-call history remain separate concerns.
+DIAGNOSTIC_EVIDENCE_SCHEMA_VERSION = 1
+EVIDENCE_LIFETIMES = {"statement", "plan", "candidate", "transaction"}
+
 
 def _requires_initial_declaration_pass(refinement_order: str) -> bool:
     """Only root-first elaboration needs unresolved lower names predeclared."""
     return refinement_order == "top-down"
 
 _ACTIVE_STAGE_LOCK = threading.Lock()
-_ACTIVE_STAGE = "startup"
+_ACTIVE_STAGES: dict[int, str] = {}
 
 
 def _set_active_stage(stage: str) -> None:
-    global _ACTIVE_STAGE
     with _ACTIVE_STAGE_LOCK:
-        _ACTIVE_STAGE = stage
+        thread_id = threading.get_ident()
+        if stage:
+            _ACTIVE_STAGES[thread_id] = stage
+        else:
+            _ACTIVE_STAGES.pop(thread_id, None)
 
 
 def _active_stage() -> str:
     with _ACTIVE_STAGE_LOCK:
-        return _ACTIVE_STAGE
+        current = _ACTIVE_STAGES.get(threading.get_ident())
+        if current:
+            return current
+        active = list(dict.fromkeys(_ACTIVE_STAGES.values()))
+        return " | ".join(active) if active else "idle"
+
+
+def _thread_active_stage() -> str:
+    with _ACTIVE_STAGE_LOCK:
+        return _ACTIVE_STAGES.get(threading.get_ident(), "")
 
 
 @contextlib.contextmanager
 def _stage(stage: str):
-    previous = _active_stage()
+    previous = _thread_active_stage()
     _set_active_stage(stage)
     try:
         yield
@@ -246,6 +272,7 @@ DESIGN_PLAN_MAX_NODES = 120
 # attempt. Repeating declaration patches was responsible for most of the model
 # calls in long Phase 1 runs.
 TARGETED_DECL_PATCH_MAX_LABELS = 4
+PHASE1_SEMANTIC_CORRECTION_WAVE_MAX = 3
 SECTION_NORMALIZATION_REPAIR_TRIGGER = 1
 SECTION_NORMALIZATION_MAX_CHANGED = 16
 SECTION_STUCK_MAX_REPAIRS_AFTER_NORMALIZATION = 2
@@ -852,6 +879,10 @@ class AlignmentAuditResult:
     reasons_by_label: dict[str, str] = field(default_factory=dict)
     origins_by_label: dict[str, str] = field(default_factory=dict)
     plan_requirements_by_label: dict[str, list[str]] = field(default_factory=dict)
+    failure_identities_by_label: dict[str, dict[str, Any]] = field(
+        default_factory=dict
+    )
+    forbidden_dependencies: dict[str, set[str]] = field(default_factory=dict)
 
     def __iter__(self):
         yield self.kind
@@ -910,6 +941,16 @@ class AlignmentAuditResult:
             return self.reason
         return "Blueprint contract audit rejected:\n- " + "\n- ".join(selected)
 
+    def failure_identity_for(self, label: str) -> dict[str, Any]:
+        """Return objective audit facts used to recognize the same failure.
+
+        Human-readable ``reason`` text remains the correction prompt.  This
+        identity contains only the critic's structured fields, so harmless
+        wording changes do not create a new retry epoch.
+        """
+        value = self.failure_identities_by_label.get(label)
+        return copy.deepcopy(value) if isinstance(value, dict) else {}
+
 
 @dataclass(frozen=True)
 class RepairBoundaryAuditOutcome:
@@ -920,6 +961,7 @@ class RepairBoundaryAuditOutcome:
     repair_labels: tuple[str, ...] = ()
     required_dependencies: dict[str, set[str]] = field(default_factory=dict)
     decomposition_helpers: tuple[str, ...] = ()
+    provider_repair_labels: tuple[str, ...] = ()
 
 
 def _coerce_alignment_audit_result(
@@ -1870,10 +1912,26 @@ def _realize_typed_contracts_from_candidate(
         realized.add(label)
     if realized:
         if changed:
-            _transition_phase1_generation_epoch(
-                ctx,
-                changed,
-                reason="typed_contract_realized_from_candidate",
+            # This is the result of the current generation transaction, not a
+            # new plan or generation strategy. Crossing the full epoch
+            # boundary here used to erase the candidate's persisted retry
+            # lifecycle every time a compiler/audit correction changed its
+            # declaration header. That made repeated failures look like
+            # independent first failures and prevented bounded exhaustion.
+            #
+            # True authority changes (blueprint edits, plan replacement, and
+            # first blueprint-direct activation) still use
+            # ``_transition_phase1_generation_epoch``. A candidate-owned
+            # contract refresh only updates the compatibility plan view; the
+            # new candidate is stored by the caller in the same lifecycle.
+            _sync_design_plan(ctx)
+            _record(
+                ctx.telemetry,
+                "phase1_candidate_contract_refreshed",
+                labels=sorted(changed),
+                retry_lifecycle_preserved=True,
+                generation_candidates_preserved=True,
+                exchange_history_preserved=True,
             )
         else:
             _sync_design_plan(ctx)
@@ -1943,6 +2001,22 @@ def _has_terminal_sorry(decl_text: str) -> bool:
 
 def _normalize_terminal_sorry(decl_text: str) -> str:
     return _TERMINAL_SORRY_RE.sub(":= sorry", decl_text.rstrip())
+
+
+def _terminal_sorry_interface_text(decl_text: str) -> str | None:
+    """Remove only a declaration's final Phase-1 ``:= sorry`` marker.
+
+    A declaration result type may itself contain unparenthesized ``let`` or
+    ``letI`` assignments.  Those assignments are part of the public contract,
+    so finding the first top-level ``:=`` would truncate valid Lean.  The
+    terminal marker is unambiguous and is therefore authoritative whenever it
+    is present.
+    """
+    text = decl_text.rstrip()
+    match = _TERMINAL_SORRY_RE.search(text)
+    if match is None:
+        return None
+    return text[: match.start()].rstrip()
 
 
 def _top_level_assignment_index(decl_text: str) -> int | None:
@@ -2017,6 +2091,9 @@ def _top_level_assignment_index(decl_text: str) -> int | None:
 def _phase1_target_interface_text(decl: DeclBlock) -> str:
     """Return a Phase-1 target contract without an implementation/proof body."""
     if decl.kind in {"def", "abbrev", "theorem", "lemma"}:
+        deferred = _terminal_sorry_interface_text(decl.text)
+        if deferred is not None:
+            return deferred
         boundary = _top_level_assignment_index(decl.text)
         if boundary is not None:
             return decl.text[:boundary].rstrip()
@@ -2106,6 +2183,11 @@ def _defer_phase1_target_bodies(
         )
         if not (ordinary_definition or theorem):
             continue
+        # This is already the exact Phase-1 representation.  In particular,
+        # preserve any unparenthesized `let`/`letI := ...` assignments in the
+        # result type instead of mistaking the first one for the target body.
+        if _has_terminal_sorry(decl.text):
+            continue
         boundary = _top_level_assignment_index(decl.text)
         if boundary is None:
             continue
@@ -2164,7 +2246,18 @@ def _is_phase1_structural_target_alias(
     ):
         return False
     result_type = _planned_target_result_type(decl.text, decl.name or "")
-    if not re.match(r"^(?:Type(?:\s+[A-Za-z0-9_'.]+)?|Sort\s+\S+)$", result_type):
+    explicit_type_alias = bool(
+        re.match(r"^(?:Type(?:\s+[A-Za-z0-9_'.]+)?|Sort\s+\S+)$", result_type)
+    )
+    # Lean permits an ``abbrev`` to infer its result sort from the right-hand
+    # side.  When that side is the direct application of a same-node owned
+    # structure/class/inductive, the alias is still only the public type
+    # interface.  Requiring a redundant ``: Type`` here made the shared Phase-1
+    # body deferrer replace a valid alias by ``sorry`` and erase the interface
+    # immediately before semantic audit.  Ordinary ``def`` bodies still need
+    # the explicit type-valued declaration and remain deferred otherwise.
+    inferred_abbrev_alias = decl.kind == "abbrev" and not result_type
+    if not (explicit_type_alias or inferred_abbrev_alias):
         return False
 
     owner = owner_by_name.get(decl.name or "")
@@ -2643,7 +2736,9 @@ def _skeleton_finding_class(message: str) -> str:
     return "other"
 
 
-def _skeleton_findings_fingerprint(findings: list[SkeletonFinding]) -> tuple[tuple[str, str, str, str], ...]:
+def _skeleton_findings_fingerprint(
+    findings: list[SkeletonFinding],
+) -> tuple[tuple[str, str], ...]:
     """Deterministic stagnation key for Phase 1 audit failures.
 
     If this key is unchanged after a model patch, the model call did not move
@@ -2652,13 +2747,9 @@ def _skeleton_findings_fingerprint(findings: list[SkeletonFinding]) -> tuple[tup
     """
     return tuple(
         sorted(
-            (
-                finding.label or "",
-                finding.lean_name or "",
-                _skeleton_finding_class(finding.message),
-                finding.message,
-            )
+            (finding.label or "", obligation)
             for finding in findings
+            for obligation in _finding_obligation_ids(finding)
         )
     )
 
@@ -2823,9 +2914,13 @@ class RepairRequest(Exception):
         required_dependencies: dict[str, set[str]] | None = None,
         model_repair_labels: Iterable[str] | None = None,
         evidence_by_label: Mapping[str, str] | None = None,
+        evidence_identities_by_label: Mapping[str, Mapping[str, Any]] | None = None,
         implementation_prerequisites: Iterable[str] | None = None,
         scheduling_only: bool = False,
         retry_attempted_tier: str = "",
+        provider_contract_labels: Iterable[str] | None = None,
+        reschedule_labels: Iterable[str] | None = None,
+        repair_components: Iterable[Mapping[str, Any]] | None = None,
     ):
         super().__init__(evidence[:500])
         self.evidence = evidence
@@ -2859,6 +2954,11 @@ class RepairRequest(Exception):
             for label, value in (evidence_by_label or {}).items()
             if str(label) in labels and str(value).strip()
         }
+        self.evidence_identities_by_label = {
+            str(label): _canonical_failure_identity(dict(value))
+            for label, value in (evidence_identities_by_label or {}).items()
+            if str(label) in labels and isinstance(value, Mapping) and value
+        }
         # A top-down Phase-2 proof can use deferred theorem statements, but it
         # cannot unfold a definition whose body is still ``sorry``. Such a
         # finding changes scheduling only: implement the named dependency body
@@ -2876,6 +2976,29 @@ class RepairRequest(Exception):
             if retry_attempted_tier in {"base", "escalation"}
             else ""
         )
+        # A post-repair boundary audit may prove that the failing consumer is
+        # faithfully using an existing dependency whose public contract is too
+        # weak.  This is not authority to widen the consumer transaction.  The
+        # coordinator rolls that transaction back and starts a separate repair
+        # owned by the explicitly named provider.
+        self.provider_contract_labels = list(
+            dict.fromkeys(str(label) for label in provider_contract_labels or [])
+        )
+        self.reschedule_labels = list(
+            dict.fromkeys(str(label) for label in reschedule_labels or [])
+        )
+        self.repair_components = [
+            {
+                "labels": list(
+                    dict.fromkeys(
+                        str(label) for label in component.get("labels") or []
+                    )
+                ),
+                "evidence": str(component.get("evidence") or "")[-24000:],
+            }
+            for component in (repair_components or [])
+            if component.get("labels")
+        ]
         # Some authorized requests can be completed deterministically by adding
         # missing dependency edges; others require the repair model to change or
         # decompose blueprint contracts. Keep those scopes separate so combining
@@ -2961,6 +3084,7 @@ def _aggregate_retry_requests(
         for index, request in enumerate(ordered, 1)
     )
     evidence_by_label: dict[str, str] = {}
+    evidence_identities_by_label: dict[str, dict[str, Any]] = {}
     for request in ordered:
         scoped = request.evidence_by_label or _explicit_generation_evidence_by_label(
             request.labels, request.evidence
@@ -2970,6 +3094,8 @@ def _aggregate_retry_requests(
             evidence_by_label[label] = (
                 previous + ("\n\n" if previous else "") + value
             )[-12000:]
+        for label, identity in request.evidence_identities_by_label.items():
+            evidence_identities_by_label[label] = copy.deepcopy(identity)
     combined_route = _combine_failure_routes(routes) if routes else None
     return RepairRequest(
         evidence,
@@ -2985,6 +3111,7 @@ def _aggregate_retry_requests(
         ),
         required_dependencies=dependencies,
         evidence_by_label=evidence_by_label,
+        evidence_identities_by_label=evidence_identities_by_label,
     )
 
 
@@ -3047,11 +3174,30 @@ def _aggregate_authorized_repair_requests(
         for index, request in enumerate(ordered, 1)
     )
     evidence_by_label: dict[str, str] = {}
+    evidence_identities_by_label: dict[str, dict[str, Any]] = {}
+    repair_components: list[dict[str, Any]] = []
     for request in ordered:
         scoped = request.evidence_by_label or _explicit_generation_evidence_by_label(
             request.labels, request.evidence
         )
         evidence_by_label.update(scoped)
+        evidence_identities_by_label.update(
+            copy.deepcopy(request.evidence_identities_by_label)
+        )
+        existing_components = list(getattr(request, "repair_components", []) or [])
+        if existing_components:
+            repair_components.extend(existing_components)
+            continue
+        component_labels = list(
+            dict.fromkeys(request.model_repair_labels or request.labels)
+        )
+        if component_labels:
+            repair_components.append(
+                {
+                    "labels": component_labels,
+                    "evidence": request.evidence,
+                }
+            )
     return RepairRequest(
         evidence,
         labels,
@@ -3063,6 +3209,8 @@ def _aggregate_authorized_repair_requests(
         required_dependencies=dependencies,
         model_repair_labels=model_labels,
         evidence_by_label=evidence_by_label,
+        evidence_identities_by_label=evidence_identities_by_label,
+        repair_components=repair_components,
     )
 
 
@@ -3126,6 +3274,17 @@ def _phase2_repair_request_payload(
         label: str(getattr(ctx, "stmt_fps", {}).get(label) or "")
         for label in labels
     }
+    scoped_evidence = request.evidence_by_label or {
+        label: request.evidence for label in labels
+    }
+    evidence_signatures = {
+        label: _diagnostic_failure_signature(
+            kind="semantic",
+            text=str(scoped_evidence.get(label) or request.evidence),
+            identity=request.evidence_identities_by_label.get(label),
+        )
+        for label in labels
+    }
     identity = {
         "labels": labels,
         "statement_fps": statement_fps,
@@ -3136,9 +3295,7 @@ def _phase2_repair_request_payload(
             for label, dependencies in request.required_dependencies.items()
         },
         "decomposition_helpers": list(request.decomposition_helpers),
-        "evidence_sha256": hashlib.sha256(
-            request.evidence.encode("utf-8")
-        ).hexdigest(),
+        "evidence_signatures": evidence_signatures,
     }
     request_id = hashlib.sha256(
         json.dumps(identity, sort_keys=True).encode("utf-8")
@@ -3164,6 +3321,9 @@ def _phase2_repair_request_payload(
         },
         "model_repair_labels": list(request.model_repair_labels),
         "evidence_by_label": dict(request.evidence_by_label),
+        "evidence_identities_by_label": copy.deepcopy(
+            request.evidence_identities_by_label
+        ),
     }
 
 
@@ -3233,6 +3393,25 @@ def _phase2_repair_transaction_dir(name: str, request_id: str) -> Path:
     return SCRATCH_DIR / name / "phase2-repair-transactions" / request_id
 
 
+def _phase1_checkpoint_dir(name: str) -> Path:
+    """Immutable restart point captured at the Phase 1/Phase 2 boundary."""
+    return SCRATCH_DIR / name / "phase1-checkpoint"
+
+
+def _phase1_checkpoint_available(name: str) -> bool:
+    """Return whether a complete Phase 1 checkpoint is available to restore."""
+    root = _phase1_checkpoint_dir(name)
+    try:
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(
+        manifest.get("version") == 1
+        and (root / "blueprint-draft" / "blueprint" / "src" / "content.tex").is_file()
+        and (root / "skeleton_state.json").is_file()
+    )
+
+
 def _replace_tree_from_snapshot(source: Path, destination: Path) -> None:
     """Replace an optional directory with its exact snapshotted contents."""
     if destination.exists():
@@ -3240,6 +3419,107 @@ def _replace_tree_from_snapshot(source: Path, destination: Path) -> None:
     if source.is_dir():
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source, destination)
+
+
+def _create_phase1_checkpoint(ctx: "Ctx") -> bool:
+    """Save one immutable, coherent copy of the completed Phase 1 state.
+
+    Phase 2 mutates the live draft, generated modules, compiled objects, and
+    scheduler state together.  The checkpoint therefore captures all four;
+    copying only the state JSON would create an unusable mixed-version resume.
+    The first committed checkpoint for a run wins and is never edited in place.
+    """
+    destination = _phase1_checkpoint_dir(ctx.name)
+    if _phase1_checkpoint_available(ctx.name):
+        return False
+
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    pending = destination.parent / (
+        f".phase1-checkpoint.pending-{os.getpid()}-{threading.get_ident()}"
+    )
+    if pending.exists():
+        shutil.rmtree(pending)
+    pending.mkdir(parents=True)
+
+    draft = Path(ctx.blueprint_dir)
+    generated = _generated_module_dir(ctx.name)
+    lake_generated = _generated_lake_module_dir(ctx.name)
+    state = _state_path(ctx.name)
+    if not state.is_file():
+        raise RuntimeError("cannot checkpoint Phase 1 without persisted scheduler state")
+
+    try:
+        shutil.copytree(draft, pending / "blueprint-draft")
+        if generated.is_dir():
+            shutil.copytree(generated, pending / "generated")
+        if lake_generated.is_dir():
+            shutil.copytree(lake_generated, pending / "lake-generated")
+        shutil.copy2(state, pending / "skeleton_state.json")
+        (pending / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "created_at": int(time.time()),
+                    "blueprint_sha256": hashlib.sha256(
+                        ctx.content_path.read_bytes()
+                    ).hexdigest(),
+                    "state_sha256": hashlib.sha256(state.read_bytes()).hexdigest(),
+                    "generated_present": generated.is_dir(),
+                    "lake_generated_present": lake_generated.is_dir(),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.replace(pending, destination)
+    finally:
+        if pending.exists():
+            shutil.rmtree(pending, ignore_errors=True)
+
+    if not _phase1_checkpoint_available(ctx.name):
+        raise RuntimeError("Phase 1 checkpoint was not committed completely")
+    _record(
+        ctx.telemetry,
+        "phase1_checkpoint_created",
+        path=str(destination.relative_to(REPO_ROOT)),
+        blueprint_sha256=hashlib.sha256(ctx.content_path.read_bytes()).hexdigest(),
+    )
+    _log(
+        "==> Saved immutable Phase 1 checkpoint: "
+        f"{destination.relative_to(REPO_ROOT)}"
+    )
+    return True
+
+
+def _restore_phase1_checkpoint(name: str) -> Path:
+    """Replace mutable unpublished state with its original Phase 1 snapshot."""
+    source = _phase1_checkpoint_dir(name)
+    if not _phase1_checkpoint_available(name):
+        raise ValueError(
+            f"no saved Phase 1 checkpoint exists for {name}; run Phase 1 to completion first"
+        )
+
+    draft = _draft_blueprint_dir(name)
+    _replace_tree_from_snapshot(source / "blueprint-draft", draft)
+    _replace_tree_from_snapshot(source / "generated", _generated_module_dir(name))
+    _replace_tree_from_snapshot(
+        source / "lake-generated", _generated_lake_module_dir(name)
+    )
+    state = _state_path(name)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source / "skeleton_state.json", state)
+    shutil.rmtree(
+        SCRATCH_DIR / name / "phase2-repair-transactions", ignore_errors=True
+    )
+    _log(
+        "==> Restored original Phase 1 checkpoint; later unpublished Phase 2 "
+        "changes were discarded"
+    )
+    return draft
 
 
 def _begin_phase2_repair_transaction(
@@ -3418,11 +3698,23 @@ def _merge_phase2_repair_followup(
     payload["evidence"] = (
         original_evidence + "\n\n== Provisional component rejection ==\n" + followup_note
     )[-24000:]
+    owned_verification_labels = {
+        str(label)
+        for label in payload.get("verification_owned_labels") or original_labels
+    }
+    followup_owned_labels = owned_verification_labels.intersection(
+        str(label) for label in followup.labels
+    )
+    carried_followup_helpers = (
+        [str(item) for item in followup.decomposition_helpers]
+        if followup_owned_labels
+        else []
+    )
     payload["decomposition_helpers"] = list(
         dict.fromkeys(
             [
                 *[str(item) for item in payload.get("decomposition_helpers") or []],
-                *[str(item) for item in followup.decomposition_helpers],
+                *carried_followup_helpers,
             ]
         )
     )
@@ -3451,6 +3743,16 @@ def _merge_phase2_repair_followup(
             ]
         )
     )
+    if followup.decomposition_helpers and not carried_followup_helpers:
+        _record(
+            ctx.telemetry,
+            "phase2_repair_followup_helpers_scoped_out",
+            request_id=request_id,
+            original_labels=original_labels,
+            owned_verification_labels=sorted(owned_verification_labels),
+            followup_labels=list(followup.labels),
+            scoped_out_helpers=list(followup.decomposition_helpers),
+        )
     ctx.phase2_repair_active = {
         "request_id": request_id,
         "stage": "repair",
@@ -3510,6 +3812,8 @@ def _restart_active_phase2_repair(
             "required_dependencies",
             "model_repair_labels",
             "evidence_by_label",
+            "verification_owned_labels",
+            "verification_recheck_labels",
         ):
             restored_active_payload[key] = copy.deepcopy(
                 carried_active_payload.get(key)
@@ -3546,6 +3850,80 @@ def _restart_active_phase2_repair(
         "retrying the original component with exact verification evidence"
     )
     return restored_sections, request
+
+
+def _reroute_active_phase2_repair_to_provider(
+    ctx: "Ctx", sections: list["Section"], diagnosis: RepairRequest
+) -> list["Section"]:
+    """Roll back a consumer repair and queue its named provider separately.
+
+    The boundary critic may discover that an unchanged dependency contract,
+    rather than the provisional consumer edit, owns the mathematical defect.
+    Edit authority must never cross that transaction boundary. Restore the
+    consumer's pre-edit graph, retire its provisional request, and enqueue one
+    provider-owned repair. The consumer remains unproved and is naturally
+    rescheduled after the provider verifies.
+    """
+    active = getattr(ctx, "phase2_repair_active", {}) or {}
+    request_id = str(active.get("request_id") or "")
+    if not request_id or str(active.get("stage") or "") != "verify":
+        raise RuntimeError(
+            "provider-contract rerouting requires an active Phase 2 verification "
+            "transaction"
+        )
+    providers = list(dict.fromkeys(diagnosis.provider_contract_labels))
+    roots = list(dict.fromkeys(diagnosis.reschedule_labels))
+    if not providers or not roots:
+        raise RuntimeError(
+            "provider-contract rerouting requires provider and consumer labels"
+        )
+
+    _restore_phase2_repair_transaction_files(ctx, request_id)
+    validation = _validate_draft(ctx)
+    if not validation.ok:
+        raise RuntimeError(
+            "pre-edit Phase 2 transaction snapshot no longer validates"
+        )
+    ctx.refresh_nodes(validation.nodes)
+    restored_sections = _load_state(ctx, ctx.lean_command)
+    eligible = _phase2_provider_contract_candidates(ctx, roots)
+    invalid = [
+        label for label in providers if label not in ctx.nodes or label not in eligible
+    ]
+    if invalid:
+        raise RuntimeError(
+            "boundary audit named provider(s) outside the original dependency "
+            "closure after rollback: " + ", ".join(invalid)
+        )
+
+    _complete_phase2_repair_request(ctx, request_id)
+    provider_request = RepairRequest(
+        diagnosis.evidence,
+        providers,
+        section_labels=providers,
+        context_labels=list(dict.fromkeys([*providers, *roots])),
+        authorizes_blueprint_repair=True,
+        model_repair_labels=providers,
+        evidence_by_label={
+            label: diagnosis.evidence[-12000:] for label in providers
+        },
+    )
+    _enqueue_phase2_repair_requests(ctx, [provider_request])
+    ctx.repair_boundary_pending = {}
+    _save_ctx_state(ctx, restored_sections)
+    _record(
+        ctx.telemetry,
+        "phase2_repair_rerouted_to_provider",
+        superseded_request_id=request_id,
+        provider_labels=providers,
+        rescheduled_consumer_labels=roots,
+        ownership="existing_dependency_closure",
+    )
+    _log(
+        "==> Repaired consumer component rolled back; the boundary audit "
+        "assigned the defect to dependency provider(s): " + ", ".join(providers)
+    )
+    return restored_sections
 
 
 def _prune_stale_phase2_repair_queue(ctx: "Ctx") -> None:
@@ -3697,6 +4075,13 @@ def _pending_phase2_repair_request(ctx: "Ctx") -> RepairRequest | None:
                 payload.get("evidence_by_label") or {}
             ).items()
         },
+        evidence_identities_by_label={
+            str(label): copy.deepcopy(identity)
+            for label, identity in (
+                payload.get("evidence_identities_by_label") or {}
+            ).items()
+            if isinstance(identity, dict)
+        },
     )
     request.queue_id = str(payload.get("request_id") or "")
     return request
@@ -3784,10 +4169,24 @@ def _start_phase2_repair_transaction(
     return request_id
 
 
+def _start_caught_phase2_repair_transaction(
+    ctx: "Ctx", sections: list["Section"], request: RepairRequest
+) -> str:
+    """Route a caught queued request through the durable snapshot gate."""
+    request_id = str(getattr(request, "queue_id", "") or "")
+    if not request_id:
+        return ""
+    return _start_phase2_repair_transaction(ctx, sections, request)
+
+
 def _mark_phase2_repair_verifying(
-    ctx: "Ctx", request_id: str, labels: Iterable[str]
+    ctx: "Ctx",
+    request_id: str,
+    labels: Iterable[str],
+    *,
+    recheck_labels: Iterable[str] = (),
 ) -> None:
-    """Block later blueprint edits until this repair's Lean is accepted."""
+    """Block edits while separating repaired declarations from cache rechecks."""
     if not request_id:
         return
     _activate_phase2_repair_request(ctx, request_id)
@@ -3799,9 +4198,28 @@ def _mark_phase2_repair_verifying(
         )
     active = ctx.phase2_repair_active
     active["stage"] = "verify"
-    active["verification_labels"] = sorted(
-        {str(label) for label in labels if str(label) in getattr(ctx, "nodes", {})}
+    owned = {
+        str(label) for label in labels if str(label) in getattr(ctx, "nodes", {})
+    }
+    rechecks = {
+        str(label)
+        for label in recheck_labels
+        if str(label) in getattr(ctx, "nodes", {}) and str(label) not in owned
+    }
+    active["verification_labels"] = sorted(owned | rechecks)
+    queue_payload = next(
+        (
+            payload
+            for payload in getattr(ctx, "phase2_repair_queue", [])
+            if str(payload.get("request_id") or "") == request_id
+        ),
+        None,
     )
+    if queue_payload is not None:
+        # Persist ownership on the queue payload because rollback restores the
+        # pre-edit active marker before follow-up evidence is merged.
+        queue_payload["verification_owned_labels"] = sorted(owned)
+        queue_payload["verification_recheck_labels"] = sorted(rechecks)
     telemetry = getattr(ctx, "telemetry", None)
     if telemetry is not None:
         _record(
@@ -3809,6 +4227,8 @@ def _mark_phase2_repair_verifying(
             "phase2_repair_verification_started",
             request_id=request_id,
             labels=list(active["verification_labels"]),
+            owned_labels=sorted(owned),
+            recheck_labels=sorted(rechecks),
             queue_size=len(getattr(ctx, "phase2_repair_queue", [])),
         )
 
@@ -3902,7 +4322,7 @@ class Ctx:
     # The compact Phase-1 semantic planner can use either configured model
     # tier. This changes only that advisory call (including its hedge); normal
     # generation and repair routing keep their existing tier policies.
-    planner_tier: str = "base"
+    planner_tier: str = "escalation"
     # ``record`` preserves conjectures as exact proposition definitions and
     # does not claim to prove them. ``attempt`` first requires the blueprint to
     # contain a proof, then asks Phase 2 to formalize that blueprint proof.
@@ -3938,6 +4358,19 @@ class Ctx:
     # produced it, so a blueprint repair cannot leak stale criticism into the
     # replacement contract.
     generation_feedback: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Authoritative, typed diagnostic facts. ``generation_feedback`` above is
+    # retained as a compatibility projection for old state/tests; prompt reads
+    # and invalidation decisions use this ledger.
+    diagnostic_evidence: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # A deterministic closure rejection proves that an actual generated Lean
+    # statement referenced these blueprint nodes.  Keep that structured fact
+    # across generation-plan epoch changes so a later independent statement
+    # audit can certify the same edge without another model round-trip.  This
+    # evidence never authorizes an edge by itself and is valid only for the
+    # unchanged blueprint statement fingerprint.
+    phase1_dependency_observations: dict[str, dict[str, Any]] = field(
+        default_factory=dict
+    )
     # Exact Phase-1 model exchanges survive outer retries and ``--continue``.
     # The ledger does not suppress distinct stochastic samples; it prevents a
     # byte-identical response to the same correction context from being paid
@@ -4061,6 +4494,8 @@ class Ctx:
         _prune_stale_quarantine(self)
         _prune_stale_local_group_partitions(self)
         _prune_stale_generation_feedback(self)
+        _prune_stale_diagnostic_evidence(self)
+        _prune_stale_phase1_dependency_observations(self)
         _prune_stale_generation_candidates(self)
         _prune_stale_phase2_node_candidates(self)
         _prune_stale_retry_lifecycle(self)
@@ -4068,9 +4503,11 @@ class Ctx:
 
 
 def _is_conjecture_node(label: str, node: Node | None) -> bool:
-    """Recognize both the standard environment and its conventional label."""
+    """Recognize declared conjectures and explicitly open mathematical claims."""
     return bool(node) and (
-        str(node.kind).strip().lower() == "conjecture" or label.startswith("conj:")
+        str(getattr(node, "kind", "")).strip().lower() == "conjecture"
+        or label.startswith("conj:")
+        or bool(getattr(node, "open_claim", False))
     )
 
 
@@ -4091,8 +4528,7 @@ def _phase1_target_kinds(ctx: Ctx, labels: Iterable[str]) -> dict[str, str]:
     return {_lean_name(label): _phase1_target_kind(ctx, label) for label in labels}
 
 
-def _blueprint_node_has_proof(ctx: Ctx, label: str) -> bool:
-    block = ctx.tex_blocks.get(label, "")
+def _blueprint_block_has_proof(block: str) -> bool:
     match = re.search(
         r"\\begin\{proof\}([\s\S]*?)\\end\{proof\}", block, flags=re.IGNORECASE
     )
@@ -4100,6 +4536,13 @@ def _blueprint_node_has_proof(ctx: Ctx, label: str) -> bool:
         return False
     proof = re.sub(r"%[^\n]*", "", match.group(1)).strip()
     return bool(proof)
+
+
+def _blueprint_node_has_proof(ctx: Ctx, label: str) -> bool:
+    tex_blocks = getattr(ctx, "tex_blocks", None)
+    if not isinstance(tex_blocks, Mapping):
+        tex_blocks = getattr(ctx, "stmt_blocks", {})
+    return _blueprint_block_has_proof(str(tex_blocks.get(label, "")))
 
 
 def _canonical_blueprint_dir(name: str) -> Path:
@@ -4182,7 +4625,9 @@ def _scoped_blueprint_repair_content(
     The transformation is computed against the immutable pre-call source so a
     model backend has no way to smuggle unrelated draft edits into the result.
     """
-    payload = _extract_json(response_text)
+    payload, repaired_backslashes = _extract_json_object_with_key(
+        response_text, "replacements"
+    )
     raw_replacements = payload.get("replacements")
     if not isinstance(raw_replacements, Mapping):
         raise ValueError("repair JSON did not include a replacements object")
@@ -4279,6 +4724,7 @@ def _scoped_blueprint_repair_content(
         "replacement_labels": requested,
         "new_helper_labels": sorted(new_label_owner),
         "notes": str(payload.get("notes") or "").strip(),
+        "repaired_json_backslashes": repaired_backslashes,
     }
 
 
@@ -4516,8 +4962,433 @@ def _apply_phase1_retry_scheduling(ctx: Ctx, request: RepairRequest) -> None:
     )
 
 
+def _current_diagnostic_candidate_fp(ctx: Ctx, label: str) -> str:
+    """Return the exact candidate currently eligible for correction."""
+    phase2 = (getattr(ctx, "phase2_node_candidates", {}) or {}).get(label)
+    if isinstance(phase2, dict) and str(phase2.get("candidate_hash") or ""):
+        return str(phase2["candidate_hash"])
+    phase1 = (getattr(ctx, "generation_candidates", {}) or {}).get(label)
+    if not isinstance(phase1, dict):
+        return ""
+    working = phase1.get("working_candidate")
+    if isinstance(working, dict) and str(working.get("candidate_hash") or ""):
+        return str(working["candidate_hash"])
+    return str(
+        phase1.get("candidate_hash")
+        or (
+            _candidate_hash(str(phase1.get("code") or ""))
+            if str(phase1.get("code") or "").strip()
+            else ""
+        )
+    )
+
+
+def _diagnostic_evidence_policy(source: str) -> tuple[str, str]:
+    """Classify one producer by fact kind and validity boundary.
+
+    Explicit semantic/audit requirements describe the blueprint statement and
+    survive candidate/plan replacement. Plan findings survive candidate edits
+    but not a plan replacement. Mechanical diagnostics describe exact emitted
+    code and expire with that candidate. Unknown producers conservatively keep
+    statement-scoped evidence; they cannot authorize mutation by themselves.
+    """
+    normalized = source.strip().lower()
+    if "phase1_interface_usability" in normalized:
+        # This is not the raw compiler diagnostic.  The interface gate has
+        # already established that every implementation/proof body was `sorry`
+        # and normalized the failure into a strategy requirement for this
+        # unchanged blueprint statement.  Keep that requirement across a plan
+        # replacement so the replacement prompt does not rediscover the same
+        # unusable public representation.  Raw Lean/compiler evidence remains
+        # candidate-scoped below.
+        return "operational", "statement"
+    if "plan" in normalized:
+        return "plan", "plan"
+    if any(
+        token in normalized
+        for token in (
+            "compile",
+            "compiler",
+            "deterministic",
+            "interface_usability",
+            "candidate_regression",
+        )
+    ):
+        kind = "compiler" if "compil" in normalized else "deterministic"
+        return kind, "candidate"
+    if any(
+        token in normalized
+        for token in ("alignment", "semantic", "blueprint_direct", "audit")
+    ):
+        return "semantic", "statement"
+    return "operational", "statement"
+
+
+def _canonical_failure_identity(value: Any) -> Any:
+    """Normalize structured failure facts without interpreting prose.
+
+    Lists in diagnostic payloads represent sets of obligations, dependencies,
+    or helpers.  Sorting them makes equivalent structured reports stable while
+    leaving free-text-only failures distinct.
+    """
+    if isinstance(value, Mapping):
+        return {
+            str(key): _canonical_failure_identity(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if item not in (None, "", [], {}, ())
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
+        normalized = [_canonical_failure_identity(item) for item in value]
+        encoded = {
+            json.dumps(item, sort_keys=True, separators=(",", ":")): item
+            for item in normalized
+            if item not in (None, "", [], {})
+        }
+        return [encoded[key] for key in sorted(encoded)]
+    if isinstance(value, str):
+        return " ".join(value.split())
+    return value
+
+
+def _diagnostic_failure_signature(
+    *,
+    kind: str,
+    text: str,
+    identity: Mapping[str, Any] | None = None,
+) -> str:
+    """Fingerprint one failure by objective facts when they are available.
+
+    Compiler diagnostics use their existing location-insensitive error shape.
+    Semantic and operational prose is never guessed to be equivalent: without
+    structured facts it falls back to the exact normalized text hash.
+    """
+    canonical_identity = _canonical_failure_identity(dict(identity or {}))
+    if canonical_identity:
+        # The same objective fact may pass through an exact producer and an
+        # outer orchestration wrapper that assign different policy kinds. The
+        # structured fact itself is authoritative; producer kind controls its
+        # lifetime, not whether it is a new failure.
+        material: dict[str, Any] = {"identity": canonical_identity}
+    elif kind == "compiler":
+        material = {"kind": kind, "lean_error_shape": _lean_error_shape(text)}
+    else:
+        material = {
+            "kind": kind,
+            "text_sha256": hashlib.sha256(
+                " ".join(text.split()).encode("utf-8")
+            ).hexdigest(),
+        }
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def _diagnostic_evidence_id(payload: Mapping[str, Any]) -> str:
+    signature = str(payload.get("failure_signature") or "") or (
+        _diagnostic_failure_signature(
+            kind=str(payload.get("kind") or "operational"),
+            text=str(payload.get("text") or ""),
+            identity=(
+                payload.get("failure_identity")
+                if isinstance(payload.get("failure_identity"), Mapping)
+                else None
+            ),
+        )
+    )
+    identity = {
+        "label": payload.get("label", ""),
+        "statement_fp": payload.get("statement_fp", ""),
+        "kind": payload.get("kind", ""),
+        "lifetime": payload.get("lifetime", ""),
+        "plan_fp": payload.get("plan_fp", ""),
+        "candidate_fp": payload.get("candidate_fp", ""),
+        "failure_signature": signature,
+    }
+    return hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _record_diagnostic_evidence(
+    ctx: Ctx,
+    label: str,
+    text: str,
+    *,
+    source: str,
+    kind: str | None = None,
+    lifetime: str | None = None,
+    data: Mapping[str, Any] | None = None,
+    failure_identity: Mapping[str, Any] | None = None,
+    candidate_fp: str | None = None,
+    plan_fp: str | None = None,
+) -> str:
+    """Store one immutable diagnostic fact with an explicit validity scope."""
+    if label not in getattr(ctx, "nodes", {}):
+        return ""
+    inferred_kind, inferred_lifetime = _diagnostic_evidence_policy(source)
+    kind = kind or inferred_kind
+    lifetime = lifetime or inferred_lifetime
+    if lifetime not in EVIDENCE_LIFETIMES:
+        raise ValueError(f"unsupported diagnostic evidence lifetime: {lifetime}")
+    statement_fp = getattr(ctx, "stmt_fps", {}).get(label, "")
+    if not statement_fp:
+        return ""
+    resolved_plan_fp = (
+        str(plan_fp)
+        if plan_fp is not None
+        else (_candidate_plan_fingerprint(ctx, label) if lifetime == "plan" else "")
+    )
+    resolved_candidate_fp = (
+        str(candidate_fp)
+        if candidate_fp is not None
+        else (_current_diagnostic_candidate_fp(ctx, label) if lifetime == "candidate" else "")
+    )
+    # A mechanical fact is meaningful only for the exact emitted candidate.
+    # Candidate persistence is the authoritative publication point for these
+    # diagnostics, so never widen an unattached compiler/deterministic finding
+    # into statement-scoped feedback. Doing so would let an error from discarded
+    # Lean survive regeneration and poison the replacement candidate.
+    if lifetime == "candidate" and not resolved_candidate_fp:
+        telemetry = getattr(ctx, "telemetry", None)
+        if telemetry is not None:
+            _record(
+                telemetry,
+                "diagnostic_evidence_unattached_candidate_discarded",
+                label=label,
+                source=source,
+                kind=kind,
+                statement_fp=statement_fp,
+                text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            )
+        return ""
+    canonical_identity = _canonical_failure_identity(dict(failure_identity or {}))
+    failure_signature = _diagnostic_failure_signature(
+        kind=kind,
+        text=text,
+        identity=canonical_identity,
+    )
+    payload = {
+        "schema_version": DIAGNOSTIC_EVIDENCE_SCHEMA_VERSION,
+        "label": label,
+        "statement_fp": statement_fp,
+        "kind": kind,
+        "lifetime": lifetime,
+        "plan_fp": resolved_plan_fp if lifetime == "plan" else "",
+        "candidate_fp": resolved_candidate_fp if lifetime == "candidate" else "",
+        "text": text.strip()[-12000:],
+        "data": copy.deepcopy(dict(data or {})),
+        "failure_identity": canonical_identity,
+        "failure_signature": failure_signature,
+        "sources": [source],
+        "consumed": False,
+    }
+    if not payload["text"] and not payload["data"]:
+        return ""
+    # Outer orchestration layers may repeat a failure while carrying it toward
+    # the main loop. They cannot widen an exact candidate/plan fact into
+    # generic statement-scoped feedback. If the exact producer arrives after a
+    # compatibility producer, replace the broader record with the typed one.
+    evidence_id = _diagnostic_evidence_id(payload)
+    with _STATE_LOCK:
+        ledger = getattr(ctx, "diagnostic_evidence", None)
+        if ledger is None:
+            ledger = {}
+            ctx.diagnostic_evidence = ledger
+        for previous_id, previous in list(ledger.items()):
+            previous_signature = (
+                _diagnostic_failure_signature(
+                    kind=str(previous.get("kind") or "operational"),
+                    text=str(previous.get("text") or ""),
+                    identity=(
+                        previous.get("failure_identity")
+                        if isinstance(previous.get("failure_identity"), Mapping)
+                        else None
+                    ),
+                )
+                if isinstance(previous, dict)
+                else ""
+            )
+            same_raw_fact = bool(
+                isinstance(previous, dict)
+                and str(previous.get("text") or "") == payload["text"]
+                and (previous.get("data") or {}) == payload["data"]
+            )
+            if (
+                not isinstance(previous, dict)
+                or not _diagnostic_record_is_active(ctx, previous)
+                or str(previous.get("label") or "") != label
+                or str(previous.get("statement_fp") or "") != statement_fp
+                or (
+                    previous_signature != failure_signature
+                    and not same_raw_fact
+                )
+            ):
+                continue
+            previous_kind = str(previous.get("kind") or "operational")
+            if kind == "operational" and previous_kind != "operational":
+                sources = list(previous.get("sources") or [])
+                if source not in sources:
+                    sources.append(source)
+                previous["sources"] = sources[-8:]
+                return previous_id
+            if previous_kind == "operational" and kind != "operational":
+                ledger.pop(previous_id, None)
+        previous = ledger.get(evidence_id)
+        if isinstance(previous, dict):
+            sources = list(previous.get("sources") or [])
+            if source not in sources:
+                sources.append(source)
+            previous["sources"] = sources[-8:]
+            previous["consumed"] = False
+        else:
+            ledger[evidence_id] = payload
+    return evidence_id
+
+
+def _diagnostic_record_is_active(ctx: Ctx, entry: Mapping[str, Any]) -> bool:
+    if bool(entry.get("consumed")):
+        return False
+    label = str(entry.get("label") or "")
+    if (
+        label not in getattr(ctx, "nodes", {})
+        or str(entry.get("statement_fp") or "")
+        != getattr(ctx, "stmt_fps", {}).get(label, "")
+    ):
+        return False
+    lifetime = str(entry.get("lifetime") or "statement")
+    if lifetime == "plan":
+        return str(entry.get("plan_fp") or "") == _candidate_plan_fingerprint(
+            ctx, label
+        )
+    if lifetime == "candidate":
+        return str(entry.get("candidate_fp") or "") == _current_diagnostic_candidate_fp(
+            ctx, label
+        )
+    return lifetime in {"statement", "transaction"}
+
+
+def _prune_stale_diagnostic_evidence(ctx: Ctx) -> set[str]:
+    """Remove facts whose explicit validity boundary no longer matches."""
+    with _STATE_LOCK:
+        ledger = getattr(ctx, "diagnostic_evidence", {})
+        stale = {
+            evidence_id
+            for evidence_id, entry in ledger.items()
+            if not isinstance(entry, dict) or not _diagnostic_record_is_active(ctx, entry)
+        }
+        for evidence_id in stale:
+            ledger.pop(evidence_id, None)
+    return stale
+
+
+def _active_diagnostic_evidence(
+    ctx: Ctx,
+    labels: Iterable[str],
+    *,
+    kinds: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    wanted = set(labels)
+    _prune_stale_diagnostic_evidence(ctx)
+    with _STATE_LOCK:
+        return [
+            copy.deepcopy(entry)
+            for entry in getattr(ctx, "diagnostic_evidence", {}).values()
+            if isinstance(entry, dict)
+            and str(entry.get("label") or "") in wanted
+            and (kinds is None or str(entry.get("kind") or "") in kinds)
+        ]
+
+
+def _consume_diagnostic_evidence(
+    ctx: Ctx,
+    labels: Iterable[str],
+    *,
+    kinds: set[str] | None = None,
+) -> set[str]:
+    wanted = set(labels)
+    consumed: set[str] = set()
+    with _STATE_LOCK:
+        for evidence_id, entry in getattr(ctx, "diagnostic_evidence", {}).items():
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("label") or "") not in wanted:
+                continue
+            if kinds is not None and str(entry.get("kind") or "") not in kinds:
+                continue
+            entry["consumed"] = True
+            consumed.add(evidence_id)
+    _prune_stale_diagnostic_evidence(ctx)
+    return consumed
+
+
+def _migrate_legacy_generation_feedback(ctx: Ctx) -> None:
+    """Import pre-ledger continuation state without broadening its authority."""
+    existing = {
+        (
+            str(entry.get("label") or ""),
+            str(entry.get("text") or "").strip(),
+        )
+        for entry in getattr(ctx, "diagnostic_evidence", {}).values()
+        if isinstance(entry, dict)
+    }
+    for label, entry in list(getattr(ctx, "generation_feedback", {}).items()):
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("statement_fp") or "") != getattr(ctx, "stmt_fps", {}).get(label):
+            continue
+        evidence = str(entry.get("evidence") or "").strip()
+        if (label, evidence) in existing:
+            continue
+        source = str(entry.get("source") or "unknown")
+        kind, lifetime = _diagnostic_evidence_policy(source)
+        _record_diagnostic_evidence(
+            ctx,
+            label,
+            evidence,
+            source=f"legacy:{source}",
+            kind=kind,
+            lifetime=lifetime,
+        )
+
+
+def _sync_generation_feedback_projection(ctx: Ctx) -> None:
+    """Maintain the legacy per-label view from active prompt evidence."""
+    prompt_kinds = {"compiler", "deterministic", "semantic", "plan", "operational"}
+    records = _active_diagnostic_evidence(
+        ctx, getattr(ctx, "nodes", {}), kinds=prompt_kinds
+    )
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for entry in records:
+        if str(entry.get("text") or "").strip():
+            grouped.setdefault(str(entry["label"]), []).append(entry)
+    projection: dict[str, dict[str, str]] = {}
+    for label, entries in grouped.items():
+        texts: list[str] = []
+        sources: list[str] = []
+        for entry in entries:
+            text = str(entry.get("text") or "").strip()
+            if text and text not in texts:
+                texts.append(text)
+            sources.extend(str(item) for item in entry.get("sources") or [])
+        projection[label] = {
+            "statement_fp": getattr(ctx, "stmt_fps", {}).get(label, ""),
+            "evidence": "\n\n".join(texts)[-12000:],
+            "source": sources[-1] if sources else "diagnostic_ledger",
+        }
+    ctx.generation_feedback = projection
+
+
 def _prune_stale_generation_feedback(ctx: Ctx) -> set[str]:
-    """Drop retry evidence that no longer describes the current statement."""
+    """Drop retry evidence outside its explicit validity boundary."""
+    _migrate_legacy_generation_feedback(ctx)
+    before = {
+        str(entry.get("label") or "")
+        for entry in getattr(ctx, "diagnostic_evidence", {}).values()
+        if isinstance(entry, dict)
+    }
+    stale_evidence = _prune_stale_diagnostic_evidence(ctx)
     with _STATE_LOCK:
         feedback = getattr(ctx, "generation_feedback", {})
         stale = {
@@ -4528,7 +5399,201 @@ def _prune_stale_generation_feedback(ctx: Ctx) -> set[str]:
         }
         for label in stale:
             feedback.pop(label, None)
+    _sync_generation_feedback_projection(ctx)
+    if stale_evidence:
+        after = {
+            str(entry.get("label") or "")
+            for entry in getattr(ctx, "diagnostic_evidence", {}).values()
+            if isinstance(entry, dict)
+        }
+        stale.update(before - after)
     return stale
+
+
+def _prune_stale_phase1_dependency_observations(ctx: Ctx) -> set[str]:
+    """Drop generated-reference evidence for changed blueprint statements."""
+    statement_fps = getattr(ctx, "stmt_fps", {})
+    nodes = getattr(ctx, "nodes", {})
+    with _STATE_LOCK:
+        observations = getattr(ctx, "phase1_dependency_observations", {})
+        stale = {
+            label
+            for label, entry in observations.items()
+            if label not in nodes
+            or entry.get("statement_fp") != statement_fps.get(label)
+        }
+        for label in stale:
+            observations.pop(label, None)
+    return stale
+
+
+def _record_phase1_dependency_observations(
+    ctx: Ctx,
+    findings: Iterable[SkeletonFinding],
+    code: str,
+) -> dict[str, set[str]]:
+    """Persist exact outside-closure references found in generated Lean.
+
+    These observations are only one half of dependency-edge authorization.
+    The independent statement critic must later name the same dependency for
+    the same unchanged blueprint statement before the existing transactional
+    edge writer can run.
+    """
+    observed: dict[str, set[str]] = {}
+    for finding in findings:
+        if (
+            finding.category == "outside_dependency_closure"
+            and finding.label in ctx.nodes
+            and finding.dependencies
+        ):
+            observed.setdefault(str(finding.label), set()).update(
+                dependency
+                for dependency in finding.dependencies
+                if dependency in ctx.nodes and dependency != finding.label
+            )
+    observed = {label: deps for label, deps in observed.items() if deps}
+    if not observed:
+        return {}
+
+    candidate_hash = _candidate_hash(code)
+    for label, dependencies in observed.items():
+        _record_diagnostic_evidence(
+            ctx,
+            label,
+            "",
+            source="phase1_generated_dependency_reference",
+            kind="dependency_reference",
+            lifetime="statement",
+            data={
+                "dependencies": sorted(dependencies),
+                "candidate_hashes": [candidate_hash],
+            },
+        )
+    with _STATE_LOCK:
+        store = getattr(ctx, "phase1_dependency_observations", None)
+        if store is None:
+            store = {}
+            ctx.phase1_dependency_observations = store
+        for label, dependencies in observed.items():
+            statement_fp = getattr(ctx, "stmt_fps", {}).get(label, "")
+            previous = store.get(label) or {}
+            previous_dependencies = (
+                set(previous.get("dependencies") or [])
+                if previous.get("statement_fp") == statement_fp
+                else set()
+            )
+            previous_hashes = (
+                list(previous.get("candidate_hashes") or [])
+                if previous.get("statement_fp") == statement_fp
+                else []
+            )
+            if candidate_hash not in previous_hashes:
+                previous_hashes.append(candidate_hash)
+            store[label] = {
+                "statement_fp": statement_fp,
+                "dependencies": sorted(previous_dependencies | dependencies),
+                "candidate_hashes": previous_hashes[-8:],
+            }
+    telemetry = getattr(ctx, "telemetry", None)
+    if telemetry is not None:
+        _record(
+            telemetry,
+            "phase1_dependency_reference_observed",
+            labels=sorted(observed),
+            dependencies={
+                label: sorted(dependencies)
+                for label, dependencies in sorted(observed.items())
+            },
+            candidate_sha256=candidate_hash,
+            authorization="candidate_reference_only",
+        )
+    return observed
+
+
+def _confirmed_phase1_dependency_observations(
+    ctx: Ctx,
+    required_dependencies: Mapping[str, set[str]],
+) -> dict[str, set[str]]:
+    """Join deterministic candidate evidence with independent critic evidence."""
+    _prune_stale_phase1_dependency_observations(ctx)
+    active_records = _active_diagnostic_evidence(
+        ctx,
+        required_dependencies,
+        kinds={"dependency_reference"},
+    )
+    ledger_dependencies: dict[str, set[str]] = {}
+    for record in active_records:
+        ledger_dependencies.setdefault(str(record.get("label") or ""), set()).update(
+            str(dependency)
+            for dependency in (record.get("data") or {}).get("dependencies") or []
+        )
+    with _STATE_LOCK:
+        observations = copy.deepcopy(
+            getattr(ctx, "phase1_dependency_observations", {})
+        )
+    confirmed: dict[str, set[str]] = {}
+    for label, required in required_dependencies.items():
+        entry = observations.get(label) or {}
+        if entry.get("statement_fp") != getattr(ctx, "stmt_fps", {}).get(label):
+            continue
+        observed_dependencies = set(entry.get("dependencies") or []) | ledger_dependencies.get(
+            label, set()
+        )
+        matched = observed_dependencies & set(required)
+        if matched:
+            confirmed[label] = matched
+    telemetry = getattr(ctx, "telemetry", None)
+    if confirmed and telemetry is not None:
+        _record(
+            telemetry,
+            "phase1_dependency_repair_authorized",
+            labels=sorted(confirmed),
+            required_dependencies={
+                label: sorted(dependencies)
+                for label, dependencies in sorted(confirmed.items())
+            },
+            authorization=(
+                "persisted deterministic candidate reference and independent "
+                "statement critic agree"
+            ),
+            avoided_route="plan_revision_or_generation_retry",
+        )
+    return confirmed
+
+
+def _clear_phase1_dependency_observations(
+    ctx: Ctx,
+    required_dependencies: Mapping[str, set[str]],
+) -> None:
+    """Consume dependency observations after an edge transaction is attempted."""
+    with _STATE_LOCK:
+        for entry in getattr(ctx, "diagnostic_evidence", {}).values():
+            if not isinstance(entry, dict) or entry.get("kind") != "dependency_reference":
+                continue
+            label = str(entry.get("label") or "")
+            if label not in required_dependencies:
+                continue
+            data = dict(entry.get("data") or {})
+            remaining = set(data.get("dependencies") or []) - set(
+                required_dependencies[label]
+            )
+            if remaining:
+                data["dependencies"] = sorted(remaining)
+                entry["data"] = data
+            else:
+                entry["consumed"] = True
+    _prune_stale_diagnostic_evidence(ctx)
+    with _STATE_LOCK:
+        observations = getattr(ctx, "phase1_dependency_observations", {})
+        for label, dependencies in required_dependencies.items():
+            entry = observations.get(label)
+            if not isinstance(entry, dict):
+                continue
+            remaining = set(entry.get("dependencies") or []) - set(dependencies)
+            if remaining:
+                entry["dependencies"] = sorted(remaining)
+            else:
+                observations.pop(label, None)
 
 
 def _explicit_generation_evidence_by_label(
@@ -4629,6 +5694,7 @@ def _store_generation_feedback(
     *,
     source: str,
     evidence_by_label: Mapping[str, str] | None = None,
+    evidence_identity_by_label: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> None:
     """Persist cumulative correction evidence for the current statement epoch.
 
@@ -4660,39 +5726,25 @@ def _store_generation_feedback(
         return
     stored: list[str] = []
     statement_fps: dict[str, str] = {}
-    with _STATE_LOCK:
-        feedback = getattr(ctx, "generation_feedback", None)
-        if feedback is None:
-            feedback = {}
-            ctx.generation_feedback = feedback
-        for label in label_list:
-            label_evidence = scoped.get(label, "")
-            if not label_evidence:
-                continue
-            statement_fp = ctx.stmt_fps.get(label, "")
-            if not statement_fp:
-                continue
-            previous = feedback.get(label) or {}
-            previous_evidence = (
-                str(previous.get("evidence") or "").strip()
-                if previous.get("statement_fp") == statement_fp
-                else ""
-            )
-            if previous_evidence and label_evidence not in previous_evidence:
-                evidence_for_label = (
-                    previous_evidence
-                    + f"\n\nLater evidence ({source}):\n"
-                    + label_evidence
-                )[-12000:]
-            else:
-                evidence_for_label = previous_evidence or label_evidence
-            feedback[label] = {
-                "statement_fp": statement_fp,
-                "evidence": evidence_for_label,
-                "source": source,
-            }
+    for label in label_list:
+        label_evidence = scoped.get(label, "")
+        if not label_evidence:
+            continue
+        evidence_id = _record_diagnostic_evidence(
+            ctx,
+            label,
+            label_evidence,
+            source=source,
+            failure_identity=(
+                evidence_identity_by_label.get(label)
+                if evidence_identity_by_label is not None
+                else None
+            ),
+        )
+        if evidence_id:
             stored.append(label)
-            statement_fps[label] = statement_fp
+            statement_fps[label] = ctx.stmt_fps.get(label, "")
+    _sync_generation_feedback_projection(ctx)
     if stored:
         _record(
             ctx.telemetry,
@@ -4717,25 +5769,39 @@ def _generation_feedback_for(
     is normally at the start while later compiler diagnostics accumulate at
     the end; dropping either side recreates an already-rejected contract.
     """
-    label_list = list(labels)
-    with _STATE_LOCK:
-        _prune_stale_generation_feedback(ctx)
-        feedback = copy.deepcopy(getattr(ctx, "generation_feedback", {}))
-    grouped: dict[str, list[str]] = {}
-    for label in label_list:
-        entry = feedback.get(label)
-        if not entry:
-            continue
-        evidence = str(entry.get("evidence") or "").strip()
+    label_list = list(dict.fromkeys(labels))
+    _migrate_legacy_generation_feedback(ctx)
+    records = _active_diagnostic_evidence(
+        ctx,
+        label_list,
+        kinds={"compiler", "deterministic", "semantic", "plan", "operational"},
+    )
+    # The ledger may contain the same typed fact at more than one validity
+    # boundary (for example, an exact producer plus an older continuation
+    # projection).  Render its stable identity once.  Unstructured evidence
+    # remains keyed by exact text; we do not guess that differently worded
+    # diagnostics are equivalent.
+    grouped: dict[str, tuple[str, list[str]]] = {}
+    for entry in records:
+        label = str(entry.get("label") or "")
+        evidence = str(entry.get("text") or "").strip()
         if evidence:
-            grouped.setdefault(evidence, []).append(label)
+            signature = str(entry.get("failure_signature") or "")
+            key = signature or ("text:" + evidence)
+            current = grouped.get(key)
+            if current is None:
+                grouped[key] = (evidence, [label])
+                continue
+            rendered_evidence, owners = current
+            if label not in owners:
+                owners.append(label)
     if not grouped:
         return ""
     rendered: list[str] = []
     group_budget = None
     if max_chars is not None:
         group_budget = max(512, max_chars // len(grouped) - 160)
-    for evidence, group_labels in grouped.items():
+    for evidence, group_labels in grouped.values():
         if group_budget is not None and len(evidence) > group_budget:
             half = max(1, (group_budget - 48) // 2)
             evidence = (
@@ -4753,7 +5819,13 @@ def _generation_feedback_for(
     _record(
         ctx.telemetry,
         "phase1_retry_feedback_injected",
-        labels=[label for group_labels in grouped.values() for label in group_labels],
+        labels=list(
+            dict.fromkeys(
+                label
+                for _evidence, group_labels in grouped.values()
+                for label in group_labels
+            )
+        ),
         evidence_chars=len(text),
     )
     return text
@@ -4761,9 +5833,15 @@ def _generation_feedback_for(
 
 def _clear_generation_feedback(ctx: Ctx, labels: Iterable[str]) -> None:
     """Forget correction evidence only after those statements are accepted."""
+    label_list = list(labels)
+    _consume_diagnostic_evidence(
+        ctx,
+        label_list,
+        kinds={"compiler", "deterministic", "semantic", "plan", "operational"},
+    )
     with _STATE_LOCK:
         feedback = getattr(ctx, "generation_feedback", {})
-        for label in labels:
+        for label in label_list:
             feedback.pop(label, None)
 
 
@@ -5157,6 +6235,7 @@ def _store_phase2_node_candidate(
     failure_kind: str,
     tier: str,
     source: str,
+    failure_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Persist one exact statement+body candidate and its current rejection.
 
@@ -5166,9 +6245,12 @@ def _store_phase2_node_candidate(
     """
     candidate_hash = _candidate_hash(code)
     evidence = evidence.strip()[-12000:]
-    failure_hash = hashlib.sha256(
-        (failure_kind + "\0" + evidence).encode("utf-8")
-    ).hexdigest()
+    canonical_identity = _canonical_failure_identity(dict(failure_identity or {}))
+    failure_hash = _diagnostic_failure_signature(
+        kind=failure_kind,
+        text=evidence,
+        identity=canonical_identity,
+    )
     with _STATE_LOCK:
         candidates = getattr(ctx, "phase2_node_candidates", None)
         if candidates is None:
@@ -5193,6 +6275,7 @@ def _store_phase2_node_candidate(
             "evidence": evidence,
             "failure_kind": failure_kind,
             "failure_hash": failure_hash,
+            "failure_identity": canonical_identity,
             "tier": tier,
             "source": source,
             "revision": int(previous.get("revision") or 0) + 1,
@@ -5205,6 +6288,33 @@ def _store_phase2_node_candidate(
             "repeated_state": repeated,
         }
         candidates[label] = entry
+    if failure_kind == "semantic_alignment":
+        _record_diagnostic_evidence(
+            ctx,
+            label,
+            evidence,
+            source=f"{source}:semantic",
+            kind="semantic",
+            lifetime="statement",
+            failure_identity=canonical_identity,
+        )
+    else:
+        diagnostic_kind = (
+            "compiler"
+            if failure_kind
+            in {"lean_compile", "object_compile", "implementation_object"}
+            else "deterministic"
+        )
+        _record_diagnostic_evidence(
+            ctx,
+            label,
+            evidence,
+            source=f"{source}:{diagnostic_kind}",
+            kind=diagnostic_kind,
+            lifetime="candidate",
+            candidate_fp=candidate_hash,
+            failure_identity=canonical_identity,
+        )
     _record(
         ctx.telemetry,
         "phase2_complete_candidate_saved",
@@ -5238,6 +6348,8 @@ def _note_phase2_candidate_correction(
 def _clear_phase2_node_candidate(ctx: Ctx, label: str) -> None:
     with _STATE_LOCK:
         getattr(ctx, "phase2_node_candidates", {}).pop(label, None)
+    _prune_stale_diagnostic_evidence(ctx)
+    _sync_generation_feedback_projection(ctx)
 
 
 def _finding_obligation_ids(finding: SkeletonFinding) -> set[str]:
@@ -5543,6 +6655,10 @@ def _store_generation_candidates(
     lean_output: str = "",
     semantic_status: str = "unknown",
     semantic_evidence: str = "",
+    semantic_evidence_by_label: Mapping[str, str] | None = None,
+    semantic_evidence_identity_by_label: Mapping[
+        str, Mapping[str, Any]
+    ] | None = None,
     expected_plan_fps: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Retain only monotonic candidate improvements for the current epoch.
@@ -5628,6 +6744,21 @@ def _store_generation_candidates(
         candidate_code, _ = _compose_module(
             parsed.imports, parsed.preamble, pieces
         )
+        component_semantic_evidence = semantic_evidence
+        if semantic_evidence_by_label is not None:
+            component_semantic_evidence = "\n\n".join(
+                str(semantic_evidence_by_label.get(component_label) or "").strip()
+                for component_label in component_labels
+                if str(
+                    semantic_evidence_by_label.get(component_label) or ""
+                ).strip()
+            )
+        component_semantic_identity = {
+            component_label: semantic_evidence_identity_by_label[component_label]
+            for component_label in component_labels
+            if semantic_evidence_identity_by_label is not None
+            and component_label in semantic_evidence_identity_by_label
+        }
         obligations, violations, findings = _evaluate_phase1_candidate(
             ctx, component_labels, candidate_code
         )
@@ -5667,10 +6798,18 @@ def _store_generation_candidates(
                 _lean_error_count(lean_output) if lean_status == "failed" else 0
             ),
             "semantic_status": semantic_status,
-            "semantic_evidence": semantic_evidence[-12000:],
+            "semantic_evidence": component_semantic_evidence[-12000:],
             "semantic_evidence_sha256": (
-                hashlib.sha256(semantic_evidence.encode("utf-8")).hexdigest()
-                if semantic_evidence
+                _diagnostic_failure_signature(
+                    kind="semantic",
+                    text=component_semantic_evidence,
+                    identity=(
+                        {"labels": component_semantic_identity}
+                        if component_semantic_identity
+                        else None
+                    ),
+                )
+                if component_semantic_evidence
                 else ""
             ),
             "base_attempted": generation_tier == "base",
@@ -5728,6 +6867,16 @@ def _store_generation_candidates(
                 for component_label in component_labels:
                     previous = candidates.get(component_label) or {}
                     entry = dict(proposed)
+                    label_semantic_evidence = (
+                        str(
+                            (semantic_evidence_by_label or {}).get(
+                                component_label
+                            )
+                            or ""
+                        ).strip()[-12000:]
+                        if semantic_evidence_by_label is not None
+                        else component_semantic_evidence[-12000:]
+                    )
                     entry.update(
                         {
                             "statement_fp": statement_fps[component_label],
@@ -5748,6 +6897,23 @@ def _store_generation_candidates(
                             )
                             or generation_tier == "escalation",
                             "revision": revision,
+                            "semantic_evidence": label_semantic_evidence,
+                            "semantic_evidence_sha256": (
+                                _diagnostic_failure_signature(
+                                    kind="semantic",
+                                    text=label_semantic_evidence,
+                                    identity=(
+                                        semantic_evidence_identity_by_label.get(
+                                            component_label
+                                        )
+                                        if semantic_evidence_identity_by_label
+                                        is not None
+                                        else None
+                                    ),
+                                )
+                                if label_semantic_evidence
+                                else ""
+                            ),
                         }
                     )
                     if reasons == ["same_candidate_evidence"]:
@@ -5784,12 +6950,12 @@ def _store_generation_candidates(
                             else str(previous.get("semantic_status") or "unknown")
                         )
                         entry["semantic_evidence"] = (
-                            semantic_evidence[-12000:]
-                            if semantic_evidence
+                            label_semantic_evidence
+                            if label_semantic_evidence
                             else str(previous.get("semantic_evidence") or "")
                         )
                         entry["semantic_evidence_sha256"] = (
-                            proposed["semantic_evidence_sha256"]
+                            entry["semantic_evidence_sha256"]
                             or str(
                                 previous.get("semantic_evidence_sha256") or ""
                             )
@@ -5855,6 +7021,67 @@ def _store_generation_candidates(
                         regression_evidence[-12000:],
                         source="candidate_regression",
                     )
+
+        # Candidate persistence is the authoritative point where mechanical
+        # diagnostics acquire an exact candidate lifetime. Semantic rejection
+        # remains tied to the unchanged blueprint statement. Higher-level
+        # handlers may repeat these strings, but the ledger cannot broaden
+        # their scope.
+        if semantic_status == "rejected" and component_semantic_evidence.strip():
+            for component_label in component_labels:
+                label_evidence = (
+                    str(
+                        (semantic_evidence_by_label or {}).get(component_label)
+                        or ""
+                    ).strip()
+                    if semantic_evidence_by_label is not None
+                    else component_semantic_evidence.strip()
+                )
+                if label_evidence:
+                    _record_diagnostic_evidence(
+                        ctx,
+                        component_label,
+                        label_evidence,
+                        source=f"{source}:semantic",
+                        kind="semantic",
+                        lifetime="statement",
+                        failure_identity=(
+                            semantic_evidence_identity_by_label.get(
+                                component_label
+                            )
+                            if semantic_evidence_identity_by_label is not None
+                            else None
+                        ),
+                    )
+        if (
+            lean_status == "failed"
+            and lean_output.strip()
+            and (accepted or accepted_as_working)
+        ):
+            for component_label in component_labels:
+                _record_diagnostic_evidence(
+                    ctx,
+                    component_label,
+                    lean_output,
+                    source=f"{source}:compiler",
+                    kind="compiler",
+                    lifetime="candidate",
+                    candidate_fp=candidate_hash,
+                )
+        if violations and (accepted or accepted_as_working):
+            scoped_findings = _generation_evidence_from_findings(
+                component_labels, findings
+            )
+            for component_label, finding_text in scoped_findings.items():
+                _record_diagnostic_evidence(
+                    ctx,
+                    component_label,
+                    finding_text,
+                    source=f"{source}:deterministic",
+                    kind="deterministic",
+                    lifetime="candidate",
+                    candidate_fp=candidate_hash,
+                )
 
         _record(
             ctx.telemetry,
@@ -6169,7 +7396,13 @@ def _semantic_repair_candidate(
         for entry in entries
     ):
         return None
-    evidence = _generation_feedback_for(ctx, labels)
+    evidence_by_label = {
+        label: _generation_feedback_for(ctx, [label]) for label in labels
+    }
+    evidence_by_label = {
+        label: value for label, value in evidence_by_label.items() if value
+    }
+    evidence = "\n\n".join(evidence_by_label.values())
     if not evidence:
         return None
     seed = _reusable_uncompiled_candidate(
@@ -6177,10 +7410,14 @@ def _semantic_repair_candidate(
     )
     if seed is None:
         return None
-    if len(labels) == 1:
-        seed.generation_tier = _retry_next_tier(
-            ctx, labels[0], "phase1_statement"
-        )
+    next_tiers = {
+        _retry_next_tier(ctx, label, "phase1_statement") for label in labels
+    }
+    if len(next_tiers) == 1:
+        # A correction wave is formed only from labels at the same retry tier.
+        # Preserve that tier exactly instead of inheriting whichever producer
+        # happened to create the retained source.
+        seed.generation_tier = next(iter(next_tiers))
     required_dependencies = {
         label: {
             str(dep)
@@ -6198,6 +7435,7 @@ def _semantic_repair_candidate(
             evidence,
             sections,
             required_dependencies=required_dependencies,
+            reason_by_label=evidence_by_label,
         )
     except RepairRequest:
         for entry in entries:
@@ -6344,6 +7582,7 @@ def _record_retry_failure(
     attempted_tier: str,
     evidence: str,
     source: str,
+    evidence_identity: Mapping[str, Any] | None = None,
 ) -> set[str]:
     """Advance exact statement versions through base, escalation, exhausted.
 
@@ -6355,7 +7594,11 @@ def _record_retry_failure(
         lifecycle = {}
         ctx.retry_lifecycle = lifecycle
     exhausted: set[str] = set()
-    evidence_hash = hashlib.sha256(evidence.encode("utf-8")).hexdigest()
+    evidence_hash = _diagnostic_failure_signature(
+        kind=_diagnostic_evidence_policy(source)[0],
+        text=evidence,
+        identity=evidence_identity,
+    )
     for label in labels:
         statement_fp = getattr(ctx, "stmt_fps", {}).get(label, "")
         if not statement_fp:
@@ -7144,6 +8387,66 @@ def _object_gate_evidence(
     )
 
 
+def _phase1_interface_usability_evidence(evidence: str) -> str:
+    """Normalize Phase-1 elaboration-budget failures as interface evidence.
+
+    Phase 1 mechanically replaces ordinary definition bodies and theorem
+    proofs by ``sorry`` before Lean sees the candidate. A plain-check timeout
+    or heartbeat exhaustion at that boundary therefore cannot be repaired by
+    proving harder or by decomposing the blueprint: Lean is struggling with
+    the public type/interface itself.
+    """
+    text = str(evidence or "").strip()
+    if not text:
+        return ""
+    if text.startswith(OBJECT_INTERFACE_FAILURE_PREFIX):
+        return text
+    lowered = text.lower()
+    markers = (
+        "lean check timed out after",
+        "maximum number of heartbeats has been reached",
+        "maximum number of heartbeats",
+        "(deterministic) timeout at",
+        "deterministic timeout at",
+    )
+    if not any(marker in lowered for marker in markers):
+        return ""
+    return (
+        f"{OBJECT_INTERFACE_FAILURE_PREFIX}:\n"
+        "- Phase 1 had already replaced target implementations and proofs by "
+        "`sorry`, so this failure is in elaborating the public Lean interface.\n"
+        "- Preserve the exact blueprint mathematics. Replace deeply nested "
+        "dependent products or projection chains by bounded same-node named "
+        "structures/fields when needed. Do not add blueprint nodes merely to "
+        "make Lean elaborate.\n"
+        "- If no faithful bounded same-node representation exists, return the "
+        "documented NEEDS-DECOMPOSITION result; compiler timeout evidence alone "
+        "does not authorize blueprint decomposition.\n\n"
+        "Exact Lean evidence:\n"
+        + text[-10000:]
+    )
+
+
+def _phase1_interface_prompt_rule(feedback: str) -> str:
+    """Prompt rule for one exact, diagnosed public-interface failure."""
+    evidence = _phase1_interface_usability_evidence(feedback)
+    if not evidence:
+        return ""
+    return """
+Interface-usability correction for this exact statement version:
+- The previous Phase-1 candidate already had every proof/ordinary body replaced
+  by `sorry`; do not spend time proving anything.
+- You MAY replace an anonymous/deep public type by one or more named structural
+  declarations owned by the same target node, immediately before that target.
+  Preserve every parameter, witness, equation, and mathematical obligation.
+- These same-node structural declarations are Lean representation, not new
+  blueprint lemmas. Do not invent a separate theorem or executable helper.
+- Emit a complete bounded Lean interface now. Do not inspect files or run tools.
+- If the blueprint genuinely requires a separate mathematical statement that
+  cannot be represented inside this node, return NEEDS-DECOMPOSITION explicitly.
+"""
+
+
 def _compile_fast_candidate_object(
     ctx: Ctx,
     path: Path,
@@ -7197,6 +8500,8 @@ def _save_state(
     quarantine: dict[str, dict[str, str]] | None = None,
     local_group_partitions: dict[str, dict[str, Any]] | None = None,
     generation_feedback: dict[str, dict[str, str]] | None = None,
+    diagnostic_evidence: dict[str, dict[str, Any]] | None = None,
+    phase1_dependency_observations: dict[str, dict[str, Any]] | None = None,
     generation_candidates: dict[str, dict[str, Any]] | None = None,
     phase2_node_candidates: dict[str, dict[str, Any]] | None = None,
     phase1_exchange_history: dict[str, dict[str, Any]] | None = None,
@@ -7295,6 +8600,133 @@ def _save_state(
         and str(entry.get("statement_fp") or "") == stmt_fps.get(label)
         and str(entry.get("evidence") or "").strip()
     }
+    diagnostic_evidence_payload: dict[str, dict[str, Any]] = {}
+    for entry in (diagnostic_evidence or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        label = str(entry.get("label") or "")
+        lifetime = str(entry.get("lifetime") or "statement")
+        if (
+            label not in stmt_fps
+            or str(entry.get("statement_fp") or "") != stmt_fps.get(label)
+            or lifetime not in EVIDENCE_LIFETIMES
+            or bool(entry.get("consumed"))
+        ):
+            continue
+        normalized = {
+            "schema_version": DIAGNOSTIC_EVIDENCE_SCHEMA_VERSION,
+            "label": label,
+            "statement_fp": stmt_fps[label],
+            "kind": str(entry.get("kind") or "operational")[:80],
+            "lifetime": lifetime,
+            "plan_fp": str(entry.get("plan_fp") or "")[:200],
+            "candidate_fp": str(entry.get("candidate_fp") or "")[:200],
+            "text": str(entry.get("text") or "")[-12000:],
+            "data": copy.deepcopy(
+                entry.get("data") if isinstance(entry.get("data"), dict) else {}
+            ),
+            "failure_identity": _canonical_failure_identity(
+                entry.get("failure_identity")
+                if isinstance(entry.get("failure_identity"), dict)
+                else {}
+            ),
+            "failure_signature": str(entry.get("failure_signature") or ""),
+            "sources": [
+                str(source)[:200]
+                for source in (entry.get("sources") or [])[-8:]
+                if str(source)
+            ],
+            "consumed": False,
+        }
+        if not normalized["text"] and not normalized["data"]:
+            continue
+        diagnostic_evidence_payload[_diagnostic_evidence_id(normalized)] = normalized
+
+    # Version-28 callers know only the flattened compatibility stores. Convert
+    # them at the persistence boundary so their next resume uses the same
+    # explicit lifecycle rules as a new run.
+    if diagnostic_evidence is None:
+        for label, entry in feedback_payload.items():
+            source = str(entry.get("source") or "unknown")
+            kind, lifetime = _diagnostic_evidence_policy(source)
+            candidate_fp = ""
+            if lifetime == "candidate":
+                candidate_entry = (generation_candidates or {}).get(label) or {}
+                working = candidate_entry.get("working_candidate")
+                if isinstance(working, dict):
+                    candidate_fp = str(working.get("candidate_hash") or "")
+                if not candidate_fp:
+                    candidate_fp = str(candidate_entry.get("candidate_hash") or "")
+                if not candidate_fp and str(candidate_entry.get("code") or "").strip():
+                    candidate_fp = _candidate_hash(str(candidate_entry["code"]))
+                if not candidate_fp:
+                    # A candidate diagnostic without its candidate cannot be
+                    # safely replayed. Do not widen it into statement evidence.
+                    continue
+            normalized = {
+                "schema_version": DIAGNOSTIC_EVIDENCE_SCHEMA_VERSION,
+                "label": label,
+                "statement_fp": stmt_fps[label],
+                "kind": kind,
+                "lifetime": lifetime,
+                "plan_fp": (
+                    _design_plan_entry_fingerprint(
+                        (design_plan_entries or {}).get(label) or {}
+                    )
+                    if lifetime == "plan"
+                    else ""
+                ),
+                "candidate_fp": candidate_fp,
+                "text": str(entry.get("evidence") or "")[-12000:],
+                "data": {},
+                "sources": [f"legacy:{source}"],
+                "consumed": False,
+            }
+            diagnostic_evidence_payload[
+                _diagnostic_evidence_id(normalized)
+            ] = normalized
+    dependency_observation_payload = {
+        str(label): {
+            "statement_fp": str(entry.get("statement_fp") or ""),
+            "dependencies": sorted(
+                {
+                    str(dependency)
+                    for dependency in entry.get("dependencies") or []
+                    if str(dependency) in stmt_fps
+                }
+            ),
+            "candidate_hashes": [
+                str(item)
+                for item in (entry.get("candidate_hashes") or [])[-8:]
+                if str(item)
+            ],
+        }
+        for label, entry in (phase1_dependency_observations or {}).items()
+        if label in stmt_fps
+        and str(entry.get("statement_fp") or "") == stmt_fps.get(label)
+        and entry.get("dependencies")
+    }
+    if diagnostic_evidence is None:
+        for label, entry in dependency_observation_payload.items():
+            normalized = {
+                "schema_version": DIAGNOSTIC_EVIDENCE_SCHEMA_VERSION,
+                "label": label,
+                "statement_fp": stmt_fps[label],
+                "kind": "dependency_reference",
+                "lifetime": "statement",
+                "plan_fp": "",
+                "candidate_fp": "",
+                "text": "",
+                "data": {
+                    "dependencies": list(entry.get("dependencies") or []),
+                    "candidate_hashes": list(entry.get("candidate_hashes") or []),
+                },
+                "sources": ["legacy:phase1_dependency_observations"],
+                "consumed": False,
+            }
+            diagnostic_evidence_payload[
+                _diagnostic_evidence_id(normalized)
+            ] = normalized
     exchange_payload = {
         str(key): {
             "labels": [str(label) for label in entry.get("labels") or []],
@@ -7451,6 +8883,11 @@ def _save_state(
             "evidence": str(entry.get("evidence") or "")[-12000:],
             "failure_kind": str(entry.get("failure_kind") or "unknown"),
             "failure_hash": str(entry.get("failure_hash") or ""),
+            "failure_identity": _canonical_failure_identity(
+                entry.get("failure_identity")
+                if isinstance(entry.get("failure_identity"), dict)
+                else {}
+            ),
             "tier": str(entry.get("tier") or "base"),
             "source": str(entry.get("source") or "unknown"),
             "revision": int(entry.get("revision") or 1),
@@ -7558,6 +8995,14 @@ def _save_state(
             "provider_requirements": copy.deepcopy(
                 entry.get("provider_requirements") or []
             ),
+            "readiness": str(entry.get("readiness") or "ready"),
+            "gap": str(entry.get("gap") or "")[:500],
+            "readiness_confirmation": str(
+                entry.get("readiness_confirmation") or "not_needed"
+            ),
+            "readiness_confirmation_reason": str(
+                entry.get("readiness_confirmation_reason") or ""
+            )[:1000],
             "fallback": bool(entry.get("fallback")),
         }
         for label, entry in (semantic_plan_entries or {}).items()
@@ -7720,7 +9165,7 @@ def _save_state(
     path.write_text(
         json.dumps(
             {
-                "version": 28,
+                "version": 29,
                 "refinement_order": refinement_order,
                 "conjecture_policy": conjecture_policy,
                 "sections": entries,
@@ -7737,6 +9182,14 @@ def _save_state(
                     "generation_feedback": {
                         label: feedback_payload[label]
                         for label in sorted(feedback_payload)
+                    },
+                    "diagnostic_evidence": {
+                        evidence_id: diagnostic_evidence_payload[evidence_id]
+                        for evidence_id in sorted(diagnostic_evidence_payload)
+                    },
+                    "phase1_dependency_observations": {
+                        label: dependency_observation_payload[label]
+                        for label in sorted(dependency_observation_payload)
                     },
                     "generation_candidates": {
                         label: candidate_payload[label]
@@ -7801,8 +9254,15 @@ def _save_ctx_state(ctx: Ctx, sections: list[Section]) -> None:
     # Persist one coherent scheduler snapshot rather than references to mutable
     # dictionaries that can change while JSON payloads are being assembled.
     with _STATE_LOCK:
+        _prune_stale_diagnostic_evidence(ctx)
         generation_feedback = copy.deepcopy(
             getattr(ctx, "generation_feedback", {})
+        )
+        diagnostic_evidence = copy.deepcopy(
+            getattr(ctx, "diagnostic_evidence", {})
+        )
+        phase1_dependency_observations = copy.deepcopy(
+            getattr(ctx, "phase1_dependency_observations", {})
         )
         generation_candidates = copy.deepcopy(
             getattr(ctx, "generation_candidates", {})
@@ -7825,6 +9285,8 @@ def _save_ctx_state(ctx: Ctx, sections: list[Section]) -> None:
         quarantine=ctx.quarantine,
         local_group_partitions=getattr(ctx, "local_group_partitions", {}),
         generation_feedback=generation_feedback,
+        diagnostic_evidence=diagnostic_evidence,
+        phase1_dependency_observations=phase1_dependency_observations,
         generation_candidates=generation_candidates,
         phase2_node_candidates=phase2_node_candidates,
         phase1_exchange_history=phase1_exchange_history,
@@ -7952,6 +9414,74 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
         and str(entry.get("statement_fp") or "") == ctx.stmt_fps.get(str(label))
         and str(entry.get("evidence") or "").strip()
     }
+    raw_diagnostic_evidence = scheduler.get("diagnostic_evidence") or {}
+    ctx.diagnostic_evidence = {}
+    for entry in raw_diagnostic_evidence.values():
+        if not isinstance(entry, dict):
+            continue
+        label = str(entry.get("label") or "")
+        lifetime = str(entry.get("lifetime") or "statement")
+        normalized = {
+            "schema_version": DIAGNOSTIC_EVIDENCE_SCHEMA_VERSION,
+            "label": label,
+            "statement_fp": str(entry.get("statement_fp") or ""),
+            "kind": str(entry.get("kind") or "operational")[:80],
+            "lifetime": lifetime,
+            "plan_fp": str(entry.get("plan_fp") or "")[:200],
+            "candidate_fp": str(entry.get("candidate_fp") or "")[:200],
+            "text": str(entry.get("text") or "")[-12000:],
+            "data": copy.deepcopy(
+                entry.get("data") if isinstance(entry.get("data"), dict) else {}
+            ),
+            "failure_identity": _canonical_failure_identity(
+                entry.get("failure_identity")
+                if isinstance(entry.get("failure_identity"), dict)
+                else {}
+            ),
+            "failure_signature": str(entry.get("failure_signature") or ""),
+            "sources": [
+                str(source)[:200]
+                for source in (entry.get("sources") or [])[-8:]
+                if str(source)
+            ],
+            "consumed": False,
+        }
+        if (
+            int(entry.get("schema_version") or 0)
+            != DIAGNOSTIC_EVIDENCE_SCHEMA_VERSION
+            or label not in ctx.nodes
+            or normalized["statement_fp"] != ctx.stmt_fps.get(label)
+            or lifetime not in EVIDENCE_LIFETIMES
+            or bool(entry.get("consumed"))
+            or (not normalized["text"] and not normalized["data"])
+        ):
+            continue
+        ctx.diagnostic_evidence[_diagnostic_evidence_id(normalized)] = normalized
+    raw_dependency_observations = (
+        scheduler.get("phase1_dependency_observations") or {}
+    )
+    ctx.phase1_dependency_observations = {
+        str(label): {
+            "statement_fp": str(entry.get("statement_fp") or ""),
+            "dependencies": sorted(
+                {
+                    str(dependency)
+                    for dependency in entry.get("dependencies") or []
+                    if str(dependency) in ctx.nodes
+                }
+            ),
+            "candidate_hashes": [
+                str(item)
+                for item in (entry.get("candidate_hashes") or [])[-8:]
+                if str(item)
+            ],
+        }
+        for label, entry in raw_dependency_observations.items()
+        if isinstance(entry, dict)
+        and str(label) in ctx.nodes
+        and str(entry.get("statement_fp") or "") == ctx.stmt_fps.get(str(label))
+        and entry.get("dependencies")
+    }
     raw_candidates = scheduler.get("generation_candidates") or {}
     ctx.generation_candidates = {
         str(label): {
@@ -8032,6 +9562,11 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
             "evidence": str(entry.get("evidence") or "")[-12000:],
             "failure_kind": str(entry.get("failure_kind") or "unknown"),
             "failure_hash": str(entry.get("failure_hash") or ""),
+            "failure_identity": _canonical_failure_identity(
+                entry.get("failure_identity")
+                if isinstance(entry.get("failure_identity"), dict)
+                else {}
+            ),
             "tier": str(entry.get("tier") or "base"),
             "source": str(entry.get("source") or "unknown"),
             "revision": int(entry.get("revision") or 1),
@@ -8263,6 +9798,19 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
                 and str(item.get("provider") or "")
                 in _statement_uses(ctx.nodes[str(label)])
             ],
+            "readiness": (
+                str(entry.get("readiness") or "ready")
+                if str(entry.get("readiness") or "ready")
+                in SEMANTIC_READINESS_VALUES
+                else "ready"
+            ),
+            "gap": str(entry.get("gap") or "")[:500],
+            "readiness_confirmation": str(
+                entry.get("readiness_confirmation") or "not_needed"
+            ),
+            "readiness_confirmation_reason": str(
+                entry.get("readiness_confirmation_reason") or ""
+            )[:1000],
             "fallback": bool(entry.get("fallback")),
         }
         for label, entry in raw_semantic_plan.items()
@@ -8317,6 +9865,25 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
         == ctx.stmt_fps.get(str(label))
     }
     _sync_design_plan(ctx)
+    # Candidate and plan lifetimes can only be checked after all scheduler
+    # objects are restored. Migrate version-28 compatibility stores here, then
+    # make the typed ledger authoritative for prompt feedback.
+    _migrate_legacy_generation_feedback(ctx)
+    for label, entry in ctx.phase1_dependency_observations.items():
+        _record_diagnostic_evidence(
+            ctx,
+            label,
+            "",
+            source="legacy:phase1_dependency_observations",
+            kind="dependency_reference",
+            lifetime="statement",
+            data={
+                "dependencies": list(entry.get("dependencies") or []),
+                "candidate_hashes": list(entry.get("candidate_hashes") or []),
+            },
+        )
+    _prune_stale_diagnostic_evidence(ctx)
+    _sync_generation_feedback_projection(ctx)
     raw_exchange_history = scheduler.get("phase1_exchange_history") or {}
     ctx.phase1_exchange_history = {
         str(key): {
@@ -8395,11 +9962,54 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
     kept: list[Section] = []
     dropped_labels: set[str] = set()
     dropped_modules: set[str] = set()
+    duplicate_sections: list[dict[str, Any]] = []
     for entry in entries:
         path = generated_dir / str(entry.get("file") or "")
         labels = [str(label) for label in entry.get("labels") or []]
         entry_deferred = bool(entry.get("deferred", False))
         entry_provisional = bool(entry.get("provisional_environment", False))
+        # A pre-v36 Phase-2 prerequisite bug could publish a frozen definition
+        # again in a later section. Each canonical blueprint label has exactly
+        # one active owner; retaining both modules makes every downstream import
+        # fail with ``environment already contains``. Keep the earliest valid
+        # owner and discard the whole later transaction. Any non-duplicate
+        # labels that happened to share that transaction become pending again,
+        # while importers are deferred below through ``dropped_modules``.
+        active_owners = {
+            label: section
+            for section in kept
+            if not section.provisional_environment
+            for label in section.labels
+        }
+        duplicate_labels = (
+            set(labels) & set(active_owners)
+            if not entry_provisional
+            else set()
+        )
+        if duplicate_labels:
+            unique_labels = set(labels) - duplicate_labels
+            dropped_labels.update(unique_labels)
+            dropped_module = str(entry.get("module") or "")
+            if dropped_module:
+                dropped_modules.add(dropped_module)
+            _discard_section_artifacts(path)
+            migration = {
+                "file": path.name,
+                "module": dropped_module,
+                "duplicate_labels": sorted(duplicate_labels),
+                "rescheduled_labels": sorted(unique_labels),
+                "retained_owners": {
+                    label: active_owners[label].file_name
+                    for label in sorted(duplicate_labels)
+                },
+            }
+            duplicate_sections.append(migration)
+            _record(
+                ctx.telemetry,
+                "resume_duplicate_section_discarded",
+                **migration,
+            )
+            continue
         stmt_fps = entry.get("statement_fps") or {}
         contract_fps = entry.get("contract_fps") or {}
         own_contracts_ok = (
@@ -8510,6 +10120,12 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
         )
     if dropped_labels:
         _log(f"resume: dropped {len(dropped_labels)} stale label(s); kept {len(kept)} section(s)")
+    if duplicate_sections:
+        _log(
+            "resume: removed "
+            f"{len(duplicate_sections)} duplicate declaration section(s); "
+            "retained each label's original owning section"
+        )
     if not workflow and kept:
         implemented, _required = _phase2_body_progress(ctx, kept)
         if implemented:
@@ -8520,6 +10136,10 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
             ctx.phase1_baseline_labels = {
                 label for label, node in ctx.nodes.items() if not node.mathlibok
             }
+    if duplicate_sections:
+        # Persist the migration immediately. A second interrupted --continue
+        # must not rediscover state entries whose generated files were removed.
+        _save_ctx_state(ctx, kept)
     return kept
 
 
@@ -9001,6 +10621,9 @@ def _decl_interface_text(decl) -> str:
     if decl.kind in {"theorem", "lemma"} or (
         decl.kind in {"def", "abbrev"} and _has_terminal_sorry(text)
     ):
+        deferred = _terminal_sorry_interface_text(text)
+        if deferred is not None:
+            return deferred
         stripped = _TERMINAL_PROOF_RE.sub("", text).rstrip()
         if stripped != text:
             return stripped
@@ -9277,6 +10900,95 @@ def _partition_phase1_groups_by_dependency_context(
                 )
         partitioned.extend(parts)
     return partitioned
+
+
+def _coalesce_phase1_semantic_correction_waves(
+    ctx: Ctx,
+    groups: list[list[str]],
+    sections: list[Section],
+    *,
+    max_labels: int = PHASE1_SEMANTIC_CORRECTION_WAVE_MAX,
+) -> list[list[str]]:
+    """Batch compatible semantic-repair singletons without merging state.
+
+    The outer retry router intentionally isolates rejected declarations, but
+    dispatching every independent correction as a separate model call wastes
+    most of Phase 1's model time.  This coordinator merges only current
+    ``semantic_rejected`` singletons that have the same dependency imports and
+    next retry tier.  The correction transaction still receives and stores
+    evidence per label, and an incomplete response goes through the existing
+    multi-label isolation/bisection route.
+    """
+    if max_labels < 2 or len(groups) < 2:
+        return groups
+    with _STATE_LOCK:
+        _prune_stale_generation_candidates(ctx)
+        entries = copy.deepcopy(getattr(ctx, "generation_candidates", {}))
+
+    def key_for(group: list[str]) -> tuple[tuple[str, ...], str] | None:
+        if len(group) != 1:
+            return None
+        label = group[0]
+        entry = entries.get(label)
+        if (
+            not isinstance(entry, dict)
+            or entry.get("repair_stage") != "semantic_rejected"
+            or not str(entry.get("code") or "").strip()
+            or not _generation_feedback_for(ctx, [label])
+        ):
+            return None
+        return (
+            tuple(_sections_for_deps(ctx, [label], sections)),
+            _retry_next_tier(ctx, label, "phase1_statement"),
+        )
+
+    merged: list[list[str]] = []
+    open_wave_by_key: dict[tuple[tuple[str, ...], str], int] = {}
+    merged_sources: dict[int, list[list[str]]] = {}
+    for group in groups:
+        key = key_for(group)
+        position = open_wave_by_key.get(key) if key is not None else None
+        if position is not None and len(merged[position]) < max_labels:
+            label = group[0]
+            # This is normally guaranteed by the ready frontier. Keep the
+            # helper total when called from tests or future schedulers.
+            independent = all(
+                other not in _statement_uses(ctx.nodes[label])
+                and label not in _statement_uses(ctx.nodes[other])
+                for other in merged[position]
+            )
+            if independent:
+                merged[position].append(label)
+                merged_sources.setdefault(position, []).append(list(group))
+                if len(merged[position]) >= max_labels:
+                    open_wave_by_key.pop(key, None)
+                continue
+        merged.append(list(group))
+        position = len(merged) - 1
+        if key is not None:
+            open_wave_by_key[key] = position
+            merged_sources[position] = [list(group)]
+
+    waves = [
+        merged[position]
+        for position, sources in merged_sources.items()
+        if len(sources) > 1
+    ]
+    if waves:
+        _log(
+            "  coalesced semantic corrections into "
+            + ", ".join(f"{len(wave)}-node" for wave in waves)
+            + " wave(s)"
+        )
+        _record(
+            ctx.telemetry,
+            "phase1_semantic_correction_waves",
+            input_groups=groups,
+            output_groups=merged,
+            waves=waves,
+            max_labels=max_labels,
+        )
+    return merged
 
 
 def _frozen_decl_for_label(sections: list[Section], label: str) -> str:
@@ -9672,7 +11384,11 @@ def _skeleton_prompt(
         f"[{', '.join(sorted(_statement_uses(ctx.nodes[label]))) or 'none'}]; "
         f"proof-only uses "
         f"[{', '.join(sorted(_proof_uses(ctx.nodes[label]) - _statement_uses(ctx.nodes[label]))) or 'none'}])\n"
-        f"```tex\n{ctx.stmt_blocks.get(label, '')[:5000]}\n```"
+        # Phase 1 still emits only the public declaration plus terminal
+        # ``sorry``.  The complete node is nevertheless required here because
+        # its proof sketch can impose representation/interface obligations that
+        # the independent statement audit will later enforce.
+        f"```tex\n{ctx.tex_blocks.get(label, '')[:6000]}\n```"
         for label in labels
     )
     feedback_block = ""
@@ -9691,6 +11407,7 @@ this phase, but only to encode the SAME blueprint content correctly):
 {feedback[-14000:]}
 ```
 {previous_block}"""
+    interface_rule = _phase1_interface_prompt_rule(feedback)
     signatures = _minimal_dependency_interface(
         ctx,
         labels,
@@ -9736,6 +11453,7 @@ Generate ONE declaration per target node listed below — statements only:
 {_text_only_budget_rule(timeout_s)}
 
 {_common_rules(ctx, labels)}
+{interface_rule}
 {feedback_block}
 
 Blueprint name: {ctx.name}
@@ -9780,6 +11498,7 @@ def _targeted_skeleton_patch_prompt(
     *,
     timeout_s: int,
     provisional_only: bool = False,
+    findings_already_persisted: bool = False,
 ) -> str:
     target_text = "\n\n".join(
         f"## {label} ({ctx.nodes[label].kind}; Lean name `{_lean_name(label)}`; "
@@ -9787,7 +11506,10 @@ def _targeted_skeleton_patch_prompt(
         f"[{', '.join(sorted(_statement_uses(ctx.nodes[label]))) or 'none'}]; "
         f"proof-only uses "
         f"[{', '.join(sorted(_proof_uses(ctx.nodes[label]) - _statement_uses(ctx.nodes[label]))) or 'none'}])\n"
-        f"```tex\n{ctx.stmt_blocks.get(label, '')[:5000]}\n```"
+        # Keep compiler correction under the same semantic contract as fresh
+        # generation.  Otherwise a patch can compile while erasing an
+        # obligation stated only in the blueprint proof sketch.
+        f"```tex\n{ctx.tex_blocks.get(label, '')[:6000]}\n```"
         for label in patch_labels
     )
     relevant = [
@@ -9839,6 +11561,7 @@ def _targeted_skeleton_patch_prompt(
         patch_labels,
         max_chars=12000,
     )
+    interface_rule = _phase1_interface_prompt_rule(persisted_feedback)
     persisted_feedback_block = (
         "No earlier semantic or compiler rejection remains unresolved."
         if not persisted_feedback
@@ -9850,20 +11573,33 @@ These constraints remain mandatory. The current compiler finding supplements
 them; it does not supersede them. Do not restore any previously rejected
 weakening while fixing the current error.""".format(feedback=persisted_feedback)
     )
+    current_findings = (
+        "No additional findings; the exact active findings are in the persisted "
+        "rejection evidence above."
+        if findings_already_persisted and persisted_feedback
+        else _format_skeleton_findings(relevant)[-10000:]
+    )
     helper_rule = (
         "No plan-owned auxiliary type interface is required for these targets."
-        if not planned_helpers
-        else
-        "The only permitted auxiliary declarations are these exact plan-owned "
-        "type interfaces; emit a complete replacement for any one named by a "
-        "finding:\n"
-        + "\n".join(
-            f"  - {helper.get('kind')} {helper.get('name')} (owner {label}):\n"
+        if not planned_helpers and not interface_rule
+        else (
+            "The exact interface-usability evidence permits bounded named "
+            "structure/class/inductive declarations owned by the same target. "
+            "They must only package that node's existing mathematical data and "
+            "obligations; they are not separate blueprint helpers."
+            if not planned_helpers
+            else
+            "The only permitted auxiliary declarations are these exact plan-owned "
+            "type interfaces; emit a complete replacement for any one named by a "
+            "finding:\n"
             + "\n".join(
-                f"      {member.get('name')} : {member.get('type')}"
-                for member in helper.get("members") or []
+                f"  - {helper.get('kind')} {helper.get('name')} (owner {label}):\n"
+                + "\n".join(
+                    f"      {member.get('name')} : {member.get('type')}"
+                    for member in helper.get("members") or []
+                )
+                for label, helper in planned_helpers
             )
-            for label, helper in planned_helpers
         )
     )
     return f"""TASK: PATCH-BLUEPRINT-SKELETON-DECLARATIONS
@@ -9901,6 +11637,7 @@ Rules:
 {_text_only_budget_rule(timeout_s)}
 
 {_common_rules(ctx, patch_labels)}
+{interface_rule}
 
 Blueprint name: {ctx.name}
 
@@ -9921,7 +11658,7 @@ target declarations; do not inspect generated files):
 
 Deterministic audit findings to fix:
 ```text
-{_format_skeleton_findings(relevant)[-10000:]}
+{current_findings}
 ```
 
 Current declarations owned by the repair targets (the complete dependency
@@ -10120,6 +11857,7 @@ def _targeted_patch_skeleton_decls(
     escalated: bool = False,
     provisional_only: bool = False,
     escalate_timeout: bool = True,
+    findings_already_persisted: bool = False,
 ) -> tuple[ParsedModule | None, str]:
     patch_labels = _patchable_skeleton_labels(findings, labels)
     if not patch_labels:
@@ -10139,6 +11877,7 @@ def _targeted_patch_skeleton_decls(
             findings,
             timeout_s=timeout,
             provisional_only=provisional_only,
+            findings_already_persisted=findings_already_persisted,
         )
     except ValueError as exc:
         return None, f"targeted declaration context check failed: {exc}"
@@ -10246,7 +11985,12 @@ def _targeted_patch_skeleton_decls(
     try:
         canonical = _ingest_model_lean(
             ctx,
-            patch_labels,
+            # The correction may reference accepted siblings from the owning
+            # component. Canonicalize against that complete namespace while
+            # keeping replacement authority restricted to ``patch_labels``
+            # below. Using only ``patch_labels`` renamed valid sibling names
+            # to generated ``_autobp_*`` identifiers.
+            labels,
             result.text,
             defer_phase1_bodies=True,
         )
@@ -10547,31 +12291,20 @@ def _skeleton_deterministic_findings(code: str, ctx: Ctx, labels: list[str]) -> 
     """Coverage/kind checks for a section. Dependency-mention checks are only
     applied to declarations whose bodies are already complete; deferred theorem
     proofs and def/abbrev bodies get theirs during Phase 2."""
-    # The complete merged candidate, not a partial patch response, owns the
-    # exact typed contract on fresh runs. Refreshing here keeps compiler and
-    # semantic repairs atomic with the code they changed.
-    if getattr(ctx, "semantic_plan_entries", {}):
-        parsed_for_contract = _parse_module(code)
-        label_by_name_for_contract = {
-            _lean_name(label): label for label in labels
-        }
-        owner_by_index = _declaration_owner_map(
-            parsed_for_contract,
-            label_by_name_for_contract,
-            _planned_helper_owner_by_name(ctx, labels),
-        )
-        _realize_typed_contracts_from_candidate(
-            ctx,
-            labels,
-            CanonicalModelModule(parsed_for_contract, owner_by_index),
-        )
     findings: list[SkeletonFinding] = []
+    parsed_for_contract = _parse_module(code)
     decls = _lean_declarations(code)
     generated_by_name = {
         _lean_name(other_label): other_label
         for other_label, other_node in ctx.nodes.items()
         if not other_node.mathlibok
     }
+    label_by_name = {_lean_name(label): label for label in labels}
+    consumers_by_index = _declaration_target_consumers(
+        parsed_for_contract,
+        label_by_name,
+        _planned_helper_owner_by_name(ctx, labels),
+    )
     plan_entries = getattr(ctx, "design_plan_entries", {})
     for label in labels:
         entry = plan_entries.get(label) or {}
@@ -10629,6 +12362,7 @@ def _skeleton_deterministic_findings(code: str, ctx: Ctx, labels: list[str]) -> 
         node = ctx.nodes[label]
         if node.mathlibok:
             continue
+        expected_kind = _phase1_target_kind(ctx, label)
         lean_name = _lean_name(label)
         decl = decls.get(_lean_name(label))
         if decl is None:
@@ -10640,7 +12374,7 @@ def _skeleton_deterministic_findings(code: str, ctx: Ctx, labels: list[str]) -> 
                 )
             )
             continue
-        if node.kind in DEFINITION_LIKE_KINDS and decl.kind in {"theorem", "lemma"}:
+        if expected_kind in DEFINITION_LIKE_KINDS and decl.kind in {"theorem", "lemma"}:
             findings.append(
                 SkeletonFinding(
                     f"{label} is a definition but generated `{decl.kind} {decl.name}`",
@@ -10648,12 +12382,27 @@ def _skeleton_deterministic_findings(code: str, ctx: Ctx, labels: list[str]) -> 
                     lean_name=lean_name,
                 )
             )
-        if _is_theorem_like_kind(node.kind) and decl.kind in {"structure", "inductive", "class"}:
+        if _is_theorem_like_kind(expected_kind) and decl.kind not in {"theorem", "lemma"}:
             findings.append(
                 SkeletonFinding(
                     f"{label} is theorem-like but generated `{decl.kind} {decl.name}`",
                     label=label,
                     lean_name=lean_name,
+                    category="wrong_kind",
+                )
+            )
+        elif (
+            _is_theorem_like_kind(expected_kind)
+            and _planned_target_result_type(decl.text, lean_name) == "Prop"
+        ):
+            findings.append(
+                SkeletonFinding(
+                    f"{label} is theorem-like but generated the bare proposition "
+                    f"sort `{decl.kind} {decl.name} : Prop`; its public contract "
+                    "must state the actual proposition proved by the blueprint",
+                    label=label,
+                    lean_name=lean_name,
+                    category="wrong_kind",
                 )
             )
         # A deferred Phase-1 declaration contains only its public type. Once a
@@ -10663,12 +12412,21 @@ def _skeleton_deterministic_findings(code: str, ctx: Ctx, labels: list[str]) -> 
             if _has_terminal_sorry(decl.text) or _records_conjecture(ctx, label)
             else _transitive_dependencies(ctx.nodes, label)
         )
+        # A target's public interface includes every local helper it consumes,
+        # not only the canonical target declaration.  Inspect that complete
+        # interface surface so a provider referenced inside a structure field
+        # cannot evade the dependency-closure gate.
+        interface_surface = "\n".join(
+            parsed_for_contract.decls[index].text
+            for index, consumers in consumers_by_index.items()
+            if label in consumers
+        ) or decl.text
         unexpected = sorted(
             other_label
             for lean_name, other_label in generated_by_name.items()
             if other_label != label
             and other_label not in allowed_dependencies
-            and _mentions_lean_symbol(decl.text, lean_name)
+            and _mentions_lean_symbol(interface_surface, lean_name)
         )
         if unexpected:
             findings.append(
@@ -10702,6 +12460,26 @@ def _skeleton_deterministic_findings(code: str, ctx: Ctx, labels: list[str]) -> 
                     )
                 )
     findings.extend(_plan_owned_declaration_cycle_findings(code, ctx, labels))
+
+    # Candidate-derived contracts are an atomic result of this deterministic
+    # transaction.  A rejected candidate must never rewrite the next patch's
+    # authoritative target: doing so made a theorem-like ``def ... : Prop``
+    # self-perpetuating even though the same pass rejected it immediately.
+    if not findings and getattr(ctx, "semantic_plan_entries", {}):
+        label_by_name_for_contract = {
+            _lean_name(label): label for label in labels
+        }
+        owner_by_index = _declaration_owner_map(
+            parsed_for_contract,
+            label_by_name_for_contract,
+            _planned_helper_owner_by_name(ctx, labels),
+        )
+        _realize_typed_contracts_from_candidate(
+            ctx,
+            labels,
+            CanonicalModelModule(parsed_for_contract, owner_by_index),
+        )
+    _record_phase1_dependency_observations(ctx, findings, code)
     return findings
 
 
@@ -10709,76 +12487,74 @@ def _skeleton_deterministic_audit(code: str, ctx: Ctx, labels: list[str]) -> lis
     return [finding.message for finding in _skeleton_deterministic_findings(code, ctx, labels)]
 
 
-_AUDIT_DECOMPOSITION_VERBS = (
-    "does not formalize",
-    "does not encode",
-    "does not state",
-    "does not expose",
-    "omits",
-    "erases",
-    "hides",
-    "missing",
-)
-_AUDIT_DECOMPOSITION_OBJECT_NOUNS = (
-    "term",
-    "terms",
-    "object",
-    "objects",
-    "construction",
-    "formula",
-    "formulas",
-    "operation",
-    "relation",
-    "interface",
-    "obligation",
-    "obligations",
-)
-_AUDIT_DECOMPOSITION_OBJECT_MODIFIERS = (
-    "actual",
-    "concrete",
-    "named",
-    "lifted",
-    "resulting",
-    "displayed",
-    "bundled",
-    "separate",
-    "explicit",
-)
+def _alignment_issue_failure_identity(
+    issue: Mapping[str, Any],
+    *,
+    routed_kind: str,
+    failure_origin: str,
+    required_dependencies: Iterable[str],
+    forbidden_dependencies: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Build a provider-neutral identity from one critic's structured facts.
 
-
-def _audit_issue_has_missing_named_object_evidence(
-    issue_line: str, issue: object
-) -> bool:
-    """Detect audit evidence that belongs on the decomposition route.
-
-    This is intentionally narrower than generic semantic failure routing.  It
-    does not treat every mistranslated statement as a blueprint edit.  It only
-    covers the historical slow class where the audit says a Phase-1 statement
-    cannot faithfully expose concrete mathematical objects/formulas because the
-    blueprint node bundles them instead of naming them as declaration-level
-    interfaces.  That is the exact condition the existing decomposition route
-    was built for.
+    The critic's explanatory ``reason`` is deliberately excluded.  If none of
+    the required structured arrays contains a fact, return no identity so the
+    evidence ledger conservatively falls back to exact normalized prose.
     """
-    if not isinstance(issue, dict):
-        return False
-    if str(issue.get("severity", "reject")).lower() != "reject":
-        return False
-    evidence_parts = [issue_line, str(issue.get("reason") or "")]
-    evidence_parts.extend(
-        str(item)
-        for key in ("missing_helpers", "interface_defects")
-        for item in (issue.get(key) or [])
+    fact_fields = (
+        "missing_plan_requirements",
+        "interface_defects",
+        "deferred_body_obligations",
+        "missing_blueprint_information",
+        "missing_helpers",
     )
-    evidence = "\n".join(evidence_parts).lower()
-    if not evidence.strip():
-        return False
-    if not any(verb in evidence for verb in _AUDIT_DECOMPOSITION_VERBS):
-        return False
-    if not any(noun in evidence for noun in _AUDIT_DECOMPOSITION_OBJECT_NOUNS):
-        return False
-    if not any(modifier in evidence for modifier in _AUDIT_DECOMPOSITION_OBJECT_MODIFIERS):
-        return False
-    return True
+    facts = {
+        field: [
+            str(item).strip()
+            for item in issue.get(field) or []
+            if str(item).strip()
+        ]
+        for field in fact_fields
+    }
+    dependencies = sorted(
+        {str(item).strip() for item in required_dependencies if str(item).strip()}
+    )
+    forbidden = sorted(
+        {str(item).strip() for item in forbidden_dependencies if str(item).strip()}
+    )
+    if not dependencies and not forbidden and not any(facts.values()):
+        return {}
+    return _canonical_failure_identity(
+        {
+            "source": "statement_alignment",
+            "classification": str(issue.get("classification") or "").strip(),
+            "routed_kind": routed_kind,
+            "failure_origin": failure_origin,
+            "required_dependencies": dependencies,
+            "forbidden_dependencies": forbidden,
+            **facts,
+        }
+    )
+
+
+def _append_alignment_failure_identity(
+    identities: dict[str, dict[str, Any]],
+    label: str,
+    identity: Mapping[str, Any],
+) -> None:
+    if not identity:
+        return
+    existing = identities.setdefault(label, {"issues": []})
+    issues = list(existing.get("issues") or [])
+    canonical = _canonical_failure_identity(dict(identity))
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    if all(
+        json.dumps(item, sort_keys=True, separators=(",", ":")) != encoded
+        for item in issues
+    ):
+        issues.append(canonical)
+    existing["issues"] = _canonical_failure_identity(issues)
+
 
 def _model_alignment_audit(
     ctx: Ctx,
@@ -10972,6 +12748,7 @@ def _model_alignment_audit(
                 for key in (
                     "missing_blueprint_information",
                     "required_dependencies",
+                    "forbidden_dependencies",
                     "missing_helpers",
                 )
                 for item in issue.get(key) or []
@@ -11012,12 +12789,14 @@ def _model_alignment_audit(
     formatted: list[str] = []
     rejected: set[str] = set()
     required_dependencies: dict[str, set[str]] = {}
+    forbidden_dependencies: dict[str, set[str]] = {}
     kinds_by_label: dict[str, str] = {}
     helpers_by_label: dict[str, list[str]] = {}
     reasons_by_label: dict[str, str] = {}
     missing_info_by_label: dict[str, list[str]] = {}
     origins_by_label: dict[str, str] = {}
     plan_requirements_by_label: dict[str, list[str]] = {}
+    failure_identities_by_label: dict[str, dict[str, Any]] = {}
     global_classification = str(payload.get("classification") or "")
     for issue in issues if isinstance(issues, list) else []:
         if not isinstance(issue, dict):
@@ -11040,14 +12819,13 @@ def _model_alignment_audit(
                 issue_kind, missing_info = _authorized_alignment_failure_kind(
                     issue_classification, [issue_line], [issue]
                 )
-                if (
-                    issue_kind == "lean-generation"
-                    and _audit_issue_has_missing_named_object_evidence(
-                        issue_line, issue
-                    )
-                ):
-                    issue_kind = "decomposition"
-                    missing_info = []
+            # The structured issue classification is authoritative. In
+            # particular, prose such as "erases the concrete terms" still
+            # describes a translation/plan defect when the critic explicitly
+            # reports ``lean_translation_issue`` and names existing blueprint
+            # dependencies. Required dependency edges and plan defects have
+            # their own deterministic routes below; free-text keywords must not
+            # authorize blueprint decomposition.
             # More specific blueprint/decomposition evidence must not be lost
             # when a critic reports several findings for the same node.
             priority = {"lean-generation": 0, "decomposition": 1, "blueprint": 2}
@@ -11088,13 +12866,50 @@ def _model_alignment_audit(
                 for helper in issue.get("missing_helpers") or []
                 if str(helper).strip()
             )
-            certified = {
+            requested_dependencies = {
                 str(dep).strip()
                 for dep in issue.get("required_dependencies") or []
                 if str(dep).strip() in ctx.nodes and str(dep).strip() != node
             }
+            forbidden = {
+                str(dep).strip()
+                for dep in issue.get("forbidden_dependencies") or []
+                if str(dep).strip() in ctx.nodes and str(dep).strip() != node
+            }
+            contradictory = requested_dependencies & forbidden
+            certified = requested_dependencies - contradictory
             if certified:
                 required_dependencies[node] = certified
+            if forbidden:
+                forbidden_dependencies[node] = forbidden
+                removal = (
+                    "Remove generated public references to blueprint dependencies "
+                    "that this node does not require: "
+                    + ", ".join(sorted(forbidden))
+                    + "."
+                )
+                reasons_by_label[node] = reasons_by_label[node] + "\n" + removal
+                formatted.append(f"{node} [dependency-removal]: {removal}")
+            if contradictory:
+                conflict = (
+                    "The audit returned contradictory add/remove dependency actions "
+                    "for: "
+                    + ", ".join(sorted(contradictory))
+                    + "; no dependency edge was added for those labels."
+                )
+                reasons_by_label[node] = reasons_by_label[node] + "\n" + conflict
+                formatted.append(f"{node} [audit-schema-conflict]: {conflict}")
+            _append_alignment_failure_identity(
+                failure_identities_by_label,
+                node,
+                _alignment_issue_failure_identity(
+                    issue,
+                    routed_kind=issue_kind,
+                    failure_origin=origin,
+                    required_dependencies=certified,
+                    forbidden_dependencies=forbidden,
+                ),
+            )
     if not rejected:
         rejected = set(audit_labels)
         for label in rejected:
@@ -11136,6 +12951,10 @@ def _model_alignment_audit(
         required_dependencies={
             label: sorted(dependencies)
             for label, dependencies in required_dependencies.items()
+        },
+        forbidden_dependencies={
+            label: sorted(dependencies)
+            for label, dependencies in forbidden_dependencies.items()
         },
         failure_origins={
             label: origins_by_label.get(label, "lean")
@@ -11179,22 +12998,24 @@ def _model_alignment_audit(
             dict.fromkeys(decomposition_helpers)
         )
     return AlignmentAuditResult(
-        kind,
-        reason,
-        rejected,
-        list(dict.fromkeys(decomposition_helpers)),
-        required_dependencies,
-        kinds_by_label,
-        {
+        kind=kind,
+        reason=reason,
+        rejected=rejected,
+        helpers=list(dict.fromkeys(decomposition_helpers)),
+        required_dependencies=required_dependencies,
+        kinds_by_label=kinds_by_label,
+        helpers_by_label={
             label: list(dict.fromkeys(values))
             for label, values in helpers_by_label.items()
         },
-        reasons_by_label,
-        origins_by_label,
-        {
+        reasons_by_label=reasons_by_label,
+        origins_by_label=origins_by_label,
+        plan_requirements_by_label={
             label: list(dict.fromkeys(values))
             for label, values in plan_requirements_by_label.items()
         },
+        failure_identities_by_label=failure_identities_by_label,
+        forbidden_dependencies=forbidden_dependencies,
     )
 
 
@@ -11257,13 +13078,15 @@ def _transition_phase1_generation_epoch(
     A Phase-1 plan replacement, plan deletion, or switch to blueprint-direct
     generation changes which prompt/candidate contract is authoritative for a
     node.  Every such mutation must invalidate the same state in one place.
-    Exact failure feedback is deliberately retained so the next generation
-    call still sees why the prior epoch failed.
+    Statement-scoped semantic facts are deliberately retained so the next
+    generation call still sees why the prior epoch failed. Candidate- and
+    plan-scoped diagnostics expire here with the object they describe.
     """
     ordered = list(dict.fromkeys(str(label) for label in labels))
     if not ordered:
         _sync_design_plan(ctx)
         return
+    _migrate_legacy_generation_feedback(ctx)
     with _STATE_LOCK:
         removed_candidates = _clear_generation_candidates(
             ctx,
@@ -11278,6 +13101,9 @@ def _transition_phase1_generation_epoch(
         _release_quarantine(ctx, ordered, reason=reason)
         _release_local_group_partitions(ctx, ordered, reason=reason)
         _sync_design_plan(ctx)
+        stale_diagnostics = _prune_stale_diagnostic_evidence(ctx)
+        _sync_generation_feedback_projection(ctx)
+        active_diagnostics = _active_diagnostic_evidence(ctx, ordered)
     telemetry = getattr(ctx, "telemetry", None)
     if telemetry is not None:
         _record(
@@ -11288,7 +13114,10 @@ def _transition_phase1_generation_epoch(
             removed_candidates=sorted(removed_candidates),
             removed_retry_entries=len(removed_retries),
             removed_exchange_entries=len(removed_exchanges),
-            feedback_preserved=True,
+            removed_diagnostic_entries=len(stale_diagnostics),
+            preserved_diagnostic_kinds=sorted(
+                {str(entry.get("kind") or "") for entry in active_diagnostics}
+            ),
         )
 
 
@@ -11422,39 +13251,60 @@ def _activate_blueprint_direct_generation(
     direct = getattr(ctx, "blueprint_direct_generation", {})
     ctx.blueprint_direct_generation = direct
     activated: set[str] = set()
+    already_active: set[str] = set()
     for label in ordered:
         statement_fp = ctx.stmt_fps.get(label, "")
         if not statement_fp:
             continue
         previous = direct.get(label) or {}
+        if str(previous.get("statement_fp") or "") == statement_fp:
+            # Blueprint-direct is a generation strategy for one exact
+            # statement version, not a retry attempt. Later compiler/audit
+            # findings belong to that strategy's existing correction
+            # lifecycle; reactivating here would erase its candidate, retry
+            # provenance, and exchange history.
+            already_active.add(label)
+            continue
         previous_interface_fp = str(
             previous.get("previous_interface_fp") or ""
         ) or _design_plan_public_surface_fingerprint(
             getattr(ctx, "design_plan_entries", {}).get(label)
         )
-        previous_evidence = (
-            str(previous.get("evidence") or "")
-            if str(previous.get("statement_fp") or "") == statement_fp
-            else ""
-        )
         label_evidence = scoped_evidence.get(label, "")
-        combined = previous_evidence
-        if label_evidence and label_evidence not in combined:
-            combined = (
-                (combined + f"\n\nLater evidence ({source}):\n" if combined else "")
-                + label_evidence
-            )[-12000:]
         direct[label] = {
             "statement_fp": statement_fp,
             "source": source,
-            "evidence": combined,
-            "activations": int(previous.get("activations") or 0) + 1,
+            "evidence": label_evidence,
+            "activations": 1,
             "previous_interface_fp": previous_interface_fp,
-            "accepted_interface_fp": str(
-                previous.get("accepted_interface_fp") or ""
-            ),
+            "accepted_interface_fp": "",
         }
         activated.add(label)
+
+    if already_active:
+        repeated_scoped = {
+            label: scoped_evidence[label]
+            for label in already_active
+            if label in scoped_evidence
+        }
+        _store_generation_feedback(
+            ctx,
+            already_active,
+            evidence,
+            source=source,
+            evidence_by_label=repeated_scoped,
+        )
+        _record(
+            ctx.telemetry,
+            "phase1_blueprint_direct_generation_reused",
+            labels=sorted(already_active),
+            source=source,
+            statement_fps={
+                label: ctx.stmt_fps.get(label, "")
+                for label in sorted(already_active)
+            },
+            lifecycle_preserved=True,
+        )
     if not activated:
         return set()
 
@@ -11644,7 +13494,8 @@ def _prune_stale_design_plan(ctx: Ctx) -> set[str]:
 
 DESIGN_PLAN_SCHEMA_VERSION = 6
 DESIGN_PLAN_CLOSURE_VERSION = 4
-SEMANTIC_PLAN_SCHEMA_VERSION = 1
+SEMANTIC_PLAN_SCHEMA_VERSION = 2
+SEMANTIC_READINESS_VALUES = {"ready", "underspecified", "explicitly_unresolved"}
 
 # Phase 1 may introduce only declaration-only type interfaces. Ordinary helper
 # definitions and theorems would need bodies/proofs, but Phase 2 implements only
@@ -11868,6 +13719,18 @@ def _parse_semantic_plan_entries(
             for item in raw.get("obligations") or []
             if str(item).strip()
         ][:6]
+        readiness = str(raw.get("readiness") or "ready").strip().lower()
+        if readiness not in SEMANTIC_READINESS_VALUES:
+            findings.setdefault(label, []).append(
+                f"discarded invalid readiness value {readiness!r}"
+            )
+            readiness = "ready"
+        gap = str(raw.get("gap") or "").strip()[:500]
+        if readiness != "ready" and not gap:
+            findings.setdefault(label, []).append(
+                "non-ready advisory omitted its gap; treating it as ready"
+            )
+            readiness = "ready"
         allowed_providers = _statement_uses(ctx.nodes[label])
         provider_requirements: list[dict[str, Any]] = []
         seen_providers: set[str] = set()
@@ -11898,6 +13761,9 @@ def _parse_semantic_plan_entries(
             "vocabulary": vocabulary,
             "obligations": obligations,
             "provider_requirements": provider_requirements,
+            "readiness": readiness,
+            "gap": gap if readiness != "ready" else "",
+            "readiness_confirmation": "pending" if readiness != "ready" else "not_needed",
         }
 
     # A stable helper spelling cannot be owned by two unrelated nodes. Drop
@@ -11937,6 +13803,9 @@ def _semantic_plan_fallback_entry(ctx: Ctx, label: str) -> dict[str, Any]:
             {"provider": dep, "capabilities": []}
             for dep in sorted(_statement_uses(ctx.nodes[label]))
         ],
+        "readiness": "ready",
+        "gap": "",
+        "readiness_confirmation": "not_needed",
         "fallback": True,
     }
 
@@ -12368,14 +14237,16 @@ def _planned_target_result_type(signature: str, target_name: str) -> str:
         ),
         "",
     )
+    deferred = _terminal_sorry_interface_text(declaration)
+    declaration_surface = deferred if deferred is not None else declaration
     name_match = re.search(
         rf"\b{re.escape(target_name)}(?![A-Za-z0-9_'])",
-        declaration,
+        declaration_surface,
     )
     if not name_match:
         return ""
 
-    tail = declaration[name_match.end():]
+    tail = declaration_surface[name_match.end():]
     depths = {"(": 0, "[": 0, "{": 0}
     closing = {")": "(", "]": "[", "}": "{"}
     for index, char in enumerate(tail):
@@ -12384,8 +14255,15 @@ def _planned_target_result_type(signature: str, target_name: str) -> str:
         elif char in closing:
             opener = closing[char]
             depths[opener] = max(0, depths[opener] - 1)
-        elif char == ":" and not any(depths.values()):
-            return tail[index + 1:].split(":=", 1)[0].strip()
+        elif (
+            char == ":"
+            and tail[index : index + 2] != ":="
+            and not any(depths.values())
+        ):
+            result = tail[index + 1:]
+            if deferred is None:
+                result = result.split(":=", 1)[0]
+            return result.strip()
     return ""
 
 
@@ -12710,6 +14588,7 @@ def _revise_audit_reported_plan_defects(
     *,
     layer_no: int,
     source: str,
+    skip_labels: Iterable[str] = (),
 ) -> set[str]:
     """Correct plan-owned semantic defects before retrying stale-plan Lean.
 
@@ -12724,6 +14603,7 @@ def _revise_audit_reported_plan_defects(
         audit.labels_for("lean-generation")
         & audit.labels_for_origin("plan", "both")
     )
+    eligible.difference_update(skip_labels)
     eligible = {
         label
         for label in eligible
@@ -12741,11 +14621,22 @@ def _revise_audit_reported_plan_defects(
     if requirements:
         evidence += "\nBlueprint requirements absent from the current plan:\n- "
         evidence += "\n- ".join(requirements)
+    evidence_identities = {
+        label: audit.failure_identity_for(label)
+        for label in eligible
+        if audit.failure_identity_for(label)
+    }
+    revision_kwargs = (
+        {"evidence_identities_by_label": evidence_identities}
+        if evidence_identities
+        else {}
+    )
     revised = _revise_exhausted_phase1_contracts(
         ctx,
         eligible,
         evidence,
         policy="audit_origin_plan_defect",
+        **revision_kwargs,
     )
     if revised:
         origins = {
@@ -12779,6 +14670,7 @@ def _activate_audit_reported_candidate_plan_defects(
     *,
     layer_no: int,
     source: str,
+    skip_labels: Iterable[str] = (),
 ) -> set[str]:
     """Route candidate-owned plan omissions to blueprint-direct generation.
 
@@ -12794,6 +14686,7 @@ def _activate_audit_reported_candidate_plan_defects(
         audit.labels_for("lean-generation")
         & audit.labels_for_origin("plan", "both")
     )
+    eligible.difference_update(skip_labels)
     eligible = {
         label
         for label in eligible
@@ -12804,6 +14697,7 @@ def _activate_audit_reported_candidate_plan_defects(
             == "phase1_candidate"
         )
         and audit.plan_requirements_by_label.get(label)
+        and not _uses_blueprint_direct_generation(ctx, label)
     }
     if not eligible:
         return set()
@@ -13906,6 +15800,7 @@ def _correct_phase1_design_plan(
     labels: list[str],
     evidence: str,
     *,
+    evidence_identities_by_label: Mapping[str, Mapping[str, Any]] | None = None,
     escalated: bool = False,
     try_alternate: bool = True,
     context_labels: Iterable[str] | None = None,
@@ -13931,7 +15826,18 @@ def _correct_phase1_design_plan(
                     label: _design_plan_audit_fingerprint(ctx, label)
                     for label in sorted(context_only)
                 },
-                "evidence": hashlib.sha256(evidence.encode("utf-8")).hexdigest(),
+                "evidence": {
+                    label: _diagnostic_failure_signature(
+                        kind="semantic",
+                        text=evidence,
+                        identity=(
+                            evidence_identities_by_label.get(label)
+                            if evidence_identities_by_label is not None
+                            else None
+                        ),
+                    )
+                    for label in sorted(labels)
+                },
             },
             sort_keys=True,
         ).encode("utf-8")
@@ -15011,6 +16917,8 @@ def _semantic_plan_prompt(
     )
     target_text = "\n\n".join(
         f"## {label} ({ctx.nodes[label].kind}; `{_lean_name(label)}`)\n"
+        f"source_notready={str(bool(getattr(ctx.nodes[label], 'notready', False))).lower()}; "
+        f"has_blueprint_proof={str(_blueprint_node_has_proof(ctx, label)).lower()}\n"
         f"{ctx.stmt_blocks.get(label, '')[:1400]}"
         for label in labels
     )
@@ -15024,7 +16932,9 @@ Return JSON only:
       "representation": "brief mathematical representation choice",
       "vocabulary": [{{"name": "stable Lean-style name", "purpose": "brief role"}}],
       "obligations": ["mathematical content the later statement must preserve"],
-      "provider_requirements": [{{"provider": "direct statement dependency label", "capabilities": ["surface needed from that provider"]}}]
+      "provider_requirements": [{{"provider": "direct statement dependency label", "capabilities": ["surface needed from that provider"]}}],
+      "readiness": "ready | underspecified | explicitly_unresolved",
+      "gap": "empty when ready; otherwise one short concrete reason"
     }}
   ]
 }}
@@ -15034,6 +16944,14 @@ Do NOT write Lean signatures, binder types, structure fields, constructors,
 proofs, imports, or definition bodies. The Phase-1 statement generator will
 create the exact typed contract together with the actual Lean declaration, and
 the compiler plus independent audit will judge that declaration directly.
+
+`readiness` is advisory. Use `underspecified` only when the blueprint omits
+mathematical information needed to state this node faithfully, and
+`explicitly_unresolved` only when the source itself marks a TODO, `\\notready`,
+or an unresolved/open claim. Do not classify a node as non-ready merely because
+its eventual proof is difficult or a Lean encoding is uncertain. The harness
+independently confirms every non-ready advisory before it can cause a blueprint
+edit.
 
 Include exactly one compact entry for every requested label. Keep each
 representation under 300 characters, at most 8 vocabulary names, at most 6
@@ -15117,7 +17035,7 @@ def _ensure_phase1_semantic_plan(
     # semantics.
     hedge_after_s = ctx.hard_timeout
     planner_call_ceiling_s = max(hedge_after_s + 1, hedge_after_s * 2)
-    planner_tier = getattr(ctx, "planner_tier", "base")
+    planner_tier = getattr(ctx, "planner_tier", "escalation")
     planner_escalated = planner_tier == "escalation"
     planner_effort = (
         getattr(ctx, "escalation_effort", None)
@@ -15154,7 +17072,37 @@ def _ensure_phase1_semantic_plan(
     hedge: concurrent.futures.Future[CallResult] | None = None
     result: CallResult | None = None
     failures: list[CallResult] = []
+    usable_results: list[CallResult] = []
+    parsed: dict[str, dict[str, Any]] = {}
+    findings: dict[str, list[str]] = {}
+    response_chars = 0
     winner = ""
+
+    def absorb_candidate(candidate: CallResult, lane: str) -> bool:
+        """Merge valid coverage and report whether the requested plan is complete."""
+        nonlocal response_chars, result, winner
+        plan_text = candidate.text or candidate.partial_text
+        candidate_parsed: dict[str, dict[str, Any]] = {}
+        if plan_text.strip():
+            candidate_parsed, candidate_findings = _parse_semantic_plan_entries(
+                ctx, missing, plan_text
+            )
+            response_chars += len(plan_text)
+            usable_results.append(candidate)
+            for label, entry in candidate_parsed.items():
+                parsed.setdefault(label, entry)
+            for label, messages in candidate_findings.items():
+                target = findings.setdefault(label, [])
+                target.extend(message for message in messages if message not in target)
+
+        if len(parsed) == len(missing):
+            result = candidate
+            winner = lane if len(candidate_parsed) == len(missing) else "merged"
+            return True
+        if candidate.status != "ok" or not plan_text.strip():
+            failures.append(candidate)
+        return False
+
     try:
         done, _pending = concurrent.futures.wait([primary], timeout=hedge_after_s)
         if not done:
@@ -15201,14 +17149,12 @@ def _ensure_phase1_semantic_plan(
                         )
                     )
                     continue
-                if candidate.status == "ok" and candidate.text.strip():
-                    result = candidate
-                    winner = "hedge" if future is hedge else "primary"
+                lane = "hedge" if future is hedge else "primary"
+                if absorb_candidate(candidate, lane):
                     break
-                failures.append(candidate)
 
-            # A fast silent failure should not force us to wait for the hedge
-            # threshold merely to start the same recovery lane.
+            # A fast silent or incomplete response should not force us to wait
+            # for the hedge threshold merely to start the one recovery lane.
             if result is None and not active and hedge is None:
                 _record(
                     ctx.telemetry,
@@ -15218,11 +17164,14 @@ def _ensure_phase1_semantic_plan(
                     call_ceiling_s=planner_call_ceiling_s,
                     planner_tier=planner_tier,
                     runner=planner_runner_spec,
-                    reason="primary_finished_without_complete_plan",
+                    reason="primary_finished_with_incomplete_coverage",
+                    planned_count=len(parsed),
+                    missing_count=len(missing) - len(parsed),
                 )
                 _log(
-                    "  compact semantic planner finished without a complete "
-                    "plan; starting one fresh recovery call"
+                    "  compact semantic planner covered "
+                    f"{len(parsed)}/{len(missing)} node(s); preserving those "
+                    "entries and starting one fresh recovery call"
                 )
                 hedge = pool.submit(
                     call_plan, force_fresh=True, control=hedge_control
@@ -15230,13 +17179,20 @@ def _ensure_phase1_semantic_plan(
                 active.add(hedge)
 
         if result is None:
-            result = failures[-1] if failures else CallResult(
-                status="error", error="semantic planner produced no result"
+            result = (
+                usable_results[-1]
+                if usable_results
+                else failures[-1]
+                if failures
+                else CallResult(
+                    status="error", error="semantic planner produced no result"
+                )
             )
         else:
+            loser_cancelled = bool(active)
             if winner == "primary":
                 hedge_control.cancel()
-            else:
+            elif winner == "hedge":
                 primary_control.cancel()
             _record(
                 ctx.telemetry,
@@ -15244,11 +17200,14 @@ def _ensure_phase1_semantic_plan(
                 labels=missing,
                 winner=winner,
                 hedge_started=hedge is not None,
-                loser_cancelled=hedge is not None,
+                loser_cancelled=loser_cancelled,
                 winner_duration_s=result.duration_s,
             )
-            if hedge is not None:
-                _log(f"  compact semantic planner {winner} call won; cancelled loser")
+            if loser_cancelled:
+                _log(
+                    f"  compact semantic planner {winner} coverage won; "
+                    "cancelled incomplete loser"
+                )
     finally:
         if result is None:
             primary_control.cancel()
@@ -15260,11 +17219,6 @@ def _ensure_phase1_semantic_plan(
             "  compact semantic planner unavailable after transport retries; "
             "using blueprint-only fallback guidance"
         )
-    parsed: dict[str, dict[str, Any]] = {}
-    findings: dict[str, list[str]] = {}
-    plan_text = result.text or result.partial_text
-    if plan_text.strip():
-        parsed, findings = _parse_semantic_plan_entries(ctx, missing, plan_text)
     entries.update(parsed)
     fallback_labels = [label for label in missing if label not in parsed]
     for label in fallback_labels:
@@ -15276,7 +17230,7 @@ def _ensure_phase1_semantic_plan(
         status=result.status,
         planned_count=len(parsed),
         fallback_count=len(fallback_labels),
-        response_chars=len(plan_text),
+        response_chars=response_chars,
         sanitized_findings=findings,
         schema_version=SEMANTIC_PLAN_SCHEMA_VERSION,
         authoritative=False,
@@ -15286,6 +17240,352 @@ def _ensure_phase1_semantic_plan(
     _log(
         f"  semantic plan stored {len(parsed)}/{len(missing)} model entry/entries; "
         f"{len(fallback_labels)} blueprint-only fallback(s); no planning repair calls"
+    )
+
+
+def _readiness_repair_components(
+    ctx: Ctx, evidence_by_label: Mapping[str, str]
+) -> list[dict[str, Any]]:
+    """Partition readiness repairs only when their blueprint scopes are independent."""
+    labels = set(evidence_by_label)
+    if len(labels) < 2:
+        return []
+    related: dict[str, set[str]] = {label: set() for label in labels}
+    closures = {
+        label: _transitive_dependencies(ctx.nodes, label) & labels
+        for label in labels
+    }
+    for label, dependencies in closures.items():
+        for dependency in dependencies:
+            related[label].add(dependency)
+            related[dependency].add(label)
+    components: list[list[str]] = []
+    remaining = set(labels)
+    while remaining:
+        seed = min(remaining)
+        stack = [seed]
+        component: set[str] = set()
+        while stack:
+            current = stack.pop()
+            if current in component:
+                continue
+            component.add(current)
+            stack.extend(sorted(related[current] - component, reverse=True))
+        remaining.difference_update(component)
+        components.append(sorted(component))
+    if len(components) < 2:
+        return []
+    return [
+        {
+            "labels": component,
+            "evidence": "\n".join(evidence_by_label[label] for label in component),
+        }
+        for component in components
+    ]
+
+
+def _phase1_readiness_repair_request(
+    ctx: Ctx,
+    evidence_by_label: Mapping[str, str],
+    *,
+    source: str,
+) -> RepairRequest:
+    """Route confirmed source defects through the normal blueprint transaction."""
+    ordered = _design_plan_order(ctx, evidence_by_label)
+    evidence = (
+        "Phase 1 readiness gate rejected blueprint source before Lean statement "
+        "generation. Resolve each exact source defect without weakening its claim. "
+        "For a theorem-like node, add a complete blueprint proof and remove "
+        "\\notready only after the statement and proof are ready. For a "
+        "definition-like node, make its mathematical interface explicit and remove "
+        "\\notready only after it is ready to formalize.\n\n"
+        + "\n".join(evidence_by_label[label] for label in ordered)
+    )
+    _record(
+        ctx.telemetry,
+        "phase1_readiness_repair_requested",
+        labels=ordered,
+        source=source,
+        evidence_by_label=dict(evidence_by_label),
+    )
+    return RepairRequest(
+        evidence,
+        ordered,
+        section_labels=ordered,
+        context_labels=ordered,
+        authorizes_blueprint_repair=True,
+        model_repair_labels=ordered,
+        evidence_by_label=evidence_by_label,
+        repair_components=_readiness_repair_components(ctx, evidence_by_label),
+    )
+
+
+def _phase1_source_readiness_request(
+    ctx: Ctx, pending: set[str]
+) -> RepairRequest | None:
+    """Honor source-authoritative unresolved markers before advisory planning."""
+    issues: dict[str, str] = {}
+    recorded: list[str] = []
+    for label in _design_plan_order(ctx, pending):
+        node = ctx.nodes[label]
+        if _records_conjecture(ctx, label):
+            if bool(getattr(node, "notready", False)):
+                recorded.append(label)
+            continue
+        missing_attempted_conjecture_proof = (
+            getattr(ctx, "conjecture_policy", "record") == "attempt"
+            and _is_conjecture_node(label, node)
+            and not _blueprint_node_has_proof(ctx, label)
+        )
+        if not bool(getattr(node, "notready", False)) and not missing_attempted_conjecture_proof:
+            continue
+        reasons: list[str] = []
+        if bool(getattr(node, "notready", False)):
+            reasons.append(
+                "the blueprint source explicitly contains \\notready, so this "
+                "node is not authorized for ordinary Phase 1 generation"
+            )
+        if missing_attempted_conjecture_proof:
+            reasons.append(
+                "conjecture policy `attempt` requires a complete blueprint proof "
+                "before its Lean statement is frozen"
+            )
+        elif _is_theorem_like_kind(node.kind) and not _blueprint_node_has_proof(ctx, label):
+            reasons.append(
+                "the theorem-like node has no blueprint proof; add one before "
+                "removing \\notready"
+            )
+        issues[label] = f"- {label}: " + "; ".join(reasons)
+    if recorded:
+        _record(
+            ctx.telemetry,
+            "phase1_readiness_open_claim_recorded",
+            labels=recorded,
+            conjecture_policy="record",
+            source_notready=True,
+        )
+    if not issues:
+        return None
+    return _phase1_readiness_repair_request(
+        ctx, issues, source="source_authoritative"
+    )
+
+
+def _readiness_repair_postcondition_findings(
+    *,
+    before_nodes: Mapping[str, Node],
+    after_nodes: Mapping[str, Node],
+    before_blocks: Mapping[str, str],
+    after_blocks: Mapping[str, str],
+    labels: Iterable[str],
+    conjecture_policy: str,
+) -> list[str]:
+    """Reject repairs that erase an unresolved marker without resolving it."""
+    findings: list[str] = []
+    for label in labels:
+        before = before_nodes.get(label)
+        if before is None:
+            continue
+        recorded_open = conjecture_policy == "record" and _is_conjecture_node(
+            label, before
+        )
+        source_notready = bool(getattr(before, "notready", False))
+        attempted_conjecture_without_proof = (
+            conjecture_policy == "attempt"
+            and _is_conjecture_node(label, before)
+            and not _blueprint_block_has_proof(str(before_blocks.get(label, "")))
+        )
+        if recorded_open or not (
+            source_notready or attempted_conjecture_without_proof
+        ):
+            continue
+        after = after_nodes.get(label)
+        if after is None:
+            findings.append(f"{label}: readiness repair deleted the target node")
+            continue
+        if source_notready and bool(getattr(after, "notready", False)):
+            findings.append(
+                f"{label}: readiness repair left \\notready in the target node"
+            )
+        requires_proof = _is_theorem_like_kind(before.kind) and (
+            source_notready or attempted_conjecture_without_proof
+        )
+        if requires_proof and not _blueprint_block_has_proof(
+            str(after_blocks.get(label, ""))
+        ):
+            findings.append(
+                f"{label}: readiness repair did not add a blueprint proof"
+            )
+    return findings
+
+
+def _phase1_readiness_confirmation_prompt(ctx: Ctx, labels: list[str]) -> str:
+    """Ask a separate critic to confirm only planner-reported source gaps."""
+    tex_blocks = getattr(ctx, "tex_blocks", None)
+    if not isinstance(tex_blocks, Mapping):
+        tex_blocks = getattr(ctx, "stmt_blocks", {})
+    nodes = "\n\n".join(
+        f"## {label} ({ctx.nodes[label].kind})\n"
+        f"Planner advisory: {str(ctx.semantic_plan_entries[label].get('readiness') or '')}\n"
+        f"Planner gap: {str(ctx.semantic_plan_entries[label].get('gap') or '')}\n"
+        f"Direct statement dependencies: "
+        f"{', '.join(sorted(_statement_uses(ctx.nodes[label]))) or '(none)'}\n"
+        f"Complete blueprint node:\n```tex\n{str(tex_blocks.get(label, ''))[:7000]}\n```"
+        for label in labels
+    )
+    return f"""TASK: CONFIRM-BLUEPRINT-READINESS
+
+The compact semantic planner marked the nodes below as potentially not ready.
+Independently judge the blueprint source, not the difficulty of Lean encoding
+or proof search. Return JSON only:
+{{
+  "nodes": [
+    {{
+      "label": "exact requested label",
+      "readiness": "ready | underspecified | explicitly_unresolved",
+      "gap": "empty when ready; otherwise the concrete missing source information"
+    }}
+  ]
+}}
+
+Use `underspecified` only when the mathematical statement omits information
+needed to know exactly what must be formalized. Use `explicitly_unresolved`
+only when the source itself leaves a TODO, missing argument, or unresolved
+claim. A hard theorem, unfamiliar notation, or uncertain Lean API is still
+`ready` when its mathematical contract is clear. Do not write Lean, repair the
+blueprint, inspect files, run commands, or search libraries. Include every
+requested label exactly once.
+
+Blueprint: {ctx.name}
+
+{nodes}
+
+Relevant paper excerpt:
+<paper>
+{_paper_excerpt_for(ctx, labels, budget=14000)}
+</paper>
+"""
+
+
+def _parse_phase1_readiness_confirmation(
+    labels: Iterable[str], text: str
+) -> dict[str, dict[str, str]]:
+    requested = set(labels)
+    payload, _repaired = _extract_json_object_with_key(text, "nodes")
+    raw_nodes = payload.get("nodes")
+    if not isinstance(raw_nodes, list):
+        raise ValueError("readiness confirmation omitted its nodes array")
+    parsed: dict[str, dict[str, str]] = {}
+    for raw in raw_nodes:
+        if not isinstance(raw, dict):
+            continue
+        label = str(raw.get("label") or "").strip()
+        readiness = str(raw.get("readiness") or "").strip().lower()
+        gap = str(raw.get("gap") or "").strip()[:1000]
+        if label not in requested or label in parsed:
+            continue
+        if readiness not in SEMANTIC_READINESS_VALUES:
+            continue
+        if readiness != "ready" and not gap:
+            continue
+        parsed[label] = {
+            "readiness": readiness,
+            "gap": gap if readiness != "ready" else "",
+        }
+    return parsed
+
+
+def _phase1_advisory_readiness_request(
+    ctx: Ctx, pending: set[str]
+) -> RepairRequest | None:
+    """Confirm planner warnings once; only confirmed source defects may edit TeX."""
+    semantic_entries = getattr(ctx, "semantic_plan_entries", {})
+    labels = [
+        label
+        for label in _design_plan_order(ctx, pending)
+        if not _records_conjecture(ctx, label)
+        and str((semantic_entries.get(label) or {}).get("readiness") or "ready")
+        != "ready"
+        and str(
+            (semantic_entries.get(label) or {}).get(
+                "readiness_confirmation"
+            )
+            or "pending"
+        )
+        == "pending"
+    ]
+    if not labels:
+        return None
+    _log(
+        f"==> Phase 1 readiness confirmation: checking {len(labels)} "
+        "advisory planner flag(s) before statement generation"
+    )
+    prompt = _phase1_readiness_confirmation_prompt(ctx, labels)
+    result = _call_model(
+        ctx,
+        prompt,
+        purpose="phase1_readiness_confirmation",
+        timeout=ctx.base_timeout,
+        effort=ctx.base_effort,
+        labels=labels,
+        tag="readiness",
+    )
+    parsed: dict[str, dict[str, str]] = {}
+    parse_error = ""
+    if result.status == "ok":
+        try:
+            parsed = _parse_phase1_readiness_confirmation(labels, result.text)
+        except ValueError as exc:
+            parse_error = str(exc)
+    else:
+        parse_error = result.error or result.status
+
+    issues: dict[str, str] = {}
+    for label in labels:
+        entry = semantic_entries[label]
+        confirmation = parsed.get(label)
+        if confirmation is None:
+            entry["readiness_confirmation"] = "unavailable"
+            entry["readiness_confirmation_reason"] = parse_error or "missing label"
+            continue
+        readiness = confirmation["readiness"]
+        gap = confirmation["gap"]
+        entry["readiness"] = readiness
+        entry["gap"] = gap
+        entry["readiness_confirmation"] = (
+            "confirmed_nonready" if readiness != "ready" else "confirmed_ready"
+        )
+        entry["readiness_confirmation_reason"] = gap
+        if readiness != "ready":
+            issues[label] = (
+                f"- {label}: independent readiness confirmation classified the "
+                f"blueprint as {readiness}: {gap}"
+            )
+
+    _record(
+        ctx.telemetry,
+        "phase1_readiness_confirmation",
+        labels=labels,
+        status=result.status,
+        confirmed_nonready_labels=sorted(issues),
+        confirmed_ready_labels=sorted(
+            label
+            for label in labels
+            if (semantic_entries[label].get("readiness_confirmation"))
+            == "confirmed_ready"
+        ),
+        unavailable_labels=sorted(
+            label
+            for label in labels
+            if (semantic_entries[label].get("readiness_confirmation"))
+            == "unavailable"
+        ),
+        parse_error=parse_error,
+    )
+    if not issues:
+        return None
+    return _phase1_readiness_repair_request(
+        ctx, issues, source="independently_confirmed_planner_advisory"
     )
 
 
@@ -16048,7 +18348,10 @@ def _bulk_skeleton_prompt(
         f"[{', '.join(sorted(_statement_uses(ctx.nodes[label]))) or 'none'}]; "
         f"proof-only uses "
         f"[{', '.join(sorted(_proof_uses(ctx.nodes[label]) - _statement_uses(ctx.nodes[label]))) or 'none'}])\n"
-        f"```tex\n{ctx.stmt_blocks.get(label, '')[:2500]}\n```"
+        # The independent audit sees the complete node.  Fresh generation must
+        # see it too: proof prose can impose public interface obligations even
+        # though Phase 1 still emits only a statement ending in ``:= sorry``.
+        f"```tex\n{ctx.tex_blocks.get(label, '')[:6000]}\n```"
         for label in labels
     )
     signatures = _frozen_interface_digest(sections, import_modules, budget=14000)
@@ -16214,6 +18517,7 @@ def _freeze_section_from_code(
     initial_only: bool = False,
     generation_tier: str = "delivered",
     failure_evidence: list[str] | None = None,
+    failure_identities: list[dict[str, Any]] | None = None,
     failure_candidate_code: list[str] | None = None,
     route_plan_defects: bool = False,
     complete_bodies: bool = False,
@@ -16295,6 +18599,36 @@ def _freeze_section_from_code(
         allow_deferred_bodies=not complete_bodies,
     )
     defer_alignment = bool(getattr(ctx, "defer_phase1_alignment", False))
+
+    def check_candidate(candidate_path: Path) -> tuple[bool, str]:
+        """Typecheck once and retain the object when the audit is deferred.
+
+        The validated-contract pipeline used to elaborate the identical source
+        here and again after semantic acceptance.  Emitting the object during
+        this mandatory check lets the finalizer reuse it.  A later source edit
+        or rejection removes the artifact through the existing section cleanup
+        path, while the compile fingerprint prevents stale-object reuse.
+        """
+        if not defer_object_gate:
+            return _check_lean(
+                candidate_path, ctx.lean_command, timeout=lean_timeout
+            )
+        attempt = _compile_module_olean(
+            candidate_path,
+            ctx.lean_command,
+            timeout=lean_timeout,
+        )
+        _record(
+            ctx.telemetry,
+            "lean_object_compilation",
+            labels=labels,
+            owner_phase="phase1",
+            status="passed" if attempt.ok else getattr(attempt, "kind", "failed"),
+            timeout_s=lean_timeout,
+            duration_s=float(getattr(attempt, "duration_s", 0.0)),
+            preaudit=True,
+        )
+        return attempt.ok, attempt.output
     if not initial_only:
         findings += _skeleton_deterministic_findings(module_code, ctx, labels)
     if findings and allow_patch:
@@ -16336,6 +18670,19 @@ def _freeze_section_from_code(
                 "Deterministic checks rejected delivered statements:\n"
                 + _format_skeleton_findings(findings)
             )
+        if failure_identities is not None:
+            failure_identities.append(
+                {
+                    "source": "deterministic",
+                    "obligations": sorted(
+                        {
+                            obligation
+                            for finding in findings
+                            for obligation in _finding_obligation_ids(finding)
+                        }
+                    ),
+                }
+            )
         _log(
             f"  delivered code failed deterministic checks ({len(findings)} "
             "issue(s)); regenerating the part"
@@ -16344,7 +18691,41 @@ def _freeze_section_from_code(
         _discard_section_artifacts(path)
         return None
     path.write_text(module_code, encoding="utf-8")
-    ok, output = _check_lean(path, ctx.lean_command, timeout=lean_timeout)
+    ok, output = check_candidate(path)
+    if not ok and not initial_only and not complete_bodies:
+        interface_evidence = _phase1_interface_usability_evidence(output)
+        if interface_evidence:
+            # Phase 1 has already replaced every ordinary target body/proof by
+            # `sorry` above. A timeout here is therefore an interface
+            # elaboration failure, not a declaration-body compiler error.
+            # Sending it through the local compiler patch loop paid for up to
+            # three model calls that could not address the actual failure and
+            # delayed the interface-usability router that owns this case.
+            if failure_candidate_code is not None:
+                failure_candidate_code.append(module_code)
+            if failure_evidence is not None:
+                failure_evidence.append(interface_evidence)
+            if failure_identities is not None:
+                failure_identities.append(
+                    {
+                        "source": "interface_usability",
+                        "error_shape": _lean_error_shape(output),
+                    }
+                )
+            _record(
+                ctx.telemetry,
+                "phase1_interface_usability_patch_bypassed",
+                labels=labels,
+                origin=origin,
+                error_shape=_lean_error_shape(output),
+            )
+            _log(
+                f"  {origin} exceeded Lean's Phase-1 interface budget; "
+                "skipping body/compiler patches and routing the retained "
+                "contract to interface correction"
+            )
+            _discard_section_artifacts(path)
+            return None
     if not ok and _lean_failure_may_be_fixed_by_broad_mathlib(output):
         # Diagnose import/environment failures with the identical declarations
         # before paying a model to rewrite them. The broad environment is kept
@@ -16359,9 +18740,7 @@ def _freeze_section_from_code(
             [decl.text for decl in parsed.decls],
         )
         path.write_text(broad_code, encoding="utf-8")
-        broad_ok, broad_output = _check_lean(
-            path, ctx.lean_command, timeout=lean_timeout
-        )
+        broad_ok, broad_output = check_candidate(path)
         if broad_ok:
             specific_modules = _specific_import_modules_for_missing_names(
                 ctx, original_output
@@ -16381,9 +18760,7 @@ def _freeze_section_from_code(
                     [decl.text for decl in parsed.decls],
                 )
                 path.write_text(narrow_code, encoding="utf-8")
-                narrow_ok, narrow_output = _check_lean(
-                    path, ctx.lean_command, timeout=lean_timeout
-                )
+                narrow_ok, narrow_output = check_candidate(path)
             if narrow_ok:
                 parsed.imports = list(
                     dict.fromkeys(list(parsed.imports) + specific_imports)
@@ -16405,23 +18782,37 @@ def _freeze_section_from_code(
                 )
             else:
                 path.write_text(broad_code, encoding="utf-8")
-                parsed.imports = list(
-                    dict.fromkeys(["import Mathlib"] + list(parsed.imports))
-                )
-                module_code, _ranges = broad_code, broad_ranges
-                ok, output = True, broad_output
-                _record(
-                    ctx.telemetry,
-                    "phase1_environment_fallback",
-                    labels=labels,
-                    status="resolved_without_model",
-                    added_import="Mathlib",
-                    attempted_specific_imports=specific_modules,
-                )
-                _log(
-                    f"  {origin} compiled unchanged under the complete "
-                    "Mathlib environment"
-                )
+                # The failed narrow probe removed the broad candidate's object.
+                # Recreate it only in this uncommon import-fallback branch.
+                if defer_object_gate:
+                    broad_ok, broad_output = check_candidate(path)
+                if broad_ok:
+                    parsed.imports = list(
+                        dict.fromkeys(["import Mathlib"] + list(parsed.imports))
+                    )
+                    module_code, _ranges = broad_code, broad_ranges
+                    ok, output = True, broad_output
+                    _record(
+                        ctx.telemetry,
+                        "phase1_environment_fallback",
+                        labels=labels,
+                        status="resolved_without_model",
+                        added_import="Mathlib",
+                        attempted_specific_imports=specific_modules,
+                    )
+                    _log(
+                        f"  {origin} compiled unchanged under the complete "
+                        "Mathlib environment"
+                    )
+                else:
+                    module_code, _ranges = _compose_module(
+                        [f"import {module}" for module in import_modules]
+                        + list(parsed.imports),
+                        parsed.preamble,
+                        [decl.text for decl in parsed.decls],
+                    )
+                    path.write_text(module_code, encoding="utf-8")
+                    ok, output = False, broad_output
         else:
             path.write_text(module_code, encoding="utf-8")
             output = original_output
@@ -16438,6 +18829,10 @@ def _freeze_section_from_code(
         if failure_evidence is not None:
             failure_evidence.append(
                 "Lean rejected a plan-realizing interface:\n" + output[-12000:]
+            )
+        if failure_identities is not None:
+            failure_identities.append(
+                {"source": "lean", "error_shape": _lean_error_shape(output)}
             )
         _record(
             ctx.telemetry,
@@ -16553,9 +18948,7 @@ def _freeze_section_from_code(
                 output = _format_skeleton_findings(post)
                 continue
             path.write_text(module_code, encoding="utf-8")
-            ok, output = _check_lean(
-                path, ctx.lean_command, timeout=lean_timeout
-            )
+            ok, output = check_candidate(path)
             if (
                 not ok
                 and route_plan_defects
@@ -16597,6 +18990,10 @@ def _freeze_section_from_code(
             failure_candidate_code.append(module_code)
         if failure_evidence is not None:
             failure_evidence.append("Lean rejected delivered statements:\n" + output[-12000:])
+        if failure_identities is not None:
+            failure_identities.append(
+                {"source": "lean", "error_shape": _lean_error_shape(output)}
+            )
         _log("  delivered code failed Lean; regenerating the part")
         _record(ctx.telemetry, "delivered_code_reuse", labels=labels, status="lean_rejected")
         _discard_section_artifacts(path)
@@ -16621,6 +19018,16 @@ def _freeze_section_from_code(
                     "Statement alignment rejected delivered statements:\n"
                     + reason[-12000:]
                 )
+            if failure_identities is not None:
+                identities = {
+                    label: audit.failure_identity_for(label)
+                    for label in rejected
+                    if audit.failure_identity_for(label)
+                }
+                if identities:
+                    failure_identities.append(
+                        {"source": "statement_alignment", "labels": identities}
+                    )
             _record(ctx.telemetry, "delivered_code_reuse", labels=labels, status="audit_rejected")
             _discard_section_artifacts(path)
             return None
@@ -16639,6 +19046,14 @@ def _freeze_section_from_code(
                 failure_candidate_code.append(module_code)
             if failure_evidence is not None:
                 failure_evidence.append(object_evidence)
+            if failure_identities is not None:
+                failure_identities.append(
+                    {
+                        "source": "object_gate",
+                        "failure_class": object_failure_class,
+                        "error_shape": _lean_error_shape(object_evidence),
+                    }
+                )
             _record(
                 ctx.telemetry,
                 "delivered_code_reuse",
@@ -16698,7 +19113,9 @@ def _freeze_section_from_code(
         ),
         generation_tier=generation_tier,
     )
-    if not defer_object_gate:
+    if defer_object_gate and _section_objects_exist(section):
+        _mark_section_compiled(section, ctx.lean_command, sections)
+    elif not defer_object_gate:
         _mark_section_compiled(section, ctx.lean_command, sections)
     return [section]
 
@@ -17147,7 +19564,10 @@ def _freeze_parts(
                     delivered,
                     part,
                     all_target_names,
-                    _planned_helper_owner_by_name(ctx, labels),
+                    _planned_helper_owner_by_name(
+                        ctx,
+                        [label for item in active_parts for label in item],
+                    ),
                 )
                 if decl_texts:
                     added = _freeze_section_from_code(
@@ -18315,6 +20735,10 @@ def _freeze_section(
                             label: audit.reason_for([label])
                             for label in route.failed_labels
                         },
+                        evidence_identity_by_label={
+                            label: audit.failure_identity_for(label)
+                            for label in route.failed_labels
+                        },
                     )
                     if route.action == "isolate":
                         _quarantine_labels(
@@ -19125,9 +21549,6 @@ def _generate_uncompiled_phase1_candidate(
     reused = _reusable_uncompiled_candidate(ctx, labels, sections)
     if reused is not None:
         return reused
-    generation_plan_fps = {
-        label: _candidate_plan_fingerprint(ctx, label) for label in labels
-    }
     import_modules = _sections_for_deps(ctx, labels, sections)
     placeholders = ParsedModule(
         imports=[],
@@ -19169,6 +21590,13 @@ def _generate_uncompiled_phase1_candidate(
         sessions=sessions,
         generation_tier_out=tier,
     )
+    # Fresh Phase-1 generation realizes its exact typed contract from this
+    # same response.  That candidate-owned refresh is part of the transaction,
+    # not a competing plan edit, so salvage must compare against the resulting
+    # contract epoch rather than the advisory epoch that preceded generation.
+    generation_plan_fps = {
+        label: _candidate_plan_fingerprint(ctx, label) for label in labels
+    }
     target_kinds = _phase1_target_kinds(ctx, labels)
     label_by_name = {_lean_name(label): label for label in labels}
     for decl in parsed.decls:
@@ -19288,6 +21716,7 @@ def _revise_semantic_candidates(
     sections: list[Section],
     *,
     required_dependencies: dict[str, set[str]] | None = None,
+    reason_by_label: Mapping[str, str] | None = None,
 ) -> list[Phase1LayerCandidate]:
     """Apply one exact-feedback revision only to audit-rejected candidates."""
     revisions: list[Phase1LayerCandidate] = []
@@ -19296,7 +21725,11 @@ def _revise_semantic_candidates(
         if subset is None:
             continue
         findings = [
-            SkeletonFinding(reason, label=label, lean_name=_lean_name(label))
+            SkeletonFinding(
+                str((reason_by_label or {}).get(label) or reason),
+                label=label,
+                lean_name=_lean_name(label),
+            )
             for label in subset.labels
         ]
         code = _phase1_layer_candidate_code(subset)
@@ -19315,17 +21748,33 @@ def _revise_semantic_candidates(
             ),
             sessions=subset.sessions,
             escalated=subset.generation_tier == "escalation",
+            # The semantic-repair path starts from the authoritative evidence
+            # ledger. Rendering the synthetic findings as well recursively
+            # duplicated that ledger in later retries.
+            findings_already_persisted=True,
         )
         if patched is None:
-            raise RepairRequest(
+            evidence = (
                 "Semantic correction failed for the rejected declaration(s): "
                 + note
                 + "\n"
-                + reason,
+                + reason
+            )
+            # ``reason`` is already stored in the per-node diagnostic ledger.
+            # Persist only the new patch failure here; storing reason + note as
+            # one new fact recursively embeds the old evidence on every retry.
+            patch_failure = "Targeted semantic correction failed: " + note
+            raise RepairRequest(
+                evidence,
                 subset.labels,
                 section_labels=subset.labels,
                 authorizes_blueprint_repair=False,
                 failure_route=_route_lean_generation_failure(subset.labels),
+                retry_attempted_tier=subset.generation_tier,
+                evidence_by_label={
+                    label: patch_failure
+                    for label in subset.labels
+                },
             )
         subset.parsed = patched
         target_kinds = _phase1_target_kinds(ctx, subset.labels)
@@ -19390,6 +21839,12 @@ def _revise_semantic_candidates(
                 authorizes_blueprint_repair=False,
                 failure_route=_route_lean_generation_failure(subset.labels),
                 plan_revision_required=plan_revision_required,
+                retry_attempted_tier=(
+                    "" if plan_revision_required else subset.generation_tier
+                ),
+                evidence_by_label=_generation_evidence_from_findings(
+                    subset.labels, deterministic
+                ),
             )
         revisions.append(subset)
         _record(
@@ -19471,7 +21926,8 @@ def _route_phase1_compile_failure(
     overlap plan correction/retry bookkeeping with those still-running workers
     without changing any of the existing failure classification rules.
     """
-    if evidence.startswith(OBJECT_INTERFACE_FAILURE_PREFIX):
+    interface_evidence = _phase1_interface_usability_evidence(evidence)
+    if interface_evidence:
         # Persist the failure only in the strategy epoch that produced it.
         # Revising the plan below prunes this candidate.  Storing afterward
         # would incorrectly stamp the old Lean declaration with the revised
@@ -19483,30 +21939,139 @@ def _route_phase1_compile_failure(
             source="phase1_interface_usability_gate",
             all_labels=failed.labels,
             lean_status="passed",
-            lean_output=evidence,
+            lean_output=interface_evidence,
             expected_plan_fps=failed.plan_fps,
         )
         _store_generation_feedback(
             ctx,
             failed.labels,
-            evidence,
+            interface_evidence,
             source="phase1_interface_usability_gate",
         )
-        _revise_unusable_interface_plan(ctx, failed.labels, evidence)
-        return RepairRequest(
-            "The exact Phase-1 statement compiled normally but its public Lean "
-            "interface exceeded the object-generation usability budget. The "
-            "blueprint is unchanged; regenerate only these contracts from the "
-            "revised interface plan.\n\n"
-            + evidence[-12000:],
+
+        # This lifecycle is intentionally separate from ordinary malformed-Lean
+        # retries and survives plan epoch changes. Otherwise each corrected plan
+        # looks like a first failure and can trigger another correction forever.
+        lifecycle = getattr(ctx, "retry_lifecycle", {}) or {}
+        prior_labels = {
+            label
+            for label in failed.labels
+            if getattr(ctx, "stmt_fps", {}).get(label)
+            and lifecycle.get(
+                _retry_lifecycle_key("phase1_interface_usability", label), {}
+            ).get("statement_fp")
+            == getattr(ctx, "stmt_fps", {}).get(label)
+        }
+        direct_labels = {
+            label
+            for label in failed.labels
+            if _uses_blueprint_direct_generation(ctx, label)
+        }
+        first_plan_correction = [
+            label
+            for label in failed.labels
+            if label not in prior_labels and label not in direct_labels
+        ]
+        if first_plan_correction:
+            _record_retry_failure(
+                ctx,
+                first_plan_correction,
+                stage="phase1_interface_usability",
+                attempted_tier="base",
+                evidence=interface_evidence,
+                source="phase1_interface_plan_correction",
+            )
+            revised = _revise_unusable_interface_plan(
+                ctx, first_plan_correction, interface_evidence
+            )
+            if revised:
+                return RepairRequest(
+                    "The Phase-1 public interface exhausted Lean's elaboration "
+                    "budget after all target bodies were replaced by `sorry`. "
+                    "The blueprint is unchanged; retry only these contracts "
+                    "under the one bounded interface-plan correction.\n\n"
+                    + interface_evidence[-12000:],
+                    first_plan_correction,
+                    section_labels=failed.labels,
+                    authorizes_blueprint_repair=False,
+                    plan_revision_required=True,
+                    evidence_by_label={
+                        label: interface_evidence
+                        for label in first_plan_correction
+                    },
+                )
+
+        switch_direct = [
+            label
+            for label in failed.labels
+            if not _uses_blueprint_direct_generation(ctx, label)
+        ]
+        if switch_direct:
+            _record_retry_failure(
+                ctx,
+                switch_direct,
+                stage="phase1_interface_usability",
+                attempted_tier="escalation",
+                evidence=interface_evidence,
+                source="phase1_interface_blueprint_direct",
+            )
+            activated = _activate_blueprint_direct_generation(
+                ctx,
+                switch_direct,
+                interface_evidence,
+                source="phase1_interface_usability_exhaustion",
+                shared_evidence=True,
+            )
+            if activated:
+                return RepairRequest(
+                    "The one bounded interface-plan correction remained "
+                    "unusable. The blueprint is unchanged; generate a bounded "
+                    "same-node interface directly from the blueprint and exact "
+                    "Lean evidence.\n\n"
+                    + interface_evidence[-12000:],
+                    sorted(activated),
+                    section_labels=failed.labels,
+                    authorizes_blueprint_repair=False,
+                    plan_revision_required=True,
+                    evidence_by_label={
+                        label: interface_evidence for label in activated
+                    },
+                )
+
+        # Blueprint-direct generation is the final non-mutating strategy. A
+        # compiler budget failure cannot itself prove that the mathematical
+        # blueprint needs helper nodes. Retry the exact node through the normal
+        # bounded generation lifecycle; only an explicit, independently
+        # adjudicated NEEDS-DECOMPOSITION response may authorize mutation.
+        attempted_tier = (
+            failed.generation_tier
+            if failed.generation_tier in {"base", "escalation"}
+            else "base"
+        )
+        _record_retry_failure(
+            ctx,
             failed.labels,
+            stage="phase1_statement",
+            attempted_tier=attempted_tier,
+            evidence=interface_evidence,
+            source="phase1_interface_blueprint_direct_retry",
+        )
+        route = _route_lean_generation_failure(failed.labels)
+        return RepairRequest(
+            "Blueprint-direct Phase-1 generation still exceeded Lean's public-"
+            "interface budget. The blueprint remains unchanged. Regenerate the "
+            "same node with the exact evidence, or explicitly return "
+            "NEEDS-DECOMPOSITION if no faithful bounded same-node representation "
+            "exists.\n\n"
+            + interface_evidence[-12000:],
+            list(route.failed_labels),
             section_labels=failed.labels,
             authorizes_blueprint_repair=False,
-            # Even when the retained alternate/correction call returned no
-            # usable entry, the old plan was invalidated and must not affect
-            # scheduler capacity or quarantine this as a mathematical defect.
-            plan_revision_required=True,
-            evidence_by_label={label: evidence for label in failed.labels},
+            failure_route=route,
+            retry_attempted_tier=attempted_tier,
+            evidence_by_label={
+                label: interface_evidence for label in failed.labels
+            },
         )
     plan_defects = _phase1_compile_plan_defects(
         ctx, failed.labels, failed_code, evidence
@@ -20690,9 +23255,15 @@ def _audit_phase1_layer_candidates(
 
     audit = _coerce_alignment_audit_result(audit)
     kind, reason, rejected, helpers = audit
-    lean_rejected = audit.labels_for("lean-generation")
-    decomposition_rejected = audit.labels_for("decomposition")
-    blueprint_rejected = audit.labels_for("blueprint")
+    confirmed_required_dependencies = _confirmed_phase1_dependency_observations(
+        ctx, audit.required_dependencies
+    )
+    dependency_repair_labels = set(confirmed_required_dependencies)
+    lean_rejected = audit.labels_for("lean-generation") - dependency_repair_labels
+    decomposition_rejected = (
+        audit.labels_for("decomposition") - dependency_repair_labels
+    )
+    blueprint_rejected = audit.labels_for("blueprint") - dependency_repair_labels
     plan_revised = _revise_decomposition_plans_once(
         ctx,
         decomposition_rejected,
@@ -20706,6 +23277,7 @@ def _audit_phase1_layer_candidates(
         audit,
         layer_no=layer_no,
         source="integrated_alignment",
+        skip_labels=dependency_repair_labels,
     )
     if reported_plan_defects:
         plan_revised.update(reported_plan_defects)
@@ -20715,6 +23287,7 @@ def _audit_phase1_layer_candidates(
         audit,
         layer_no=layer_no,
         source="integrated_alignment",
+        skip_labels=dependency_repair_labels,
     )
     if candidate_plan_defects:
         plan_revised.update(candidate_plan_defects)
@@ -20729,10 +23302,21 @@ def _audit_phase1_layer_candidates(
         ctx, lean_rejected, _phase1_candidate_code(candidates)
     )
     if realized_plan_defects:
+        evidence_identities = {
+            label: audit.failure_identity_for(label)
+            for label in realized_plan_defects
+            if audit.failure_identity_for(label)
+        }
+        revision_kwargs = (
+            {"evidence_identities_by_label": evidence_identities}
+            if evidence_identities
+            else {}
+        )
         immediately_revised = _revise_exhausted_phase1_contracts(
             ctx,
             realized_plan_defects,
             audit.reason_for(sorted(realized_plan_defects)),
+            **revision_kwargs,
         )
         if immediately_revised:
             plan_revised.update(immediately_revised)
@@ -20771,6 +23355,9 @@ def _audit_phase1_layer_candidates(
     request_labels = set(rejected)
     failure_route: FailureScopeDecision | None = None
     if lean_rejected:
+        semantic_evidence_by_label = {
+            label: audit.reason_for([label]) for label in lean_rejected
+        }
         for section in candidates:
             section_rejected = lean_rejected & set(section.labels)
             if section_rejected:
@@ -20784,7 +23371,11 @@ def _audit_phase1_layer_candidates(
                     required_dependencies=audit_required_dependencies,
                     lean_status="passed",
                     semantic_status="rejected",
-                    semantic_evidence=reason,
+                    semantic_evidence_by_label=semantic_evidence_by_label,
+                    semantic_evidence_identity_by_label={
+                        label: audit.failure_identity_for(label)
+                        for label in section_rejected
+                    },
                 )
         tier_by_label = {
             label: (
@@ -20803,23 +23394,27 @@ def _audit_phase1_layer_candidates(
                 if label in lean_rejected and tier_by_label.get(label, "base") == tier
             ]
             if tier_labels:
-                exhausted.update(
-                    _record_retry_failure(
-                        ctx,
-                        tier_labels,
-                        stage="phase1_statement",
-                        attempted_tier=tier,
-                        evidence=reason,
-                        source=f"phase1_layer_{layer_no}_alignment",
+                for label in tier_labels:
+                    exhausted.update(
+                        _record_retry_failure(
+                            ctx,
+                            [label],
+                            stage="phase1_statement",
+                            attempted_tier=tier,
+                            evidence=semantic_evidence_by_label[label],
+                            source=f"phase1_layer_{layer_no}_alignment",
+                            evidence_identity=audit.failure_identity_for(label),
+                        )
                     )
-                )
         _store_generation_feedback(
             ctx,
             lean_rejected,
             reason,
             source="statement_alignment",
-            evidence_by_label={
-                label: audit.reason_for([label]) for label in lean_rejected
+            evidence_by_label=semantic_evidence_by_label,
+            evidence_identity_by_label={
+                label: audit.failure_identity_for(label)
+                for label in lean_rejected
             },
         )
         _quarantine_labels(ctx, lean_rejected, "statement_alignment")
@@ -20834,6 +23429,11 @@ def _audit_phase1_layer_candidates(
                     evidence_by_label={
                         label: audit.reason_for([label])
                         for label in exhausted
+                    },
+                    evidence_identities_by_label={
+                        label: audit.failure_identity_for(label)
+                        for label in exhausted
+                        if audit.failure_identity_for(label)
                     },
                 )
             )
@@ -21032,6 +23632,14 @@ def _audit_phase1_layer_candidates(
             decomposition_rejected
             | (blueprint_rejected - set(audit_required_dependencies))
         ),
+        evidence_by_label={
+            label: audit.reason_for([label]) for label in request_labels
+        },
+        evidence_identities_by_label={
+            label: audit.failure_identity_for(label)
+            for label in request_labels
+            if audit.failure_identity_for(label)
+        },
     )
     try:
         semantic_request.frozen_sections = _finalize_phase1_accepted_sections(
@@ -21069,9 +23677,15 @@ def _semantic_first_failure_request(
     """Route a semantic-first rejection while retaining independently accepted work."""
     audit = _coerce_alignment_audit_result(audit)
     kind, reason, rejected, helpers = audit
-    lean_rejected = audit.labels_for("lean-generation")
-    decomposition_rejected = audit.labels_for("decomposition")
-    blueprint_rejected = audit.labels_for("blueprint")
+    confirmed_required_dependencies = _confirmed_phase1_dependency_observations(
+        ctx, audit.required_dependencies
+    )
+    dependency_repair_labels = set(confirmed_required_dependencies)
+    lean_rejected = audit.labels_for("lean-generation") - dependency_repair_labels
+    decomposition_rejected = (
+        audit.labels_for("decomposition") - dependency_repair_labels
+    )
+    blueprint_rejected = audit.labels_for("blueprint") - dependency_repair_labels
     plan_revised = _revise_decomposition_plans_once(
         ctx,
         decomposition_rejected,
@@ -21085,6 +23699,7 @@ def _semantic_first_failure_request(
         audit,
         layer_no=layer_no,
         source="semantic_first_alignment",
+        skip_labels=dependency_repair_labels,
     )
     if reported_plan_defects:
         plan_revised.update(reported_plan_defects)
@@ -21094,6 +23709,7 @@ def _semantic_first_failure_request(
         audit,
         layer_no=layer_no,
         source="semantic_first_alignment",
+        skip_labels=dependency_repair_labels,
     )
     if candidate_plan_defects:
         plan_revised.update(candidate_plan_defects)
@@ -21105,6 +23721,9 @@ def _semantic_first_failure_request(
     request_labels = set(rejected)
     failure_route: FailureScopeDecision | None = None
     if lean_rejected:
+        semantic_evidence_by_label = {
+            label: audit.reason_for([label]) for label in lean_rejected
+        }
         tier_by_label = {
             label: candidate.generation_tier
             for candidate in candidates
@@ -21119,16 +23738,18 @@ def _semantic_first_failure_request(
                 if tier_by_label.get(label, "base") == tier
             ]
             if tier_labels:
-                exhausted.update(
-                    _record_retry_failure(
-                        ctx,
-                        tier_labels,
-                        stage="phase1_statement",
-                        attempted_tier=tier,
-                        evidence=reason,
-                        source=f"phase1_layer_{layer_no}_semantic_first",
+                for label in tier_labels:
+                    exhausted.update(
+                        _record_retry_failure(
+                            ctx,
+                            [label],
+                            stage="phase1_statement",
+                            attempted_tier=tier,
+                            evidence=semantic_evidence_by_label[label],
+                            source=f"phase1_layer_{layer_no}_semantic_first",
+                            evidence_identity=audit.failure_identity_for(label),
+                        )
                     )
-                )
         for candidate in candidates:
             local = lean_rejected & set(candidate.labels)
             if local:
@@ -21141,15 +23762,21 @@ def _semantic_first_failure_request(
                     repair_stage="semantic_rejected",
                     required_dependencies=audit_required_dependencies,
                     semantic_status="rejected",
-                    semantic_evidence=reason,
+                    semantic_evidence_by_label=semantic_evidence_by_label,
+                    semantic_evidence_identity_by_label={
+                        label: audit.failure_identity_for(label)
+                        for label in local
+                    },
                 )
         _store_generation_feedback(
             ctx,
             lean_rejected,
             reason,
             source="semantic_first_statement_alignment",
-            evidence_by_label={
-                label: audit.reason_for([label]) for label in lean_rejected
+            evidence_by_label=semantic_evidence_by_label,
+            evidence_identity_by_label={
+                label: audit.failure_identity_for(label)
+                for label in lean_rejected
             },
         )
         _quarantine_labels(ctx, lean_rejected, "statement_alignment")
@@ -21164,6 +23791,11 @@ def _semantic_first_failure_request(
                     evidence_by_label={
                         label: audit.reason_for([label])
                         for label in exhausted
+                    },
+                    evidence_identities_by_label={
+                        label: audit.failure_identity_for(label)
+                        for label in exhausted
+                        if audit.failure_identity_for(label)
                     },
                 )
             )
@@ -21276,6 +23908,14 @@ def _semantic_first_failure_request(
             decomposition_rejected
             | (blueprint_rejected - set(audit_required_dependencies))
         ),
+        evidence_by_label={
+            label: audit.reason_for([label]) for label in request_labels
+        },
+        evidence_identities_by_label={
+            label: audit.failure_identity_for(label)
+            for label in request_labels
+            if audit.failure_identity_for(label)
+        },
     )
 
 
@@ -21285,6 +23925,7 @@ def _revise_exhausted_phase1_contracts(
     evidence: str,
     *,
     policy: str = "post_semantic_rejection",
+    evidence_identities_by_label: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> set[str]:
     """Revise plan contracts that survived generation but failed semantics.
 
@@ -21357,12 +23998,18 @@ def _revise_exhausted_phase1_contracts(
             )
         )
 
+    correction_kwargs = (
+        {"evidence_identities_by_label": evidence_identities_by_label}
+        if evidence_identities_by_label
+        else {}
+    )
     if not _correct_phase1_design_plan(
         ctx,
         eligible,
         evidence,
         escalated=True,
         transition_generation_epoch=False,
+        **correction_kwargs,
     ):
         return set()
 
@@ -21483,6 +24130,7 @@ def _route_exhausted_phase1_semantics(
     source: str,
     failure_kind: str = "semantic",
     evidence_by_label: Mapping[str, str] | None = None,
+    evidence_identities_by_label: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[set[str], set[str], set[str]]:
     """Route Phase-1 retry exhaustion identically for every failure source.
 
@@ -21503,6 +24151,20 @@ def _route_exhausted_phase1_semantics(
         if evidence_by_label is not None
         else _explicit_generation_evidence_by_label(exhausted, evidence)
     )
+    scoped_identities = {
+        label: identity
+        for label, identity in (evidence_identities_by_label or {}).items()
+        if label in exhausted and identity
+    }
+    if failure_kind == "compile":
+        for label, label_evidence in scoped_evidence.items():
+            scoped_identities.setdefault(
+                label,
+                {
+                    "failure_class": "lean_compile",
+                    "error_shape": _lean_error_shape(label_evidence),
+                },
+            )
     actions = {
         label: _semantic_exhaustion_policy(ctx, label)
         for label in exhausted
@@ -21585,8 +24247,16 @@ def _route_exhausted_phase1_semantics(
             )
         )
     exhausted.difference_update(direct)
+    revision_kwargs = (
+        {"evidence_identities_by_label": scoped_identities}
+        if scoped_identities
+        else {}
+    )
     revised = direct | _revise_exhausted_phase1_contracts(
-        ctx, exhausted, evidence
+        ctx,
+        exhausted,
+        evidence,
+        **revision_kwargs,
     )
     unresolved = exhausted - revised
     return decomposition, revised, unresolved
@@ -21620,6 +24290,7 @@ def _route_phase1_precompile_deterministic_failure(
                 attempted_tier=attempted_tier,
                 evidence=evidence,
                 source=f"phase1_layer_{layer_no}_deterministic",
+                evidence_identity=request.evidence_identities_by_label.get(label),
             )
         )
 
@@ -21643,6 +24314,7 @@ def _route_phase1_precompile_deterministic_failure(
             source="precompile_deterministic",
             failure_kind="deterministic",
             evidence_by_label=request.evidence_by_label,
+            evidence_identities_by_label=request.evidence_identities_by_label,
         )
     )
     routed: list[RepairRequest] = []
@@ -21669,6 +24341,11 @@ def _route_phase1_precompile_deterministic_failure(
                     for label in labels
                     if label in request.evidence_by_label
                 },
+                evidence_identities_by_label={
+                    label: request.evidence_identities_by_label[label]
+                    for label in labels
+                    if label in request.evidence_identities_by_label
+                },
             )
         )
 
@@ -21689,6 +24366,11 @@ def _route_phase1_precompile_deterministic_failure(
                     label: request.evidence_by_label[label]
                     for label in labels
                     if label in request.evidence_by_label
+                },
+                evidence_identities_by_label={
+                    label: request.evidence_identities_by_label[label]
+                    for label in labels
+                    if label in request.evidence_identities_by_label
                 },
             )
         )
@@ -21711,6 +24393,11 @@ def _route_phase1_precompile_deterministic_failure(
                     label: request.evidence_by_label[label]
                     for label in route.failed_labels
                     if label in request.evidence_by_label
+                },
+                evidence_identities_by_label={
+                    label: request.evidence_identities_by_label[label]
+                    for label in route.failed_labels
+                    if label in request.evidence_identities_by_label
                 },
             )
         )
@@ -21989,10 +24676,19 @@ def _run_phase1(
         return sections
     stage = _contract_work_stage(ctx)
 
+    # Source markers and the configured open-claim policy are authoritative.
+    # Resolve them before paying for advisory planning or Lean generation.
+    source_readiness_request = _phase1_source_readiness_request(ctx, pending)
+    if source_readiness_request is not None:
+        raise source_readiness_request
+
     # The global pass coordinates semantics and vocabulary only. Exact typed
     # contracts are created atomically with each Phase-1 Lean candidate below;
     # this avoids a separate typed planning phase and its correction loop.
     _ensure_phase1_semantic_plan(ctx, pending)
+    advisory_readiness_request = _phase1_advisory_readiness_request(ctx, pending)
+    if advisory_readiness_request is not None:
+        raise advisory_readiness_request
     # Resumed state from the legacy typed planner remains valid and keeps its
     # historical closure behavior. Fresh compact-plan runs have no typed
     # entries yet; their closure starts when each candidate realizes one.
@@ -22121,6 +24817,9 @@ def _run_phase1(
                 index += len(group)
 
             groups = _partition_phase1_groups_by_dependency_context(
+                ctx, groups, sections
+            )
+            groups = _coalesce_phase1_semantic_correction_waves(
                 ctx, groups, sections
             )
             worker_count = max(1, min(getattr(ctx, "workers", 1), len(groups)))
@@ -22279,19 +24978,34 @@ def _run_phase1(
                             if len(part) == 1
                             else "base"
                         )
-                        exhausted = _record_retry_failure(
-                            ctx,
-                            failed_labels,
-                            stage="phase1_statement",
-                            attempted_tier=attempted_tier,
-                            evidence=request.evidence,
-                            source="phase1_top_down",
-                        )
+                        exhausted: set[str] = set()
+                        for failed_label in failed_labels:
+                            exhausted.update(
+                                _record_retry_failure(
+                                    ctx,
+                                    [failed_label],
+                                    stage="phase1_statement",
+                                    attempted_tier=attempted_tier,
+                                    evidence=request.evidence_by_label.get(
+                                        failed_label, request.evidence
+                                    ),
+                                    source="phase1_top_down",
+                                    evidence_identity=(
+                                        request.evidence_identities_by_label.get(
+                                            failed_label
+                                        )
+                                    ),
+                                )
+                            )
                         _store_generation_feedback(
                             ctx,
                             failed_labels,
                             request.evidence,
                             source="phase1_top_down_retry",
+                            evidence_by_label=request.evidence_by_label,
+                            evidence_identity_by_label=(
+                                request.evidence_identities_by_label
+                            ),
                         )
                         if exhausted and len(part) == 1:
                             # Exhausting translation attempts is not evidence
@@ -22337,7 +25051,17 @@ def _phase1_recompile_environment(ctx: Ctx, sections: list[Section]) -> set[str]
     manifest, command, and imported generated interfaces must all match. One
     final aggregate import check proves the reused objects coexist.
     """
-    active = [item for item in sections if not item.deferred]
+    # An integration failure can clear every accepted label from a section
+    # while retaining the file as retry input.  Such a section is not part of
+    # the frozen environment and must not be compiled or imported here.  Doing
+    # so repeatedly checks stale imports, clears zero additional labels, and
+    # leaves the outer loop with exactly the same state forever.
+    active = [
+        item
+        for item in sections
+        if not item.deferred
+        and (item.refined_labels is None or bool(item.refined_labels))
+    ]
     by_module = {sec.module: sec for sec in active}
     ordered: list[Section] = []
     visiting: set[str] = set()
@@ -22687,6 +25411,16 @@ def _run_phase2_whole_node_transaction(
         else _generation_feedback_for(ctx, [label])
     )
     candidate_code = str(stored.get("code") or "") if stored else ""
+    last_failure_kind = (
+        str(stored.get("failure_kind") or "validation")
+        if stored
+        else "validation"
+    )
+    last_failure_identity = (
+        copy.deepcopy(stored.get("failure_identity"))
+        if stored and isinstance(stored.get("failure_identity"), dict)
+        else {}
+    )
     if (
         stored
         and candidate_code.strip()
@@ -22713,8 +25447,15 @@ def _run_phase2_whole_node_transaction(
             complete_bodies=True,
         )
         last_evidence = classified
+        last_failure_kind = failure_class
+        last_failure_identity = {
+            "source": "object_gate",
+            "failure_class": failure_class,
+            "error_shape": _lean_error_shape(classified),
+        }
         stored["evidence"] = classified[-12000:]
         stored["failure_kind"] = failure_class
+        stored["failure_identity"] = copy.deepcopy(last_failure_identity)
         _record(
             ctx.telemetry,
             "phase2_legacy_object_timeout_classified",
@@ -22769,7 +25510,11 @@ def _run_phase2_whole_node_transaction(
                         + "\0"
                         + _candidate_hash(candidate_code)
                         + "\0"
-                        + hashlib.sha256(last_evidence.encode("utf-8")).hexdigest()
+                        + _diagnostic_failure_signature(
+                            kind=last_failure_kind,
+                            text=last_evidence,
+                            identity=last_failure_identity,
+                        )
                         + "\0"
                         + ctx.escalation_runner_spec
                     ).encode("utf-8")
@@ -22862,6 +25607,11 @@ def _run_phase2_whole_node_transaction(
             last_evidence = result.error or (
                 f"{tier} {action} call returned {result.status}"
             )
+            last_failure_kind = "model_call"
+            last_failure_identity = {
+                "source": "model_call",
+                "status": result.status,
+            }
             continue
         try:
             parsed, decl_texts, delivered_code = _phase2_complete_candidate(
@@ -22869,8 +25619,14 @@ def _run_phase2_whole_node_transaction(
             )
         except ValueError as exc:
             last_evidence = f"Invalid complete Lean response: {exc}"
+            last_failure_kind = "response_format"
+            last_failure_identity = {
+                "source": "response_format",
+                "error_type": type(exc).__name__,
+            }
             continue
         failure_evidence: list[str] = []
+        failure_identities: list[dict[str, Any]] = []
         failure_candidate_code: list[str] = []
         try:
             added = _freeze_section_from_code(
@@ -22886,6 +25642,7 @@ def _run_phase2_whole_node_transaction(
                 complete_bodies=True,
                 generation_tier=tier,
                 failure_evidence=failure_evidence,
+                failure_identities=failure_identities,
                 failure_candidate_code=failure_candidate_code,
                 lean_timeout=CANDIDATE_LEAN_CHECK_TIMEOUT,
             )
@@ -22908,6 +25665,12 @@ def _run_phase2_whole_node_transaction(
         last_evidence = "\n".join(failure_evidence)[-12000:] or (
             "Complete declaration failed deterministic, Lean, or alignment gates."
         )
+        last_failure_kind = _phase2_candidate_failure_kind(last_evidence)
+        last_failure_identity = (
+            copy.deepcopy(failure_identities[-1])
+            if failure_identities
+            else {}
+        )
         candidate_code = (
             failure_candidate_code[-1]
             if failure_candidate_code
@@ -22918,15 +25681,19 @@ def _run_phase2_whole_node_transaction(
             label,
             candidate_code,
             evidence=last_evidence,
-            failure_kind=_phase2_candidate_failure_kind(last_evidence),
+            failure_kind=last_failure_kind,
             tier=tier,
             source=f"phase2_{action}_validation",
+            failure_identity=last_failure_identity,
         )
         _store_generation_feedback(
             ctx,
             [label],
             last_evidence,
             source="phase2_whole_node_retry",
+            evidence_identity_by_label={
+                label: last_failure_identity
+            } if last_failure_identity else None,
         )
 
     _record(
@@ -23340,6 +26107,39 @@ def _prioritized_phase2_declaration_work(
         getattr(ctx, "phase2_prerequisite_labels", set())
     )
     return priority or set(pending)
+
+
+def _phase2_declaration_work_labels(
+    ctx: Ctx,
+    sections: Iterable[Section],
+    contract_pending: Iterable[str],
+) -> set[str]:
+    """Return missing declarations without republishing frozen definitions.
+
+    A Phase-2 repair may introduce a new helper while its proof is blocked on
+    an older frozen ``def`` whose body is still ``sorry``.  The helper remains
+    contract-pending, but regenerating it cannot make progress until that
+    provider is implemented.  A missing/invalidated provider belongs in the
+    complete-node declaration path.  An already-frozen provider does not: the
+    normal Phase-2 body scheduler must replace its ``sorry`` in the owning
+    section and rebuild that section's object.  Publishing the frozen provider
+    again in a new section creates a duplicate Lean declaration.
+    """
+    pending = set(contract_pending)
+    if not bool(getattr(ctx, "phase2_started", False)):
+        return pending
+    prerequisites = set(getattr(ctx, "phase2_prerequisite_labels", set()))
+    missing_prerequisites = prerequisites & pending
+    if missing_prerequisites:
+        return missing_prerequisites
+    deferred_frozen_prerequisites = prerequisites & set(
+        _phase2_unimplemented_body_kinds(ctx, sections)
+    )
+    if deferred_frozen_prerequisites:
+        # Leave unrelated declaration work queued. The proof scheduler below
+        # will select this provider through _phase2_prerequisite_frontier.
+        return set()
+    return _prioritized_phase2_declaration_work(ctx, pending)
 
 
 def _route_phase2_proof_outcomes(
@@ -24284,32 +27084,29 @@ def _invalidate_after_repair(
                 invalidated |= set(sec.labels)
                 _discard_section_artifacts(sec.path)
                 continue
-            first_changed = min(
-                index for index, label in enumerate(sec.labels) if label in hit
-            )
-            prefix = [
-                label
-                for label in sec.labels[:first_changed]
-                if label not in changed
-            ]
-            invalidated |= set(sec.labels) - set(prefix)
-            if not prefix:
+            retained = [label for label in sec.labels if label not in affected]
+            invalidated |= affected
+            if not retained:
                 _discard_section_artifacts(sec.path)
                 continue
-            prefix_names = {_lean_name(label) for label in prefix}
+            retained_names = {_lean_name(label) for label in retained}
             parsed.decls = [
-                decl for decl in parsed.decls if decl.name in prefix_names
+                decl for decl in parsed.decls if decl.name in retained_names
             ]
-            sec.labels = prefix
+            sec.labels = retained
             if sec.refined_labels is not None:
-                sec.refined_labels &= set(prefix)
+                sec.refined_labels &= set(retained)
             _write_section(sec, parsed)
             ok, _output = _check_lean(sec.path, lean_command)
             if ok and _compile_section_olean(sec, lean_command, kept).ok:
                 sec.deferred = False
                 kept.append(sec)
             else:
-                invalidated |= set(prefix)
+                # A retained declaration that still mentions the edited
+                # contract exposes a missing dependency edge or an unowned
+                # local coupling. Lean, rather than file order, decides that
+                # it cannot be reused.
+                invalidated |= set(retained)
                 _discard_section_artifacts(sec.path)
             continue
         sec.deferred = True
@@ -24677,6 +27474,11 @@ Rules:
 - If a proof needs an unstated dependency, add or correct `\\uses{{...}}`.
 - If a statement is mathematically wrong compared with the paper, correct the
   statement in the blueprint.
+- When readiness evidence cites `\\notready`, do not merely delete the marker.
+  First supply the missing mathematical content. A theorem-like replacement
+  must include its complete blueprint proof; a definition-like replacement
+  must explicitly define the interface needed by its consumers. Remove
+  `\\notready` only in that completed replacement.
 - Do not include `\\begin{{document}}`, `\\end{{document}}`, Markdown fences,
   commentary outside the JSON object, or a complete `content.tex` file.
 
@@ -24872,6 +27674,11 @@ def _post_repair_boundary_prompt(ctx: Ctx, labels: list[str]) -> str:
         if label in ctx.nodes
     ]
     closure_required = bool(pending.get("require_component_closure"))
+    provider_candidates = (
+        _phase2_provider_contract_candidates(ctx, roots)
+        if closure_required
+        else set()
+    )
     changed_blocks = []
     for label in labels:
         node = ctx.nodes[label]
@@ -24944,7 +27751,7 @@ Return exactly one JSON object:
     {{
       "node": "existing blueprint label",
       "severity": "reject",
-      "classification": "missing_statement_dependency | blueprint_contract_defect | needs_decomposition",
+      "classification": "missing_statement_dependency | blueprint_contract_defect | provider_contract_defect | needs_decomposition",
       "reason": "specific mathematical defect in the repaired statement",
       "required_dependencies": ["existing label needed by the public statement"],
       "missing_helpers": ["helper statement needed to express the claim"]
@@ -24960,13 +27767,25 @@ Rules:
 - Do not request a dependency merely because its theorem is useful in a proof.
 - Use `blueprint_contract_defect` only for concrete missing or contradictory
   mathematical content introduced or left unresolved by the repair.
+- Use `provider_contract_defect` only when the changed node correctly relies on
+  an EXISTING dependency whose unchanged public contract lacks specific
+  mathematical content required by the blueprint proof. Name that dependency,
+  not the changed consumer. Eligible provider labels are listed below. This
+  classification requests a separate provider-owned transaction; it must not
+  be used for a Lean implementation error or a merely useful proof lemma.
 - Use `needs_decomposition` only when the repaired public claim still bundles
   genuinely separate obligations that require explicit blueprint helper nodes,
   or when a Phase 2 helper component does not yet close the original repaired
   root's blueprint proof.
 - Never suggest weakening, deleting, or replacing a claim with a placeholder.
-- Every issue must name one of the changed labels. Every required dependency
-  must be an existing label from the label inventory.
+- Every issue except `provider_contract_defect` must name one of the changed
+  labels. A `provider_contract_defect` must name one of the eligible unchanged
+  providers below. Every required dependency must be an existing label from
+  the label inventory.
+
+Eligible unchanged provider contracts from the original repair root's existing
+blueprint dependency closure:
+{chr(10).join(f'- {label}' for label in sorted(provider_candidates)) or '- (none)'}
 
 Changed statements:
 {chr(10).join(changed_blocks)}
@@ -24984,6 +27803,25 @@ Relevant paper excerpt:
 """
 
 
+def _phase2_provider_contract_candidates(ctx: Ctx, roots: Iterable[str]) -> set[str]:
+    """Existing dependencies that may own a Phase-2 boundary defect.
+
+    Provider ownership is intentionally narrower than graph proximity: only a
+    dependency already reachable from an original repair root can be named.
+    Consumers, siblings, invented labels, and newly proposed graph edges never
+    gain edit authority through this route.
+    """
+    root_set = {str(label) for label in roots if str(label) in ctx.nodes}
+    return {
+        dependency
+        for root in root_set
+        for dependency in _transitive_dependencies(ctx.nodes, root)
+        if dependency in ctx.nodes
+        and dependency not in root_set
+        and not ctx.nodes[dependency].mathlibok
+    }
+
+
 def _audit_post_repair_boundary(
     ctx: Ctx, labels: list[str]
 ) -> RepairBoundaryAuditOutcome:
@@ -24996,6 +27834,11 @@ def _audit_post_repair_boundary(
     )
     component_closure = bool(
         ctx.repair_boundary_pending.get("require_component_closure")
+    )
+    provider_candidates = (
+        _phase2_provider_contract_candidates(ctx, repair_roots)
+        if component_closure
+        else set()
     )
     prompt = _post_repair_boundary_prompt(ctx, labels)
     result = _call_model(
@@ -25056,15 +27899,24 @@ def _audit_post_repair_boundary(
     label_set = set(labels)
     required: dict[str, set[str]] = {}
     repair_labels: set[str] = set()
+    provider_repair_labels: set[str] = set()
     helpers: list[str] = []
     formatted: list[str] = []
     for issue in rejected_issues:
         label = str(issue.get("node") or "")
-        if label not in label_set:
-            continue
         classification = str(issue.get("classification") or "")
+        provider_issue = (
+            classification == "provider_contract_defect"
+            and label in provider_candidates
+            and label not in label_set
+        )
+        if label not in label_set and not provider_issue:
+            continue
         reason = str(issue.get("reason") or "unspecified repair defect").strip()
         formatted.append(f"{label} [{classification or 'unclassified'}]: {reason}")
+        if provider_issue:
+            provider_repair_labels.add(label)
+            continue
         dependencies = {
             str(dep).strip()
             for dep in issue.get("required_dependencies") or []
@@ -25109,6 +27961,7 @@ def _audit_post_repair_boundary(
             for label, dependencies in required.items()
         },
         decomposition_helpers=list(dict.fromkeys(helpers)),
+        provider_repair_labels=sorted(provider_repair_labels),
         issue_count=len(formatted),
         repair_roots=repair_roots,
         component_changed_labels=component_changed,
@@ -25120,6 +27973,7 @@ def _audit_post_repair_boundary(
         tuple(sorted(repair_labels)),
         required,
         tuple(dict.fromkeys(helpers)),
+        tuple(sorted(provider_repair_labels)),
     )
 
 
@@ -25131,6 +27985,43 @@ def _pending_repair_boundary_request(ctx: Ctx) -> RepairRequest | None:
 
     mode = str(pending.get("mode") or "audit")
     if mode == "repair":
+        provider_repair_labels = [
+            label
+            for label in pending.get("provider_repair_labels") or []
+            if label in ctx.nodes
+            and bool((pending.get("provider_statement_fps") or {}).get(label))
+            and (pending.get("provider_statement_fps") or {}).get(label)
+            == ctx.stmt_fps.get(label)
+        ]
+        if provider_repair_labels:
+            request = RepairRequest(
+                str(
+                    pending.get("evidence")
+                    or "A dependency provider contract is insufficient."
+                ),
+                provider_repair_labels,
+                section_labels=provider_repair_labels,
+                context_labels=list(
+                    dict.fromkeys(
+                        [
+                            *provider_repair_labels,
+                            *[str(label) for label in pending.get("repair_roots") or []],
+                        ]
+                    )
+                ),
+                authorizes_blueprint_repair=True,
+                model_repair_labels=provider_repair_labels,
+                evidence_by_label={
+                    label: str(pending.get("evidence") or "")[-12000:]
+                    for label in provider_repair_labels
+                },
+                provider_contract_labels=provider_repair_labels,
+                reschedule_labels=[
+                    str(label) for label in pending.get("repair_roots") or []
+                ],
+            )
+            return request
+
         stored_required = {
             label: {
                 dependency
@@ -25235,6 +28126,11 @@ def _pending_repair_boundary_request(ctx: Ctx) -> RepairRequest | None:
         "mode": "repair",
         "evidence": outcome.evidence,
         "repair_labels": list(outcome.repair_labels),
+        "provider_repair_labels": list(outcome.provider_repair_labels),
+        "provider_statement_fps": {
+            label: ctx.stmt_fps.get(label)
+            for label in outcome.provider_repair_labels
+        },
         "required_dependencies": {
             label: set(dependencies)
             for label, dependencies in outcome.required_dependencies.items()
@@ -25260,6 +28156,10 @@ def _apply_required_dependency_edges(
     cycle_findings = _cyclic_dependency_repair_findings(ctx.nodes, normalized)
     ctx.last_dependency_edge_rejections = cycle_findings
     if cycle_findings:
+        rejected_dependency_observations = {
+            label: set(rejected)
+            for label, rejected in cycle_findings.items()
+        }
         for label, rejected in cycle_findings.items():
             normalized[label].difference_update(rejected)
         normalized = {label: deps for label, deps in normalized.items() if deps}
@@ -25281,6 +28181,9 @@ def _apply_required_dependency_edges(
                 label: dict(rejected)
                 for label, rejected in cycle_findings.items()
             },
+        )
+        _clear_phase1_dependency_observations(
+            ctx, rejected_dependency_observations
         )
     if not normalized:
         return set()
@@ -25328,6 +28231,7 @@ def _apply_required_dependency_edges(
         return set()
 
     changed = set(added_by_label)
+    _clear_phase1_dependency_observations(ctx, normalized)
     _record(
         ctx.telemetry,
         "blueprint_dependency_edge_repair",
@@ -25349,6 +28253,269 @@ def _apply_required_dependency_edges(
     return changed
 
 
+@dataclass(frozen=True)
+class _ScopedBlueprintRepairProposal:
+    labels: tuple[str, ...]
+    response_text: str
+    duration_s: float
+    repaired_json_backslashes: int
+
+
+def _run_scoped_blueprint_repair_proposal(
+    ctx: Ctx,
+    labels: list[str],
+    evidence: str,
+    *,
+    trial: int,
+    escalation_note: str,
+) -> _ScopedBlueprintRepairProposal:
+    """Run and parse one read-only proposal without mutating the draft."""
+    prompt = _scoped_blueprint_repair_prompt(
+        ctx,
+        labels,
+        evidence,
+        trial,
+        escalation_note=escalation_note,
+        model_timeout_s=ctx.hard_timeout,
+    )
+    prompt_artifact = _store_text(
+        ctx.telemetry, "prompt_blueprint_repair", prompt
+    )
+    runner = _make_runner(
+        ctx.escalation_runner_spec,
+        timeout=ctx.hard_timeout,
+        readonly=True,
+        effort=ctx.escalation_effort,
+        with_skill=True,
+    )
+    started = time.monotonic()
+    try:
+        result = runner.run(prompt, cwd=REPO_ROOT, retries=0)
+    except RunnerError as exc:
+        duration = time.monotonic() - started
+        status = _runner_failure_status(exc)
+        _record(
+            ctx.telemetry,
+            "model_call",
+            purpose="blueprint_repair",
+            labels=labels,
+            status=status,
+            duration_s=duration,
+            timeout_s=ctx.hard_timeout,
+            backend=runner.backend_name,
+            model=runner.model,
+            prompt=prompt_artifact.to_event(REPO_ROOT),
+            error=str(exc),
+            environment_error=is_environment_error(exc),
+            transport_error=status == "transport_exhausted",
+            partitioned=True,
+        )
+        raise
+    duration = time.monotonic() - started
+    response_artifact = _store_text(
+        ctx.telemetry, "response_blueprint_repair", result.text
+    )
+    _record(
+        ctx.telemetry,
+        "model_call",
+        purpose="blueprint_repair",
+        labels=labels,
+        status="success",
+        duration_s=duration,
+        timeout_s=ctx.hard_timeout,
+        backend=runner.backend_name,
+        model=runner.model,
+        prompt=prompt_artifact.to_event(REPO_ROOT),
+        response=response_artifact.to_event(REPO_ROOT),
+        partitioned=True,
+    )
+    payload, repaired_backslashes = _extract_json_object_with_key(
+        result.text, "replacements"
+    )
+    replacements = payload.get("replacements")
+    if not isinstance(replacements, Mapping):
+        raise ValueError("repair JSON did not include a replacements object")
+    returned = {str(label).strip() for label in replacements}
+    expected = set(labels)
+    if returned != expected:
+        missing = sorted(expected - returned)
+        unexpected = sorted(returned - expected)
+        details = []
+        if missing:
+            details.append("missing target(s): " + ", ".join(missing))
+        if unexpected:
+            details.append("unauthorized target(s): " + ", ".join(unexpected))
+        raise ValueError(
+            "scoped repair target mismatch (" + "; ".join(details) + ")"
+        )
+    return _ScopedBlueprintRepairProposal(
+        labels=tuple(labels),
+        response_text=result.text,
+        duration_s=duration,
+        repaired_json_backslashes=repaired_backslashes,
+    )
+
+
+def _normalized_parallel_repair_components(
+    labels: list[str], components: Iterable[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Return disjoint component scopes only when they cover the transaction."""
+    expected = set(labels)
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for component in components:
+        component_labels = list(
+            dict.fromkeys(
+                str(label)
+                for label in component.get("labels") or []
+                if str(label) in expected
+            )
+        )
+        if not component_labels or seen.intersection(component_labels):
+            return []
+        seen.update(component_labels)
+        normalized.append(
+            {
+                "labels": component_labels,
+                "evidence": str(component.get("evidence") or "")[-24000:],
+            }
+        )
+    if seen != expected or len(normalized) < 2:
+        return []
+    return normalized
+
+
+def _repair_blueprint_components(
+    ctx: Ctx,
+    evidence: str,
+    labels: list[str],
+    *,
+    trial: int,
+    max_trials: int,
+    escalation_note: str,
+    repair_runner_agent: bool,
+    decomposition_roots: Iterable[str] = (),
+    repair_components: Iterable[Mapping[str, Any]] = (),
+) -> set[str]:
+    """Propose independent repairs concurrently, then commit once atomically."""
+    components = _normalized_parallel_repair_components(labels, repair_components)
+    if not components:
+        return _repair_blueprint(
+            ctx,
+            evidence,
+            labels,
+            trial=trial,
+            max_trials=max_trials,
+            escalation_note=escalation_note,
+            repair_runner_agent=repair_runner_agent,
+            decomposition_roots=decomposition_roots,
+        )
+
+    worker_count = max(1, min(ctx.workers, len(components)))
+    _log(
+        f"==> Blueprint repair {trial}/{max_trials}: proposing "
+        f"{len(components)} independent component(s) with {worker_count} worker(s)"
+    )
+    _record(
+        ctx.telemetry,
+        "blueprint_repair_partition_started",
+        labels=labels,
+        components=[component["labels"] for component in components],
+        workers=worker_count,
+        atomic_commit=True,
+    )
+    started = time.monotonic()
+    proposals: list[_ScopedBlueprintRepairProposal] = []
+    try:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=worker_count
+        ) as pool:
+            futures = [
+                pool.submit(
+                    _run_scoped_blueprint_repair_proposal,
+                    ctx,
+                    component["labels"],
+                    component["evidence"] or evidence,
+                    trial=trial,
+                    escalation_note=escalation_note,
+                )
+                for component in components
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                proposals.append(future.result())
+    except (RunnerError, ValueError) as exc:
+        _record(
+            ctx.telemetry,
+            "blueprint_repair_partition_result",
+            labels=labels,
+            status="proposal_failed",
+            duration_s=time.monotonic() - started,
+            reason=str(exc),
+            atomic_commit=True,
+        )
+        if isinstance(exc, RunnerError) and (
+            is_environment_error(exc) or is_transient_error(exc)
+        ):
+            raise
+        _log(f"  partitioned blueprint repair produced no draft edit: {exc}")
+        return set()
+
+    replacements: dict[str, str] = {}
+    notes: list[str] = []
+    repaired_backslashes = 0
+    for proposal in proposals:
+        payload, repaired = _extract_json_object_with_key(
+            proposal.response_text, "replacements"
+        )
+        raw = payload.get("replacements")
+        if not isinstance(raw, Mapping):
+            return set()
+        overlap = set(replacements).intersection(str(label) for label in raw)
+        if overlap:
+            _record(
+                ctx.telemetry,
+                "blueprint_repair_partition_result",
+                labels=labels,
+                status="overlap_rejected",
+                overlapping_labels=sorted(overlap),
+                atomic_commit=True,
+            )
+            return set()
+        replacements.update({str(label): str(value) for label, value in raw.items()})
+        note = str(payload.get("notes") or "").strip()
+        if note:
+            notes.append(note)
+        repaired_backslashes += repaired
+
+    merged_response = json.dumps(
+        {"replacements": replacements, "notes": "\n".join(notes)}
+    )
+    _record(
+        ctx.telemetry,
+        "blueprint_repair_partition_result",
+        labels=labels,
+        status="proposals_merged",
+        duration_s=time.monotonic() - started,
+        component_durations_s={
+            ",".join(proposal.labels): proposal.duration_s
+            for proposal in proposals
+        },
+        repaired_json_backslashes=repaired_backslashes,
+        atomic_commit=True,
+    )
+    return _repair_blueprint(
+        ctx,
+        evidence,
+        labels,
+        trial=trial,
+        max_trials=max_trials,
+        escalation_note=escalation_note,
+        repair_runner_agent=repair_runner_agent,
+        decomposition_roots=decomposition_roots,
+        prepared_response=merged_response,
+    )
+
+
 def _repair_blueprint(
     ctx: Ctx,
     evidence: str,
@@ -25359,6 +28526,7 @@ def _repair_blueprint(
     escalation_note: str,
     repair_runner_agent: bool,
     decomposition_roots: Iterable[str] = (),
+    prepared_response: str | None = None,
 ) -> set[str]:
     """Run one transactional blueprint-repair attempt.
 
@@ -25386,14 +28554,16 @@ def _repair_blueprint(
         model_timeout_s=ctx.hard_timeout,
     )
     prompt_artifact = _store_text(ctx.telemetry, "prompt_blueprint_repair", prompt)
+    runner = None
     try:
-        runner = _make_runner(
-            ctx.escalation_runner_spec,
-            timeout=ctx.hard_timeout,
-            readonly=True,
-            effort=ctx.escalation_effort,
-            with_skill=True,
-        )
+        if prepared_response is None:
+            runner = _make_runner(
+                ctx.escalation_runner_spec,
+                timeout=ctx.hard_timeout,
+                readonly=True,
+                effort=ctx.escalation_effort,
+                with_skill=True,
+            )
     except RunnerError as exc:
         _record(
             ctx.telemetry,
@@ -25424,7 +28594,13 @@ def _repair_blueprint(
         return set()
     started = time.monotonic()
     try:
-        result = runner.run(prompt, cwd=REPO_ROOT, retries=0)
+        if prepared_response is None:
+            assert runner is not None
+            result_text = runner.run(
+                prompt, cwd=REPO_ROOT, retries=0
+            ).text
+        else:
+            result_text = prepared_response
     except RunnerError as exc:
         duration = time.monotonic() - started
         status = _runner_failure_status(exc)
@@ -25436,8 +28612,8 @@ def _repair_blueprint(
             status=status,
             duration_s=duration,
             timeout_s=ctx.hard_timeout,
-            backend=runner.backend_name,
-            model=runner.model,
+            backend=runner.backend_name if runner is not None else "",
+            model=runner.model if runner is not None else "",
             prompt=prompt_artifact.to_event(REPO_ROOT),
             error=str(exc),
             environment_error=is_environment_error(exc),
@@ -25487,23 +28663,27 @@ def _repair_blueprint(
             reason=str(exc),
         )
         return set()
-    _record(
-        ctx.telemetry,
-        "model_call",
-        purpose="blueprint_repair",
-        labels=labels,
-        status="success",
-        duration_s=time.monotonic() - started,
-        timeout_s=ctx.hard_timeout,
-        backend=runner.backend_name,
-        model=runner.model,
-        prompt=prompt_artifact.to_event(REPO_ROOT),
-        response=_store_text(ctx.telemetry, "response_blueprint_repair", result.text).to_event(REPO_ROOT),
-    )
+    if prepared_response is None:
+        assert runner is not None
+        _record(
+            ctx.telemetry,
+            "model_call",
+            purpose="blueprint_repair",
+            labels=labels,
+            status="success",
+            duration_s=time.monotonic() - started,
+            timeout_s=ctx.hard_timeout,
+            backend=runner.backend_name,
+            model=runner.model,
+            prompt=prompt_artifact.to_event(REPO_ROOT),
+            response=_store_text(
+                ctx.telemetry, "response_blueprint_repair", result_text
+            ).to_event(REPO_ROOT),
+        )
     try:
         scoped_metadata = _write_scoped_blueprint_repair_to(
             content_path,
-            result.text,
+            result_text,
             original_content=before_content,
             requested_labels=labels,
             existing_blocks=before_blocks,
@@ -25517,11 +28697,51 @@ def _repair_blueprint(
             runner_mode="agent" if repair_runner_agent else "api",
             replacement_labels=scoped_metadata["replacement_labels"],
             new_helper_labels=scoped_metadata["new_helper_labels"],
+            repaired_json_backslashes=scoped_metadata[
+                "repaired_json_backslashes"
+            ],
         )
         validation = _validate_draft(ctx)
         if not validation.ok:
             print_result(validation)
             raise ValueError("blueprint repair produced an invalid blueprint")
+        conjecture_policy = getattr(ctx, "conjecture_policy", "record")
+        readiness_labels = [
+            label
+            for label in labels
+            if label in before_nodes
+            and not (
+                conjecture_policy == "record"
+                and _is_conjecture_node(label, before_nodes[label])
+            )
+            and (
+                bool(getattr(before_nodes[label], "notready", False))
+                or (
+                    conjecture_policy == "attempt"
+                    and _is_conjecture_node(label, before_nodes[label])
+                    and not _blueprint_block_has_proof(
+                        str(before_blocks.get(label, ""))
+                    )
+                )
+            )
+        ]
+        readiness_findings = (
+            _readiness_repair_postcondition_findings(
+                before_nodes=before_nodes,
+                after_nodes=validation.nodes,
+                before_blocks=before_blocks,
+                after_blocks=_node_tex_blocks(validation.nodes),
+                labels=readiness_labels,
+                conjecture_policy=conjecture_policy,
+            )
+            if readiness_labels
+            else []
+        )
+        if readiness_findings:
+            raise ValueError(
+                "blueprint readiness repair did not resolve its source contract:\n- "
+                + "\n- ".join(readiness_findings)
+            )
         orientation_findings = _decomposition_orientation_findings(
             before_nodes, validation.nodes, decomposition_roots
         )
@@ -26110,7 +29330,7 @@ def _print_pipeline_progress(
         f"Phase 2 Lean implementations {len(phase2_implemented)}/{len(phase2_required)} complete; "
         f"overall {len(completed)}/{len(ctx.nodes)} complete "
         f"({len(verified)} verified, {len(recorded)} open conjectures recorded); "
-        f"repairs {repair_trials}/{max_trials}",
+        f"repair/retries {repair_trials}/{max_trials}",
         flush=True,
     )
     _record(
@@ -26162,14 +29382,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--planner-tier",
         choices=("base", "escalation"),
-        default="base",
+        default="escalation",
         help=(
             "Model tier for the compact Phase-1 semantic planner: use "
-            "--runner (base, default) or --escalation-runner"
+            "--runner (base) or --escalation-runner (default)"
         ),
     )
     parser.add_argument("--paper", help="Optional original paper path/URL/text")
-    parser.add_argument("--max-trials", type=int, default=100, help="Blueprint-repair budget")
+    parser.add_argument(
+        "--max-trials",
+        type=int,
+        default=100,
+        help="Shared outer repair/retry budget",
+    )
     parser.add_argument("--timeout", type=int, default=300, help="Base per-model-call timeout (s)")
     parser.add_argument("--hard-timeout", type=int, default=600, help="Escalated per-call timeout (s)")
     parser.add_argument("--section-size", type=int, default=DEFAULT_SECTION_SIZE)
@@ -26206,21 +29431,34 @@ def main(argv: list[str] | None = None) -> int:
     resume_group = parser.add_mutually_exclusive_group()
     resume_group.add_argument(
         "--continue",
-        dest="continue_run",
-        action="store_true",
-        default=True,
+        dest="resume_mode",
+        action="store_const",
+        const="latest",
+        default="latest",
         help="Reuse compatible frozen statements and accepted proofs (default)",
     )
     resume_group.add_argument(
+        "--continue-phase1",
+        dest="resume_mode",
+        action="store_const",
+        const="phase1",
+        help=(
+            "Discard later unpublished Phase 2 changes and restart from the "
+            "immutable snapshot saved when Phase 1 completed"
+        ),
+    )
+    resume_group.add_argument(
         "--fresh",
-        dest="continue_run",
-        action="store_false",
+        dest="resume_mode",
+        action="store_const",
+        const="fresh",
         help="Discard generated fast-pipeline state and start from scratch",
     )
     parser.add_argument("--no-ladder", dest="ladder", action="store_false", help="Skip the free tactic ladder")
     parser.add_argument("--no-build", dest="build", action="store_false", help="Skip the site rebuild")
     parser.add_argument("--lean-command", help="Override checker command, e.g. 'lake env lean'")
     args = parser.parse_args(argv)
+    args.continue_run = args.resume_mode != "fresh"
     default_runner, default_escalation_runner = _default_fast_runner_specs()
     runner = args.runner or default_runner
     escalation_runner = args.escalation_runner or (runner if args.runner else default_escalation_runner)
@@ -26259,6 +29497,7 @@ def main(argv: list[str] | None = None) -> int:
         base_effort=args.reasoning_effort,
         escalation_effort=args.escalation_effort,
         continue_run=args.continue_run,
+        resume_mode=args.resume_mode,
         ladder=args.ladder,
     )
 
@@ -26280,6 +29519,9 @@ def main(argv: list[str] | None = None) -> int:
             f"{preflight.message}\n{(preflight.stderr or preflight.stdout).strip()}"
         )
     print(f"  {preflight.message} ({preflight.elapsed_s:.1f}s)", flush=True)
+
+    if args.resume_mode == "phase1":
+        _restore_phase1_checkpoint(args.name)
 
     prior_draft = _draft_blueprint_dir(args.name)
     draft_was_resumed = bool(
@@ -26368,6 +29610,7 @@ def main(argv: list[str] | None = None) -> int:
             SCRATCH_DIR / args.name / "phase2-repair-transactions",
             ignore_errors=True,
         )
+        shutil.rmtree(_phase1_checkpoint_dir(args.name), ignore_errors=True)
 
     sections: list[Section] = _load_state(ctx, lean_command) if args.continue_run else []
     _prune_stale_generated(ctx, sections)
@@ -26410,7 +29653,7 @@ def main(argv: list[str] | None = None) -> int:
         f"- Phase 1 statement order: `{PHASE1_STATEMENT_ORDER}`",
         f"- Phase 2 implementation order: `{PHASE2_PROOF_ORDER}`",
         f"- conjecture policy: `{args.conjecture_policy}`",
-        f"- blueprint repair budget: `{args.max_trials}`",
+        f"- repair/retry budget: `{args.max_trials}`",
         f"- library candidates: `{len(library_candidates)}`",
         "",
     ]
@@ -26436,6 +29679,12 @@ def main(argv: list[str] | None = None) -> int:
             repair_boundary_active = bool(ctx.repair_boundary_pending)
             boundary_request = _pending_repair_boundary_request(ctx)
             if boundary_request is not None:
+                if boundary_request.provider_contract_labels:
+                    sections = _reroute_active_phase2_repair_to_provider(
+                        ctx, sections, boundary_request
+                    )
+                    phase1_integration_checked = False
+                    continue
                 scheduling_request = _phase2_prerequisite_request_for_repair(
                     ctx,
                     sections,
@@ -26511,6 +29760,8 @@ def main(argv: list[str] | None = None) -> int:
             repair_required_dependencies: dict[str, set[str]] = {}
             repair_model_labels: list[str] = []
             repair_evidence_by_label: dict[str, str] = {}
+            repair_evidence_identities_by_label: dict[str, dict[str, Any]] = {}
+            repair_components: list[dict[str, Any]] = []
             phase1_repair = False
             repair_authorized = True
             active_phase2_repair_id = ""
@@ -26524,6 +29775,10 @@ def main(argv: list[str] | None = None) -> int:
                 repair_evidence_by_label = dict(
                     boundary_request.evidence_by_label
                 )
+                repair_evidence_identities_by_label = copy.deepcopy(
+                    boundary_request.evidence_identities_by_label
+                )
+                repair_components = list(boundary_request.repair_components)
                 repair_helpers = boundary_request.decomposition_helpers
                 repair_section_labels = list(boundary_request.section_labels)
                 repair_context_labels = list(boundary_request.context_labels)
@@ -26543,6 +29798,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 repair_evidence_by_label = dict(
                     queued_phase2_request.evidence_by_label
+                )
+                repair_evidence_identities_by_label = copy.deepcopy(
+                    queued_phase2_request.evidence_identities_by_label
+                )
+                repair_components = list(
+                    queued_phase2_request.repair_components
                 )
                 repair_helpers = list(
                     queued_phase2_request.decomposition_helpers
@@ -26567,10 +29828,10 @@ def main(argv: list[str] | None = None) -> int:
 
             if evidence_for_repair is None:
                 contract_pending = required_skeleton - _frozen_labels(sections)
-                if contract_pending:
-                    declaration_work = _prioritized_phase2_declaration_work(
-                        ctx, contract_pending
-                    )
+                declaration_work = _phase2_declaration_work_labels(
+                    ctx, sections, contract_pending
+                )
+                if declaration_work:
                     stage = _contract_work_stage(ctx)
                     if ctx.phase2_started:
                         print(
@@ -26644,6 +29905,22 @@ def main(argv: list[str] | None = None) -> int:
                                 # dependency environment before another edit.
                                 continue
                     except RepairRequest as request:
+                        scheduling_request = _phase2_prerequisite_request_for_repair(
+                            ctx,
+                            sections,
+                            request,
+                            source="phase2_complete_node_decomposition",
+                        )
+                        if scheduling_request is not None:
+                            _save_ctx_state(ctx, sections)
+                            _log(
+                                "==> Phase 2 will implement deferred definition "
+                                "prerequisite(s) before retrying complete-node work: "
+                                + ", ".join(
+                                    scheduling_request.implementation_prerequisites
+                                )
+                            )
+                            continue
                         active = getattr(ctx, "phase2_repair_active", {}) or {}
                         if (
                             ctx.phase2_started
@@ -26665,6 +29942,10 @@ def main(argv: list[str] | None = None) -> int:
                         repair_evidence_by_label = dict(
                             request.evidence_by_label
                         )
+                        repair_evidence_identities_by_label = copy.deepcopy(
+                            request.evidence_identities_by_label
+                        )
+                        repair_components = list(request.repair_components)
                         if _requires_blueprint_transaction(
                             repair_authorized,
                             repair_required_dependencies,
@@ -26690,13 +29971,11 @@ def main(argv: list[str] | None = None) -> int:
                         ) or sorted(authorized)
                         repair_context_labels = list(request.context_labels)
                         phase1_repair = not ctx.phase2_started
-                        active_phase2_repair_id = str(
-                            getattr(request, "queue_id", "")
-                        )
-                        if active_phase2_repair_id:
-                            _activate_phase2_repair_request(
-                                ctx, active_phase2_repair_id
+                        active_phase2_repair_id = (
+                            _start_caught_phase2_repair_transaction(
+                                ctx, sections, request
                             )
+                        )
 
                 elif not phase1_integration_checked:
                     stage = _contract_work_stage(ctx)
@@ -26756,6 +30035,7 @@ def main(argv: list[str] | None = None) -> int:
             if evidence_for_repair is None and phase1_integration_checked:
                 if _begin_phase2(ctx, sections):
                     _save_ctx_state(ctx, sections)
+                    _create_phase1_checkpoint(ctx)
                     _print_pipeline_progress(
                         ctx, sections, repair_trials, args.max_trials
                     )
@@ -26878,6 +30158,10 @@ def main(argv: list[str] | None = None) -> int:
                         repair_required_dependencies = request.required_dependencies
                         repair_model_labels = list(request.model_repair_labels)
                         repair_evidence_by_label = dict(request.evidence_by_label)
+                        repair_evidence_identities_by_label = copy.deepcopy(
+                            request.evidence_identities_by_label
+                        )
+                        repair_components = list(request.repair_components)
                         if request.authorizes_blueprint_repair:
                             active_phase2_repair_id = (
                                 _start_phase2_repair_transaction(
@@ -26976,7 +30260,7 @@ def main(argv: list[str] | None = None) -> int:
                         report_lines += [
                             "## Complete",
                             f"- elapsed: `{int(time.monotonic() - started)}s`",
-                            f"- blueprint repairs used: `{repair_trials}/{args.max_trials}`",
+                            f"- repair/retry trials used: `{repair_trials}/{args.max_trials}`",
                             f"- published blueprint: `{promoted.relative_to(REPO_ROOT)}`",
                             f"- published Lean: `{published.relative_to(REPO_ROOT)}`",
                             f"- open conjectures recorded: `{len(recorded)}`",
@@ -27073,6 +30357,9 @@ def main(argv: list[str] | None = None) -> int:
                     evidence_for_repair,
                     source=retry_source,
                     evidence_by_label=(repair_evidence_by_label or None),
+                    evidence_identity_by_label=(
+                        repair_evidence_identities_by_label or None
+                    ),
                 )
                 _save_ctx_state(ctx, sections)
                 _print_pipeline_progress(
@@ -27205,7 +30492,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 if model_labels:
                     scope_targets = list(model_labels)
-                    model_changed = _repair_blueprint(
+                    model_changed = _repair_blueprint_components(
                         ctx,
                         evidence_for_repair,
                         model_labels,
@@ -27241,6 +30528,7 @@ def main(argv: list[str] | None = None) -> int:
                             if repair_helpers
                             else ()
                         ),
+                        repair_components=repair_components,
                     )
                     scope_changed = set(model_changed)
                     changed.update(model_changed)
@@ -27283,7 +30571,7 @@ def main(argv: list[str] | None = None) -> int:
                         f"- section normalization {repair_trials}: rejected and rolled back ({exc}); "
                         "falling back to targeted repair"
                     )
-                    changed = _repair_blueprint(
+                    changed = _repair_blueprint_components(
                         ctx,
                         evidence_for_repair,
                         repair_labels,
@@ -27292,6 +30580,7 @@ def main(argv: list[str] | None = None) -> int:
                         escalation_note=fallback_note,
                         repair_runner_agent=escalation_runner.partition(":")[0] in {"codex", "claude-code"},
                         decomposition_roots=(repair_labels if repair_helpers else ()),
+                        repair_components=repair_components,
                     )
                     report_lines.append(
                         f"- fallback repair {repair_trials}: {len(changed)} node statement(s) changed "
@@ -27300,7 +30589,7 @@ def main(argv: list[str] | None = None) -> int:
                     stuck_state.repairs += 1
                     stuck_state.repairs_after_normalization += 1
             else:
-                changed = _repair_blueprint(
+                changed = _repair_blueprint_components(
                     ctx,
                     evidence_for_repair,
                     repair_labels,
@@ -27309,6 +30598,7 @@ def main(argv: list[str] | None = None) -> int:
                     escalation_note=note,
                     repair_runner_agent=escalation_runner.partition(":")[0] in {"codex", "claude-code"},
                     decomposition_roots=(repair_labels if repair_helpers else ()),
+                    repair_components=repair_components,
                 )
                 report_lines.append(
                     f"- repair {repair_trials}: {len(changed)} node statement(s) changed "
@@ -27514,7 +30804,8 @@ def main(argv: list[str] | None = None) -> int:
                     _mark_phase2_repair_verifying(
                         ctx,
                         active_phase2_repair_id,
-                        invalidated | changed,
+                        changed,
+                        recheck_labels=set(invalidated) - set(changed),
                     )
                 phase1_integration_checked = False
                 deferred_labels = {
@@ -27664,6 +30955,13 @@ def logged_main(argv: list[str] | None = None) -> int:
             except (FileNotFoundError, RunnerError, subprocess.CalledProcessError) as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return 2
+            except Exception:
+                # Python normally prints an unhandled traceback only after
+                # this redirect context has unwound. Print it here so the
+                # persistent formalization log and the terminal/Web UI both
+                # receive the complete failure.
+                traceback.print_exc(file=sys.stderr)
+                return 1
             finally:
                 signal.signal(signal.SIGTERM, old_sigterm)
                 print(f"Log file: {log_path.relative_to(REPO_ROOT)}", flush=True)

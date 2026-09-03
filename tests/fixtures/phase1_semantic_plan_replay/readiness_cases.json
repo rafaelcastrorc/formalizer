@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "description": "Source-authoritative and policy-dependent readiness cases extracted from the unresolved-node behavior seen in historical Simplex refinement runs.",
+  "source_cases": [
+    {
+      "label": "remark:geometric-recursion-gap",
+      "kind": "proposition",
+      "notready": true,
+      "open_claim": false,
+      "tex": "\\begin{proposition}The paper leaves the recursion argument incomplete.\\label{remark:geometric-recursion-gap}\\notready\\end{proposition}"
+    },
+    {
+      "label": "conj:open-depth",
+      "kind": "conjecture",
+      "notready": true,
+      "open_claim": true,
+      "tex": "\\begin{conjecture}It remains open whether the depth is two.\\label{conj:open-depth}\\notready\\end{conjecture}"
+    },
+    {
+      "label": "def:ready",
+      "kind": "definition",
+      "notready": false,
+      "open_claim": false,
+      "tex": "\\begin{definition}For each natural number n, define the successor value S(n)=n+1.\\label{def:ready}\\end{definition}"
+    }
+  ],
+  "recorded_open_label": "conj:open-depth",
+  "expected_repair_labels_record": ["remark:geometric-recursion-gap"],
+  "expected_repair_labels_attempt": [
+    "remark:geometric-recursion-gap",
+    "conj:open-depth"
+  ]
+}

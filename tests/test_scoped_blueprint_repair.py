@@ -13,7 +13,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from formalize_blueprint import (  # noqa: E402
+    RepairRequest,
+    _ScopedBlueprintRepairProposal,
+    _aggregate_authorized_repair_requests,
     _repair_blueprint,
+    _repair_blueprint_components,
     _scoped_blueprint_repair_content,
     _scoped_blueprint_repair_prompt,
     _write_scoped_blueprint_repair_to,
@@ -35,6 +39,85 @@ def _cases() -> dict:
 
 
 class ScopedBlueprintRepairTests(unittest.TestCase):
+    def test_authorized_aggregation_preserves_independent_repair_components(self) -> None:
+        first = RepairRequest(
+            "first evidence",
+            ["lem:first"],
+            authorizes_blueprint_repair=True,
+            model_repair_labels=["lem:first"],
+        )
+        second = RepairRequest(
+            "second evidence",
+            ["lem:second"],
+            authorizes_blueprint_repair=True,
+            model_repair_labels=["lem:second"],
+        )
+        combined = _aggregate_authorized_repair_requests([first, second])
+        self.assertEqual(
+            combined.repair_components,
+            [
+                {"labels": ["lem:first"], "evidence": "first evidence"},
+                {"labels": ["lem:second"], "evidence": "second evidence"},
+            ],
+        )
+
+    def test_independent_proposals_merge_into_one_atomic_commit(self) -> None:
+        responses = {
+            "lem:first": json.dumps(
+                {
+                    "replacements": {
+                        "lem:first": "\\begin{lemma}First.\\label{lem:first}\\end{lemma}"
+                    }
+                }
+            ),
+            "lem:second": json.dumps(
+                {
+                    "replacements": {
+                        "lem:second": "\\begin{lemma}Second.\\label{lem:second}\\end{lemma}"
+                    }
+                }
+            ),
+        }
+
+        def proposal(_ctx, labels, _evidence, **_kwargs):
+            label = labels[0]
+            return _ScopedBlueprintRepairProposal(
+                labels=(label,),
+                response_text=responses[label],
+                duration_s=1.0,
+                repaired_json_backslashes=0,
+            )
+
+        ctx = SimpleNamespace(workers=2, telemetry=object())
+        with (
+            patch(
+                "formalize_blueprint._run_scoped_blueprint_repair_proposal",
+                side_effect=proposal,
+            ),
+            patch("formalize_blueprint._repair_blueprint", return_value={"lem:first", "lem:second"}) as commit,
+            patch("formalize_blueprint._record"),
+            patch("formalize_blueprint._log"),
+        ):
+            changed = _repair_blueprint_components(
+                ctx,
+                "combined evidence",
+                ["lem:first", "lem:second"],
+                trial=1,
+                max_trials=10,
+                escalation_note="",
+                repair_runner_agent=True,
+                repair_components=[
+                    {"labels": ["lem:first"], "evidence": "first evidence"},
+                    {"labels": ["lem:second"], "evidence": "second evidence"},
+                ],
+            )
+        self.assertEqual(changed, {"lem:first", "lem:second"})
+        self.assertEqual(commit.call_count, 1)
+        merged = json.loads(commit.call_args.kwargs["prepared_response"])
+        self.assertEqual(
+            set(merged["replacements"]), {"lem:first", "lem:second"}
+        )
+
     def test_valid_historical_shapes_preserve_unrelated_source(self) -> None:
         for case in _cases()["valid_cases"]:
             with self.subTest(case=case["name"]):
@@ -64,6 +147,26 @@ class ScopedBlueprintRepairTests(unittest.TestCase):
                         existing_blocks=case["existing_blocks"],
                         existing_labels=case["existing_labels"],
                     )
+
+    def test_recovers_unescaped_tex_backslashes_in_repair_json(self) -> None:
+        old_block = "\\begin{lemma}Old.\\label{lem:target}\\end{lemma}"
+        response = r'''{
+          "replacements": {
+            "lem:target": "\\begin{lemma}New $\\beta$.\\label{lem:target}\\end{lemma}"
+          },
+          "notes": "raw TeX from a provider"
+        }'''.replace(r"\\begin", r"\begin").replace(r"\\beta", r"\beta").replace(
+            r"\\label", r"\label"
+        ).replace(r"\\end", r"\end")
+        updated, metadata = _scoped_blueprint_repair_content(
+            old_block,
+            response,
+            requested_labels=["lem:target"],
+            existing_blocks={"lem:target": old_block},
+            existing_labels=["lem:target"],
+        )
+        self.assertIn(r"New $\beta$.", updated)
+        self.assertGreater(metadata["repaired_json_backslashes"], 0)
 
     def test_writer_uses_immutable_pre_call_source(self) -> None:
         case = _cases()["valid_cases"][0]

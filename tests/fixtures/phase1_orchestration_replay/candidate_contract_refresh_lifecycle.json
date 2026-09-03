@@ -1,0 +1,18 @@
+{
+  "source_log": ".auto-blueprint/formalization/simplex/run-20260825-194345.log",
+  "source_run": "20260825-194345",
+  "observed_before_fix": {
+    "typed_contract_realized_epoch_transitions": 282,
+    "claim5_component_transitions": 21,
+    "claim5_observed_retry_failure_counts": [1, 1, 1, 1, 1],
+    "claim5_reached_exhaustion": false
+  },
+  "cause": "Refreshing a candidate-derived declaration header crossed the full Phase 1 generation-epoch boundary and erased the candidate, retry lifecycle, and exchange history owned by that same transaction.",
+  "required_behavior": {
+    "refresh_compatibility_contract": true,
+    "preserve_generation_candidate": true,
+    "preserve_retry_lifecycle": true,
+    "preserve_exchange_history": true,
+    "full_epoch_transition_only_for_authority_change": true
+  }
+}

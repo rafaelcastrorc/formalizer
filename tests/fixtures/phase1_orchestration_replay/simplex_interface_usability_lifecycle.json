@@ -1,0 +1,14 @@
+{
+  "blueprint": "simplex",
+  "label": "def:successive-compatible-geometric-layer-chain",
+  "statement_fp": "historical-simplex-interface-v1",
+  "plain_timeout": "Lean rejected delivered statements:\nLean check timed out after 90s.",
+  "heartbeat_timeout": "Lean rejected delivered statements:\n(deterministic) timeout at `whnf`, maximum number of heartbeats has been reached",
+  "required_behavior": {
+    "local_compiler_patch_calls": 0,
+    "first_failure": "one_interface_plan_correction",
+    "second_failure": "blueprint_direct_generation",
+    "later_failure": "bounded_generation_retry_without_blueprint_mutation",
+    "compiler_timeout_authorizes_decomposition": false
+  }
+}

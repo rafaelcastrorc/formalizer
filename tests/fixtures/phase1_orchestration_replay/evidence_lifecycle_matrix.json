@@ -1,0 +1,45 @@
+{
+  "description": "Portable lifecycle expectations distilled from historical evidence-loss and stale-evidence runs.",
+  "cases": [
+    {
+      "source_fixture": "semantic_compiler_feedback_handoff.json",
+      "label": "lem:target",
+      "statement_fp": "statement-v1",
+      "transition": "candidate_replaced",
+      "expected_active_kinds": ["semantic"],
+      "reason": "Statement-alignment requirements survive regeneration; compiler output for the replaced candidate does not."
+    },
+    {
+      "source_fixture": "candidate_contract_refresh_lifecycle.json",
+      "label": "lem:target",
+      "statement_fp": "statement-v1",
+      "transition": "contract_header_refreshed_without_epoch_change",
+      "expected_active_kinds": ["semantic", "compiler"],
+      "reason": "A compatibility-only header refresh does not replace the candidate or its retry transaction."
+    },
+    {
+      "source_fixture": "blueprint_direct_reactivation.json",
+      "label": "lem:target",
+      "statement_fp": "statement-v1",
+      "transition": "plan_authority_changed",
+      "expected_active_kinds": ["semantic"],
+      "reason": "Changing plan authority invalidates plan/candidate mechanics but preserves facts about the unchanged blueprint statement."
+    },
+    {
+      "source_fixture": "immediate_dependency_edge.json",
+      "label": "lem:consumer",
+      "statement_fp": "statement-v1",
+      "transition": "dependency_edge_transaction",
+      "expected_active_kinds": ["dependency_reference"],
+      "reason": "Observed dependency facts survive model epochs and are consumed edge-by-edge only after the graph transaction."
+    },
+    {
+      "source_fixture": "blueprint_direct_sibling_evidence.json",
+      "label": "lem:sibling",
+      "statement_fp": "statement-v1",
+      "transition": "sibling_repaired",
+      "expected_active_kinds": ["semantic"],
+      "reason": "A sibling transition cannot consume or contaminate declaration-owned semantic evidence."
+    }
+  ]
+}
