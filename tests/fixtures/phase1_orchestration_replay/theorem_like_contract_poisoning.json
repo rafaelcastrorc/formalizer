@@ -1,0 +1,21 @@
+{
+  "source_run": "20260827-131622",
+  "blueprint": "simplex",
+  "label": "prop:dyadic-weights",
+  "observed_before_fix": {
+    "first_zero_model_call_retry": 33,
+    "final_retry": 100,
+    "zero_model_call_retries": 68,
+    "zero_model_call_elapsed_seconds": 10,
+    "rejected_candidate": "def prop_dyadic_weights : Prop := sorry",
+    "candidate_rewrote_authoritative_contract_before_rejection": true,
+    "failed_semantic_patch_lost_producing_tier": true
+  },
+  "required_behavior": {
+    "theorem_like_target_kinds": ["theorem", "lemma"],
+    "bare_prop_contract_rejected": true,
+    "rejected_candidate_may_refresh_contract": false,
+    "semantic_patch_preserves_producing_tier": true,
+    "additional_outer_retries_without_model_or_state_progress": 0
+  }
+}
