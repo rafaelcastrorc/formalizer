@@ -9,6 +9,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
+sys.path.insert(0, str(REPO_ROOT / "tests" / "replay"))
 
 from replay_phase1_plans import (  # noqa: E402
     FIXTURE_RUNS_DIR,

@@ -21,7 +21,7 @@ SCRIPTS = REPO_ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-import lean_libs  # noqa: E402
+from env_setup import lean_libs  # noqa: E402
 import refine_blueprint_with_lean as legacy  # noqa: E402
 import webui  # noqa: E402
 

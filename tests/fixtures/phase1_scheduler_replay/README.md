@@ -5,7 +5,7 @@ telemetry. They intentionally omit prompts, responses, paper text, and Lean
 source. Each task retains only its resource pool, duration, purpose, labels,
 source sequence, and observed start time.
 
-`scripts/replay_phase1_scheduler_latency.py` compares the observed milestone
+`tests/replay/replay_phase1_scheduler_latency.py` compares the observed milestone
 against branch-local scheduling while preserving every recorded model call and
 the causal order of calls that touch the same blueprint label. The `eligible`
 policy also preserves the first observed eligibility time of every label.

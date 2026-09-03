@@ -570,7 +570,7 @@ def _recorded_job_matches(pid: int) -> bool:
         "scripts/refine_blueprint_with_lean.py",
         "scripts/formalize_blueprint.py",
         "scripts/generate_blueprint.py",
-        "scripts/setup_lean.py",
+        "scripts/env_setup/setup_lean.py",
         "scripts/validate_blueprint.py",
         "scripts/build.py",
     )
@@ -782,7 +782,7 @@ def positive_int_field(p: dict, key: str, label: str) -> str:
 def build_command(action: str, p: dict) -> list[str]:
     py = sys.executable
     if action == "setup_lean":
-        cmd = [py, str(SCRIPTS / "setup_lean.py"), "--install-elan"]
+        cmd = [py, str(SCRIPTS / "env_setup" / "setup_lean.py"), "--install-elan"]
         if p.get("no_cache"):
             cmd.append("--no-cache")
         return cmd
@@ -906,7 +906,7 @@ def build_command(action: str, p: dict) -> list[str]:
         # and restores them if any step fails. It runs through the normal job
         # runner so it can never overlap a formalization run.
         libs = [n for n in (p.get("libs") or []) if LIB_NAME_RE.match(n)]
-        cmd = [py, str(SCRIPTS / "lean_libs.py"), "apply", "--yes"]
+        cmd = [py, str(SCRIPTS / "env_setup" / "lean_libs.py"), "apply", "--yes"]
         # No explicit list => apply the saved selection (the CLI default). Only
         # pass --libs when the caller really named a set, so the CLI's guard
         # against applying a narrower-than-selected set stays meaningful.
@@ -927,7 +927,7 @@ def libraries_payload(refresh: bool = False) -> dict:
     only moves when a library publishes a new toolchain.
     """
     try:
-        import lean_libs
+        from env_setup import lean_libs
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": f"resolver unavailable: {exc}"}
     try:
@@ -1034,7 +1034,7 @@ def blueprint_libraries_payload(name: str, order: list[str] | None = None) -> di
     SEARCH, and in what order, for one paper.
     """
     try:
-        import lean_libs
+        from env_setup import lean_libs
 
         meta_path = BLUEPRINTS_DIR / name / "meta.yml"
         if not meta_path.is_file():
@@ -1066,7 +1066,7 @@ def library_update_brief(refresh: bool = False) -> dict:
     resolving hits the network (mirror fetches). `refresh` forces a re-resolve.
     """
     try:
-        import lean_libs
+        from env_setup import lean_libs
 
         selected = lean_libs.selected_libraries()
         cached = None if refresh else lean_libs.load_cache()
@@ -1259,7 +1259,7 @@ class Handler(BaseHTTPRequestHandler):
             params = {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
             if params.get("select"):
                 try:
-                    import lean_libs
+                    from env_setup import lean_libs
 
                     names = [
                         n for n in params["select"].split(",") if LIB_NAME_RE.match(n)

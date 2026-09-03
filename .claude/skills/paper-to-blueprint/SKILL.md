@@ -88,7 +88,7 @@ each). To check library membership, in rough order of trust:
   results (process calculi, λ-calculus, type systems, semantics, automata,
   etc.) — `WebSearch` for `cslib lean <concept>` and read the repo;
 - **only mark a node settled against a library that is actually installed
-  here.** Check `.lake/packages/` (or run `scripts/lean_libs.py status`) first:
+  here.** Check `.lake/packages/` (or run `scripts/env_setup/lean_libs.py status`) first:
   a `\mathlibok` node citing a library this project does not build fails at
   compile time, which is far more expensive than formalizing the node;
 - a general `WebSearch` to confirm a result is genuinely standard.

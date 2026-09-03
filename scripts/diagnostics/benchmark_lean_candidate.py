@@ -15,13 +15,18 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 
-from formalize_blueprint import _compose_module, _normalize_terminal_sorry, _parse_module
-from lean_preflight import default_lean_command
-from refine_blueprint_with_lean import REPO_ROOT, _lean_env
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from formalize_blueprint import _compose_module, _normalize_terminal_sorry, _parse_module  # noqa: E402
+from lean_preflight import default_lean_command  # noqa: E402
+from refine_blueprint_with_lean import REPO_ROOT, _lean_env  # noqa: E402
 
 
 def _run(command: list[str], *, timeout: int) -> dict[str, object]:

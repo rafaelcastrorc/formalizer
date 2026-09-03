@@ -79,7 +79,7 @@ Phase 2 correction path.
 Run the deterministic logical-clock comparison with:
 
 ```bash
-uv run python scripts/replay_phase2_latency.py --assert-improvement
+uv run python tests/replay/replay_phase2_latency.py --assert-improvement
 ```
 
 The replay deliberately labels the retained-correction result as a
