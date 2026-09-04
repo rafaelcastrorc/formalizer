@@ -223,6 +223,181 @@ def _phase2_candidate_failure_kind(evidence: str) -> str:
     return "validation"
 
 
+def _phase2_body_correction_fingerprint(
+    ctx: Ctx,
+    label: str,
+    candidate: Mapping[str, Any],
+    *,
+    tier: str,
+) -> str:
+    """Fingerprint one exact ordinary-body correction request."""
+    return hashlib.sha256(
+        (
+            _phase2_node_candidate_epoch(ctx, label)
+            + "\0"
+            + str(candidate.get("candidate_hash") or "")
+            + "\0"
+            + str(candidate.get("failure_hash") or "")
+            + "\0"
+            + tier
+            + "\0"
+            + (ctx.escalation_runner_spec if tier == "escalation" else ctx.runner_spec)
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _phase2_proof_units(
+    ctx: Ctx, labels: list[str], batch_size: int
+) -> list[list[str]]:
+    """Batch fresh nodes while isolating retained correction candidates."""
+    retained = [
+        label for label in labels if _phase2_node_candidate(ctx, label) is not None
+    ]
+    retained_set = set(retained)
+    fresh = [label for label in labels if label not in retained_set]
+    return [
+        fresh[index : index + batch_size]
+        for index in range(0, len(fresh), batch_size)
+    ] + [[label] for label in retained]
+
+
+def _adjudicate_phase2_body_failure(
+    ctx: Ctx,
+    label: str,
+    sections: list[Section],
+    import_modules: list[str],
+    *,
+    tag: str,
+) -> dict[str, Any]:
+    """Classify one ambiguous semantic body rejection once per exact state.
+
+    Compiler and response-format failures never enter this path. They are
+    ordinary body-correction evidence. Only a compiling candidate rejected by
+    the semantic audit needs an independent decision about whether its body is
+    wrong or the blueprint genuinely lacks a named helper.
+    """
+    candidate = _phase2_node_candidate(ctx, label)
+    if not candidate or candidate.get("failure_kind") != "semantic_alignment":
+        return {"action": "retry_body", "reason": "not a semantic rejection"}
+    state_hash = _phase2_candidate_state_hash(candidate)
+    cached = _phase2_candidate_adjudication(ctx, label, state_hash)
+    if cached is not None:
+        _record(
+            ctx.telemetry,
+            "phase2_body_failure_adjudication_cache_hit",
+            label=label,
+            state_sha256=state_hash,
+            action=str(cached.get("action") or "retry_body"),
+        )
+        return cached
+
+    interfaces = _frozen_interface_digest(
+        sections, import_modules, budget=16000
+    )
+    prompt = f"""TASK: ADJUDICATE-PHASE2-BODY-FAILURE
+
+Return exactly one JSON object and no commentary:
+{{
+  "label": "{label}",
+  "action": "retry_body" | "needs_decomposition",
+  "reason": "specific mathematical reason",
+  "missing_helpers": ["exact blueprint-level helper statement"]
+}}
+
+Decide whether the exact semantic rejection below can be fixed by correcting
+the current declaration body while preserving its frozen public statement, or
+whether the current blueprint genuinely lacks a named mathematical helper.
+
+Use `retry_body` unless the supplied blueprint text itself requires a concrete
+intermediate definition/lemma that no listed dependency exposes. Compiler
+difficulty, tactic difficulty, timeout, an imperfect Lean body, or a possible
+alternative proof NEVER authorize decomposition. `needs_decomposition`
+requires a nonempty exact `missing_helpers` list.
+
+Blueprint node, including its proof:
+```tex
+{ctx.tex_blocks.get(label, '')[:12000]}
+```
+
+Frozen dependency interfaces:
+```lean
+{interfaces or '-- none'}
+```
+
+Current complete Lean candidate:
+```lean
+{str(candidate.get('code') or '')[:24000]}
+```
+
+Exact semantic rejection:
+```text
+{str(candidate.get('evidence') or '')[-12000:]}
+```
+"""
+    result = _call_model(
+        ctx,
+        prompt,
+        purpose="phase2_body_failure_adjudication",
+        timeout=ctx.base_timeout,
+        effort=ctx.base_effort,
+        labels=[label],
+        tag=tag,
+    )
+    adjudication: dict[str, Any] = {
+        "action": "retry_body",
+        "reason": result.error or "independent adjudicator unavailable",
+        "missing_helpers": [],
+    }
+    if result.status == "ok":
+        try:
+            payload = _extract_json(result.text)
+        except ValueError as exc:
+            adjudication["reason"] = f"invalid adjudication response: {exc}"
+        else:
+            action = str(payload.get("action") or "retry_body")
+            reason = str(payload.get("reason") or "").strip()
+            helpers = [
+                str(item).strip()
+                for item in payload.get("missing_helpers") or []
+                if str(item).strip()
+            ]
+            if (
+                str(payload.get("label") or label) == label
+                and action == "needs_decomposition"
+                and reason
+                and helpers
+            ):
+                adjudication = {
+                    "action": action,
+                    "reason": reason,
+                    "missing_helpers": helpers,
+                }
+            elif action == "retry_body" and reason:
+                adjudication = {
+                    "action": action,
+                    "reason": reason,
+                    "missing_helpers": [],
+                }
+            else:
+                adjudication["reason"] = (
+                    "adjudicator did not provide a valid decomposition certificate"
+                )
+    _cache_phase2_candidate_adjudication(
+        ctx, label, state_hash, adjudication
+    )
+    _record(
+        ctx.telemetry,
+        "phase2_body_failure_adjudication",
+        label=label,
+        state_sha256=state_hash,
+        action=adjudication["action"],
+        reason=adjudication["reason"],
+        missing_helpers=adjudication["missing_helpers"],
+        model_status=result.status,
+    )
+    return adjudication
+
+
 def _run_phase2_whole_node_transaction(
     ctx: Ctx,
     label: str,
@@ -930,6 +1105,52 @@ def _phase2_prerequisite_frontier(
     )
 
 
+def _phase2_scheduling_frontier(
+    ctx: Ctx, unresolved: set[str]
+) -> tuple[int, list[str], list[str], str]:
+    """Schedule a local definition prerequisite without idling other branches.
+
+    The prerequisite replaces work only in its own dependent branch. Normal
+    top-down-ready nodes outside that branch remain eligible, preserving the
+    branch-local parallelism promised by the Phase-2 scheduler.
+    """
+    normal_layer, normal_labels, normal_roots = _next_implementation_frontier(
+        ctx.nodes, unresolved, PHASE2_PROOF_ORDER
+    )
+    prerequisite = _phase2_prerequisite_frontier(ctx, unresolved)
+    if prerequisite is None:
+        return (
+            normal_layer,
+            normal_labels,
+            normal_roots,
+            "dynamic_branch_ready_frontier",
+        )
+
+    prerequisite_layer, prerequisite_labels, prerequisite_roots = prerequisite
+    pending_prerequisites = set(
+        getattr(ctx, "phase2_prerequisite_labels", set())
+    ) & unresolved
+    blocked_branch = _dependency_descendants(
+        ctx.nodes, pending_prerequisites
+    ) & unresolved
+    independent_ready = [
+        label for label in normal_labels if label not in blocked_branch
+    ]
+    combined = list(
+        dict.fromkeys([*prerequisite_labels, *independent_ready])
+    )
+    return (
+        prerequisite_layer,
+        combined,
+        normal_roots or prerequisite_roots,
+        (
+            "definition_prerequisite_with_independent_ready"
+            if independent_ready
+            else "definition_prerequisite_override"
+        ),
+    )
+
+
 def _prioritized_phase2_declaration_work(
     ctx: Ctx, pending: set[str]
 ) -> set[str]:
@@ -958,7 +1179,16 @@ def _phase2_declaration_work_labels(
     section and rebuild that section's object.  Publishing the frozen provider
     again in a new section creates a duplicate Lean declaration.
     """
+    section_list = list(sections)
     pending = set(contract_pending)
+    # A deferred section still owns a complete, previously verified Lean
+    # declaration. It is waiting for a changed provider to be regenerated so
+    # its imports can be rebound and the same source can be recompiled. Treat
+    # only declarations with no retained owner as model-backed work; otherwise
+    # one provider repair expands into regeneration of every descendant.
+    pending -= _deferred_contract_labels(section_list)
+    if not pending:
+        return set()
     if not bool(getattr(ctx, "phase2_started", False)):
         return pending
     prerequisites = set(getattr(ctx, "phase2_prerequisite_labels", set()))
@@ -966,7 +1196,7 @@ def _phase2_declaration_work_labels(
     if missing_prerequisites:
         return missing_prerequisites
     deferred_frozen_prerequisites = prerequisites & set(
-        _phase2_unimplemented_body_kinds(ctx, sections)
+        _phase2_unimplemented_body_kinds(ctx, section_list)
     )
     if deferred_frozen_prerequisites:
         # Leave unrelated declaration work queued. The proof scheduler below
@@ -1063,6 +1293,70 @@ def _route_phase2_proof_outcomes(
         )
 
     if authorized:
+        active = getattr(ctx, "phase2_repair_active", {}) or {}
+        if str(active.get("stage") or "") == "verify":
+            # A repair discovered while verifying a provisional component cannot
+            # be activated as a second writer.  Route dependency providers back
+            # through the existing rollback/provider transaction; a defect in a
+            # provisional declaration is instead merged into the active repair.
+            # Independent findings remain queued for later and do not preempt
+            # the active transaction.
+            roots = [str(label) for label in active.get("labels") or []]
+            request_id = str(active.get("request_id") or "")
+            active_payload = next(
+                (
+                    payload
+                    for payload in getattr(ctx, "phase2_repair_queue", [])
+                    if str(payload.get("request_id") or "") == request_id
+                ),
+                {},
+            )
+            owned = {
+                str(label)
+                for label in active_payload.get("verification_owned_labels")
+                or roots
+            }
+            provider_candidates = _phase2_provider_contract_candidates(ctx, roots)
+            immediate: RepairRequest | None = None
+            deferred: list[RepairRequest] = []
+            for request in authorized:
+                request_labels = set(request.labels)
+                providers = sorted(request_labels & provider_candidates - owned)
+                if immediate is None and providers:
+                    request.provider_contract_labels = providers
+                    request.reschedule_labels = roots
+                    request.model_repair_labels = providers
+                    immediate = request
+                elif immediate is None and request_labels & owned:
+                    immediate = request
+                else:
+                    deferred.append(request)
+            if deferred:
+                _enqueue_phase2_repair_requests(ctx, deferred)
+            if failed:
+                _store_generation_feedback(
+                    ctx,
+                    failed,
+                    "\n\n".join(
+                        f"- {label}: {evidence}"
+                        for label, evidence in failed.items()
+                    ),
+                    source="phase2_proof_frontier_parallel_failure",
+                    evidence_by_label=failed,
+                )
+            _record(
+                ctx.telemetry,
+                "phase2_active_repair_followup_routed",
+                active_request_id=str(active.get("request_id") or ""),
+                active_roots=roots,
+                immediate_labels=list(immediate.labels) if immediate else [],
+                provider_labels=(
+                    list(immediate.provider_contract_labels) if immediate else []
+                ),
+                deferred_scopes=[list(request.labels) for request in deferred],
+            )
+            return immediate
+
         _enqueue_phase2_repair_requests(ctx, authorized)
         if failed:
             _store_generation_feedback(
@@ -1076,9 +1370,7 @@ def _route_phase2_proof_outcomes(
             )
         request = _pending_phase2_repair_request(ctx)
         if request is None:
-            raise RuntimeError(
-                "Phase 2 decomposition queue unexpectedly became empty"
-            )
+            return None
         return request
 
     if not failed:
@@ -1244,6 +1536,7 @@ def _apply_proof_batch(
     targets: dict[str, str],  # label -> frozen decl text
     *,
     tag: str,
+    tier: str = "base",
 ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
     """Splice returned bodies into the module; compile and audit survivors.
 
@@ -1269,6 +1562,9 @@ def _apply_proof_batch(
     errors: dict[str, str] = {}
     repair_helpers: dict[str, list[str]] = {}
     originals: dict[str, str] = {}
+    candidate_codes: dict[str, str] = {}
+    failure_kinds: dict[str, str] = {}
+    failure_identities: dict[str, dict[str, Any]] = {}
     spliced: list[str] = []
     for label, frozen_text in targets.items():
         name = _lean_name(label)
@@ -1286,7 +1582,11 @@ def _apply_proof_batch(
             errors[label] = f"response body for `{name}` still contains sorry/admit"
             continue
         originals[label] = parsed.decls[index[name]].text
-        parsed.decls[index[name]].text = _splice_proof(frozen_text, proof)
+        completed_decl = _splice_proof(frozen_text, proof)
+        parsed.decls[index[name]].text = completed_decl
+        candidate_codes[label] = _compose_module(
+            new_imports, list(model_parsed.preamble), [completed_decl]
+        )[0]
         spliced.append(label)
     if not spliced:
         return [], errors, repair_helpers
@@ -1304,26 +1604,42 @@ def _apply_proof_batch(
             _write_section(sec, parsed)
             for label in spliced:
                 errors[label] = "\n".join(file_level)[-4000:]
-            return [], errors, repair_helpers
-        proved = []
-        for label in spliced:
-            idx = index[_lean_name(label)]
-            if idx in errors_by_decl:
-                errors[label] = "\n".join(
-                    errors_by_decl[idx]
-                )[-4000:]
-                parsed.decls[idx].text = originals[label]
-            else:
-                proved.append(label)
-        ranges = _write_section(sec, parsed)
-        if proved:
-            ok2, output2 = _check_lean(sec.path, ctx.lean_command)
-            if not ok2:
-                for label in proved:
-                    errors[label] = output2[-2000:]
-                    parsed.decls[index[_lean_name(label)]].text = originals[label]
-                _write_section(sec, parsed)
-                proved = []
+                failure_kinds[label] = "lean_compile"
+                failure_identities[label] = {
+                    "source": "phase2_body_file_compile",
+                    "error_shape": _lean_error_shape(errors[label]),
+                }
+            proved = []
+        else:
+            proved = []
+            for label in spliced:
+                idx = index[_lean_name(label)]
+                if idx in errors_by_decl:
+                    errors[label] = "\n".join(
+                        errors_by_decl[idx]
+                    )[-4000:]
+                    failure_kinds[label] = "lean_compile"
+                    failure_identities[label] = {
+                        "source": "phase2_body_compile",
+                        "error_shape": _lean_error_shape(errors[label]),
+                    }
+                    parsed.decls[idx].text = originals[label]
+                else:
+                    proved.append(label)
+            ranges = _write_section(sec, parsed)
+            if proved:
+                ok2, output2 = _check_lean(sec.path, ctx.lean_command)
+                if not ok2:
+                    for label in proved:
+                        errors[label] = output2[-2000:]
+                        failure_kinds[label] = "lean_compile"
+                        failure_identities[label] = {
+                            "source": "phase2_body_subset_compile",
+                            "error_shape": _lean_error_shape(errors[label]),
+                        }
+                        parsed.decls[index[_lean_name(label)]].text = originals[label]
+                    _write_section(sec, parsed)
+                    proved = []
     # Dependency-mention contract: now that the proof exists, every non-Mathlib
     # `\uses` name must be visible in the finished declaration.
     if proved:
@@ -1344,6 +1660,11 @@ def _apply_proof_batch(
                     + ", ".join(f"`{_lean_name(dep)}`" for dep in missing)
                     + ". Use them instead of re-deriving inline."
                 )
+                failure_kinds[label] = "deterministic"
+                failure_identities[label] = {
+                    "source": "phase2_dependency_mentions",
+                    "missing_dependencies": sorted(missing),
+                }
                 parsed.decls[index[_lean_name(label)]].text = originals[label]
             else:
                 kept.append(label)
@@ -1355,6 +1676,11 @@ def _apply_proof_batch(
                     for label in kept:
                         parsed.decls[index[_lean_name(label)]].text = originals[label]
                         errors[label] = "kept subset failed recompile after dependency pruning"
+                        failure_kinds[label] = "lean_compile"
+                        failure_identities[label] = {
+                            "source": "phase2_dependency_subset_compile",
+                            "error_shape": _lean_error_shape(errors[label]),
+                        }
                     _write_section(sec, parsed)
                     kept = []
         proved = kept
@@ -1376,15 +1702,19 @@ def _apply_proof_batch(
             rejected_labels=(sorted(audit[2]) if audit is not None else []),
         )
         if audit is not None:
-            kind, reason, rejected, helpers = audit
+            audit_result = _coerce_alignment_audit_result(audit)
+            kind, reason, rejected, helpers = audit_result
             rejected_bundles = set(semantic_body_labels) & set(rejected)
             if not rejected_bundles:
                 rejected_bundles = set(semantic_body_labels)
             for label in rejected_bundles:
-                errors[label] = reason
+                errors[label] = audit_result.reason_for([label])
+                failure_kinds[label] = "semantic_alignment"
+                failure_identities[label] = audit_result.failure_identity_for(label)
                 parsed.decls[index[_lean_name(label)]].text = originals[label]
-                if kind in {"blueprint", "decomposition"}:
-                    repair_helpers[label] = list(helpers)
+                label_kind = audit_result.kinds_by_label.get(label, kind)
+                if label_kind in {"blueprint", "decomposition"}:
+                    repair_helpers[label] = audit_result.helpers_for([label])
             proved = [label for label in proved if label not in rejected_bundles]
             _write_section(sec, parsed)
             if proved:
@@ -1396,10 +1726,31 @@ def _apply_proof_batch(
                             "accepted subset failed after definition-body audit rollback:\n"
                             + output4[-2000:]
                         )
+                        failure_kinds[label] = "lean_compile"
+                        failure_identities[label] = {
+                            "source": "phase2_semantic_subset_compile",
+                            "error_shape": _lean_error_shape(errors[label]),
+                        }
                     _write_section(sec, parsed)
                     proved = []
     if proved:
         _log(f"accepted {len(proved)} implementation(s): {', '.join(proved[:6])}", tag=tag)
+        for label in proved:
+            _clear_phase2_node_candidate(ctx, label)
+    for label, evidence in errors.items():
+        candidate_code = candidate_codes.get(label)
+        if not candidate_code or label in repair_helpers:
+            continue
+        _store_phase2_node_candidate(
+            ctx,
+            label,
+            candidate_code,
+            evidence=evidence,
+            failure_kind=failure_kinds.get(label, "validation"),
+            tier=tier,
+            source="ordinary_phase2_body_validation",
+            failure_identity=failure_identities.get(label),
+        )
     return proved, errors, repair_helpers
 
 
@@ -1451,7 +1802,16 @@ def _prove_section(
         sorry_labels = [label for label in sorry_labels if label not in proved]
 
     import_modules = sec.import_modules
-    remaining = list(sorry_labels)
+    deferred_to_singleton: list[str] = []
+    remaining: list[str] = []
+    for label in sorry_labels:
+        retained = _phase2_node_candidate(ctx, label)
+        if retained is not None and _retry_next_tier(
+            ctx, label, "phase2_body"
+        ) != "base":
+            deferred_to_singleton.append(label)
+        else:
+            remaining.append(label)
     errors: dict[str, str] = {}
     batch_size = ctx.proof_batch
     # Enough base-tier rounds to reduce a repeatedly failing batch to
@@ -1464,20 +1824,57 @@ def _prove_section(
     while remaining and round_no < max_batch_rounds:
         round_no += 1
         next_remaining: list[str] = []
-        for i in range(0, len(remaining), batch_size):
-            batch = remaining[i : i + batch_size]
+        for batch in _phase2_proof_units(ctx, remaining, batch_size):
             parsed, index = _module_decl_texts(sec)
             targets = {
                 label: parsed.decls[index[_lean_name(label)]].text
                 for label in batch
                 if _lean_name(label) in index
             }
+            retained_entries = {
+                label: candidate
+                for label in batch
+                if (candidate := _phase2_node_candidate(ctx, label)) is not None
+            }
+            if retained_entries:
+                label = batch[0]
+                retained = retained_entries[label]
+                correction_fingerprint = _phase2_body_correction_fingerprint(
+                    ctx, label, retained, tier="base"
+                )
+                if correction_fingerprint in set(
+                    retained.get("attempted_corrections") or []
+                ):
+                    next_remaining.extend(batch)
+                    _record(
+                        ctx.telemetry,
+                        "phase2_body_correction_skipped",
+                        label=label,
+                        tier="base",
+                        reason="identical_candidate_and_rejection_already_attempted",
+                        correction_sha256=correction_fingerprint,
+                    )
+                    continue
+                _note_phase2_candidate_correction(
+                    ctx, label, correction_fingerprint
+                )
+            prompt_errors = {
+                label: str(retained_entries[label].get("evidence") or "")
+                if label in retained_entries
+                else errors[label]
+                for label in batch
+                if label in retained_entries or label in errors
+            }
             prompt = _proof_prompt(
                 ctx,
                 list(targets.items()),
                 sections,
                 import_modules + [sec.module],
-                errors={label: errors[label] for label in batch if label in errors},
+                errors=prompt_errors,
+                retained_candidates={
+                    label: str(entry.get("code") or "")
+                    for label, entry in retained_entries.items()
+                },
                 timeout_s=ctx.base_timeout,
             )
             result = _call_model(
@@ -1584,7 +1981,7 @@ def _prove_section(
                 )
                 continue
             proved, batch_errors, batch_repairs = _apply_proof_batch(
-                ctx, sec, result.text, targets, tag=tag
+                ctx, sec, result.text, targets, tag=tag, tier="base"
             )
             outcome.proved.extend(proved)
             errors.update(batch_errors)
@@ -1659,6 +2056,8 @@ def _prove_section(
             )
         remaining = next_remaining
 
+    remaining = list(dict.fromkeys([*remaining, *deferred_to_singleton]))
+
     # Escalation: only singleton calls reach the configured escalation runner.
     still: list[str] = []
     for label in remaining:
@@ -1666,6 +2065,24 @@ def _prove_section(
         name = _lean_name(label)
         if name not in index or not _has_terminal_sorry(parsed.decls[index[name]].text):
             continue
+        retained = _phase2_node_candidate(ctx, label)
+        if retained is not None and retained.get("failure_kind") == "semantic_alignment":
+            adjudication = _adjudicate_phase2_body_failure(
+                ctx,
+                label,
+                sections,
+                import_modules + [sec.module],
+                tag=tag,
+            )
+            if adjudication.get("action") == "needs_decomposition":
+                helpers = list(adjudication.get("missing_helpers") or [])
+                evidence = "independent adjudication: " + str(
+                    adjudication.get("reason") or "blueprint helper is missing"
+                )
+                outcome.decomposition[label] = helpers
+                outcome.decomposition_evidence[label] = evidence
+                errors[label] = evidence
+                continue
         if _retry_next_tier(ctx, label, "phase2_body") == "base":
             _record_retry_failure(
                 ctx,
@@ -1678,12 +2095,40 @@ def _prove_section(
         solved = False
         for attempt in range(1, PROOF_SINGLETON_RETRIES + 1):
             targets = {label: parsed.decls[index[name]].text}
+            retained = _phase2_node_candidate(ctx, label)
+            if retained is not None:
+                correction_fingerprint = _phase2_body_correction_fingerprint(
+                    ctx, label, retained, tier="escalation"
+                )
+                if correction_fingerprint in set(
+                    retained.get("attempted_corrections") or []
+                ):
+                    _record(
+                        ctx.telemetry,
+                        "phase2_body_correction_skipped",
+                        label=label,
+                        tier="escalation",
+                        reason="identical_candidate_and_rejection_already_attempted",
+                        correction_sha256=correction_fingerprint,
+                    )
+                    break
+                _note_phase2_candidate_correction(
+                    ctx, label, correction_fingerprint
+                )
+            exact_error = (
+                str(retained.get("evidence") or "")
+                if retained is not None
+                else errors.get(label, "")
+            )
             prompt = _proof_prompt(
                 ctx,
                 list(targets.items()),
                 sections,
                 import_modules + [sec.module],
-                errors={label: errors[label]} if label in errors else None,
+                errors={label: exact_error} if exact_error else None,
+                retained_candidates={
+                    label: str(retained.get("code") or "")
+                } if retained is not None else None,
                 singleton=True,
                 timeout_s=ctx.hard_timeout,
             )
@@ -1748,7 +2193,7 @@ def _prove_section(
                 )
                 break
             proved, batch_errors, batch_repairs = _apply_proof_batch(
-                ctx, sec, result.text, targets, tag=tag
+                ctx, sec, result.text, targets, tag=tag, tier="escalation"
             )
             errors.update(batch_errors)
             outcome.decomposition.update(batch_repairs)

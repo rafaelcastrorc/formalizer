@@ -1,0 +1,23 @@
+{
+  "source_run": ".auto-blueprint/telemetry/runs/20260903-131033-31f549cb.jsonl",
+  "source_blueprint": "simplex",
+  "label": "def:max-fn",
+  "observed_duplicate_prompt": {
+    "purpose": "proof_batch",
+    "sha256": "aab53a0187447f23ffc0931931cbfbae4543610560b3b4984bffeba0fd5aa751",
+    "chars": 12663,
+    "dispatch_count": 4,
+    "model_seconds": 151.918
+  },
+  "frozen_declaration": "def def_max_fn (n : Nat) (hn : 1 <= n) : { f : (Fin n -> Real) -> Real // True } := sorry",
+  "complete_candidate": "def def_max_fn (n : Nat) (hn : 1 <= n) : { f : (Fin n -> Real) -> Real // True } := by exact <| Subtype.mk (fun _ => 0) True.intro",
+  "exact_failure": "Lean rejected the complete candidate: the implementation does not establish the frozen CPWL and maximum-witness obligations.",
+  "required_behavior": {
+    "retain_complete_candidate_after_failure": true,
+    "retry_as_single_node_correction": true,
+    "include_exact_failure_in_correction_prompt": true,
+    "never_redispatch_identical_candidate_failure_tier": true,
+    "persist_candidate_and_adjudication_across_continue": true,
+    "fresh_nodes_remain_batched": true
+  }
+}

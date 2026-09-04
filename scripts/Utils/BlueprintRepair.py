@@ -734,6 +734,17 @@ Return exactly one JSON object:
 
 Rules:
 - Accept when the repaired statement is complete as written.
+- Before accepting a correspondence, equivalence, transport, or existence
+  claim that depends on a particular map, isomorphism, coordinate system, or
+  witness, require the repaired blueprint to identify that witness (directly
+  or through an existing statement dependency) and state the equations or
+  behavior needed by the claim and its downstream consumers. Phrases such as
+  "under a suitable isomorphism" are not complete when the witness, its
+  domain/codomain, or its required action remains unnamed.
+- Do not apply the preceding rule to an ordinary existential theorem whose
+  mathematical content is complete without fixing one distinguished witness.
+  It applies only when the claim or later declarations depend on a particular
+  witness or on specific properties of its action.
 - Use `missing_statement_dependency` only when an existing blueprint node is
   semantically required by the repaired PUBLIC statement and its direct
   statement `\\uses` edge is absent.

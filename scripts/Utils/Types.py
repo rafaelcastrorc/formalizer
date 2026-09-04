@@ -137,6 +137,13 @@ class AlignmentAuditResult:
         default_factory=dict
     )
     forbidden_dependencies: dict[str, set[str]] = field(default_factory=dict)
+    # Structured, critic-certified representation changes that require an
+    # explicit blueprint-owned interface before Lean generation can continue.
+    # Keeping this separate from prose reasons lets Phase 1 route the defect
+    # without provider-specific keyword matching.
+    representation_repairs_by_label: dict[str, dict[str, Any]] = field(
+        default_factory=dict
+    )
 
     def __iter__(self):
         yield self.kind
@@ -204,6 +211,13 @@ class AlignmentAuditResult:
         """
         value = self.failure_identities_by_label.get(label)
         return copy.deepcopy(value) if isinstance(value, dict) else {}
+
+    def representation_repair_labels(self, kind: str) -> set[str]:
+        return {
+            label
+            for label, repair in self.representation_repairs_by_label.items()
+            if str(repair.get("kind") or "") == kind
+        }
 
 
 @dataclass(frozen=True)

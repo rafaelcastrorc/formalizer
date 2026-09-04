@@ -888,10 +888,12 @@ def _proof_prompt(
     import_modules: list[str],
     *,
     errors: dict[str, str] | None = None,
+    retained_candidates: dict[str, str] | None = None,
     singleton: bool = False,
     timeout_s: int = 0,
 ) -> str:
     errors = errors or {}
+    retained_candidates = retained_candidates or {}
     parts: list[str] = []
     for label, decl_text in targets:
         node = ctx.nodes[label]
@@ -905,6 +907,13 @@ def _proof_prompt(
             if label in errors
             else ""
         )
+        candidate_block = (
+            "\nCurrent complete implementation candidate (retain every correct "
+            "part and correct only the reported failure):\n"
+            f"```lean\n{retained_candidates[label][:12000]}\n```\n"
+            if label in retained_candidates
+            else ""
+        )
         parts.append(
             f"## {label}\n"
             f"Blueprint kind: {node.kind}\n"
@@ -912,6 +921,7 @@ def _proof_prompt(
             f"Required dependency mentions in the implementation or statement: "
             f"{', '.join(deps) or '(none)'}\n"
             f"Blueprint node with proof sketch:\n```tex\n{ctx.tex_blocks.get(label, '')[:6000]}\n```"
+            f"{candidate_block}"
             f"{error_block}"
         )
     signatures = _frozen_interface_digest(sections, import_modules, budget=20000)
@@ -932,6 +942,9 @@ For EACH target declaration below, return that declaration with its terminal
 `sorry` replaced by a real `:= by ...` body:
 - Copy the frozen declaration header EXACTLY. Only the tactic body after
   `:= by` is used; any header or statement change is discarded.
+- When a current complete implementation candidate is supplied, edit that
+  candidate instead of restarting from the frozen `sorry`. Preserve all parts
+  not implicated by the exact failure evidence.
 - For theorem-like targets, produce a proof. For `def`/`abbrev` targets,
   construct the exact value/function/predicate described by the blueprint.
 - Bodies must be self-contained tactic blocks (`have`/`let`/`calc` inside are

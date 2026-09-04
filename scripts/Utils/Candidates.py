@@ -224,6 +224,13 @@ def _store_phase2_node_candidate(
                 for item in previous.get("attempted_corrections") or []
                 if str(item)
             ][-24:],
+            "adjudications": {
+                str(key): copy.deepcopy(value)
+                for key, value in (
+                    previous.get("adjudications") or {}
+                ).items()
+                if str(key) and isinstance(value, dict)
+            },
             "repeated_state": repeated,
         }
         candidates[label] = entry
@@ -282,6 +289,49 @@ def _note_phase2_candidate_correction(
         if correction_fingerprint not in attempted:
             attempted.append(correction_fingerprint)
         entry["attempted_corrections"] = attempted[-24:]
+
+
+def _phase2_candidate_state_hash(entry: Mapping[str, Any]) -> str:
+    """Identify one exact complete candidate plus its rejection evidence."""
+    return hashlib.sha256(
+        (
+            str(entry.get("candidate_hash") or "")
+            + "\0"
+            + str(entry.get("failure_hash") or "")
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _phase2_candidate_adjudication(
+    ctx: Ctx, label: str, state_hash: str
+) -> dict[str, Any] | None:
+    """Return a cached body-correction/decomposition judgment, if present."""
+    with _STATE_LOCK:
+        entry = getattr(ctx, "phase2_node_candidates", {}).get(label)
+        if not isinstance(entry, dict):
+            return None
+        value = (entry.get("adjudications") or {}).get(state_hash)
+        return copy.deepcopy(value) if isinstance(value, dict) else None
+
+
+def _cache_phase2_candidate_adjudication(
+    ctx: Ctx,
+    label: str,
+    state_hash: str,
+    adjudication: Mapping[str, Any],
+) -> None:
+    """Persist one focused Phase-2 routing judgment with its candidate state."""
+    with _STATE_LOCK:
+        entry = getattr(ctx, "phase2_node_candidates", {}).get(label)
+        if not isinstance(entry, dict):
+            return
+        values = {
+            str(key): copy.deepcopy(value)
+            for key, value in (entry.get("adjudications") or {}).items()
+            if str(key) and isinstance(value, dict)
+        }
+        values[state_hash] = copy.deepcopy(dict(adjudication))
+        entry["adjudications"] = dict(list(values.items())[-12:])
 
 
 def _clear_phase2_node_candidate(ctx: Ctx, label: str) -> None:

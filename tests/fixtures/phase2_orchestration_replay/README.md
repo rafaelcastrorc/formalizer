@@ -86,6 +86,15 @@ The replay deliberately labels the retained-correction result as a
 counterfactual. It validates orchestration savings and equal acceptance gates;
 only a live model run can measure future wall-clock behavior.
 
+The Simplex `run-20260903-131033` ordinary-body fixture records the matching
+gap outside the repaired-node transaction. `def:max-fn` was dispatched with
+the same `proof_batch` prompt hash four times, consuming 151.918 model-seconds.
+The regression requires ordinary Phase 2 to retain the rejected complete
+declaration, isolate only that correction while fresh work stays batched, feed
+back its exact rejection, suppress an identical candidate/failure/tier
+redispatch, and persist both the candidate and its cached semantic adjudication
+through `--continue`.
+
 The Simplex `run-20260813-010635` object-interface fixture records a different
 failure class. A complete Phase 2 node passed ordinary Lean checking but six
 separate `lean -o` attempts each consumed the old 600-second budget. Independent
@@ -117,3 +126,13 @@ audit reports of the same missing dependency, plus a genuinely different
 missing-helper report. The regression requires the equivalent reports to share
 one retry/correction identity while the different obligation remains distinct.
 Raw report text is retained for model feedback and telemetry.
+
+`simplex_deferred_reactivation_blast_radius.json` preserves repair 66 from
+Simplex `run-20260903-021411`. Three changed provider contracts invalidated 84
+labels, of which 81 were unchanged descendants retained for deterministic Lean
+recompilation. The old scheduler forced those descendants through
+`dependencies_unavailable` before regenerating the three providers, deleted the
+cache, and expanded the next model-backed wave to 98 and later 118 nodes. The
+regression requires deferred descendants to remain reserved until direct
+provider replacement exists and keeps the repair transaction open until their
+rechecks settle.

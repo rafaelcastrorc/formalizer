@@ -17,6 +17,7 @@ import base64
 import atexit
 import contextlib
 import errno
+import hashlib
 import json
 import mimetypes
 import os
@@ -24,7 +25,6 @@ import re
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import urllib.parse
@@ -44,7 +44,7 @@ SITE_DIR = REPO_ROOT / "site"
 STATE_DIR = REPO_ROOT / ".auto-blueprint"
 WEBUI_STATE = STATE_DIR / "webui.json"
 LAST_REFINE_SETTINGS = STATE_DIR / "last-refine-settings.json"
-UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="auto-blueprint-webui-"))
+UPLOAD_DIR = STATE_DIR / "webui-uploads"
 
 RUNNER_BACKENDS = ["claude-code", "codex", "anthropic", "openai", "mock"]
 REASONING_EFFORTS = ["", "low", "medium", "high", "xhigh"]
@@ -64,6 +64,7 @@ MODEL_SUGGESTION_CACHE: dict[str, object] = {"at": 0.0, "data": {}}
 MODEL_SUGGESTION_TTL_S = 30
 
 REFINE_SETTING_KEYS = {
+    "name",
     "fast",
     "workers",
     "section_size",
@@ -79,6 +80,8 @@ REFINE_SETTING_KEYS = {
     "timeout",
     "hard_timeout",
     "lean_command",
+    "paper",
+    "resume_mode",
 }
 
 
@@ -94,7 +97,7 @@ def _read_last_refine_settings() -> dict:
 
 
 def _write_last_refine_settings(payload: dict) -> None:
-    """Atomically persist configuration, never the paper/blueprint/resume target."""
+    """Atomically persist every visible setting from an accepted Refine run."""
     settings = {
         key: payload[key]
         for key in REFINE_SETTING_KEYS
@@ -106,6 +109,25 @@ def _write_last_refine_settings(payload: dict) -> None:
         json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     os.replace(pending, LAST_REFINE_SETTINGS)
+
+
+def _store_uploaded_file(filename: str, encoded_data: str) -> Path:
+    """Store a browser upload at a stable content-addressed path.
+
+    Last-used Refine settings may point at an uploaded paper after the Web UI
+    restarts, so uploads cannot live in a process-scoped temporary directory.
+    """
+    raw_name = Path(filename or "paper.pdf").name
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", raw_name) or "paper.pdf"
+    data = base64.b64decode(encoded_data, validate=True)
+    digest = hashlib.sha256(data).hexdigest()[:16]
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    dest = UPLOAD_DIR / f"{digest}-{safe}"
+    if not dest.is_file():
+        pending = UPLOAD_DIR / f".{dest.name}.pending"
+        pending.write_bytes(data)
+        os.replace(pending, dest)
+    return dest
 
 
 def _nonempty_suggestions(data: dict) -> bool:
@@ -1325,10 +1347,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True})
             elif self.path == "/api/upload":
                 p = self.read_json()
-                raw_name = Path(p.get("filename", "paper.pdf")).name
-                safe = re.sub(r"[^A-Za-z0-9._-]", "_", raw_name) or "paper.pdf"
-                dest = UPLOAD_DIR / safe
-                dest.write_bytes(base64.b64decode(p.get("data", "")))
+                dest = _store_uploaded_file(
+                    str(p.get("filename") or "paper.pdf"),
+                    str(p.get("data") or ""),
+                )
                 self.send_json({"ok": True, "path": str(dest)})
             else:
                 self.send_json({"error": "not found"}, 404)
@@ -2008,9 +2030,9 @@ const FORMS = {
     <div style="margin-top:8px">
       <button type="button" class="secondary" id="lastSettingsBtn" onclick="applyLastRefineSettings()"
         ${Object.keys(state.last_refine_settings || {}).length ? '' : 'disabled'}>Use last-used settings</button>
-      <span class="hint" id="lastSettingsStatus">Applies model, timeout, worker, and policy settings only.</span>
+      <span class="hint" id="lastSettingsStatus">Restores every setting from the last accepted Refine run.</span>
     </div>
-    <label>Parallel proof workers (Phase 2)</label>
+    <label>Parallel workers</label>
     <input type="number" id="f_workers" value="3" min="1">
     <div class="hint">Phase 1 freezes statements bottom up; Phase 2 implements them top down.</div>
     <label>Skeleton section size (fast pipeline only; statements per Phase-1 call — shrinks automatically on timeouts)</label>
@@ -2260,6 +2282,7 @@ function applyLastRefineSettings(){
   const saved = state.last_refine_settings || {};
   if (!Object.keys(saved).length) return;
   const ids = {
+    name:'f_name', paper:'f_paper', resume_mode:'f_resume_mode',
     workers:'f_workers', section_size:'f_section_size', max_trials:'f_trials',
     conjecture_policy:'f_conjecture_policy', planner_tier:'f_planner_tier',
     runner_backend:'f_backend', runner_model:'f_model',
@@ -2277,6 +2300,10 @@ function applyLastRefineSettings(){
     }
   }
   ['f', 'f_escalation'].forEach(updateModelList);
+  if (Object.prototype.hasOwnProperty.call(saved, 'paper') && el('drop')) {
+    const paper = String(saved.paper || '');
+    el('drop').textContent = paper ? 'using saved paper: ' + paper.split('/').pop() : 'drop a PDF here or click to upload';
+  }
   effortToggle();
   toggleFastFields();
   updateResumeOptions();

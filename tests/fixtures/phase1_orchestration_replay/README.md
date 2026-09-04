@@ -5,6 +5,15 @@ Phase 1 runs that exposed retry and scheduling regressions. They are committed
 test resources: the tests do not need local `.auto-blueprint/` telemetry, R2,
 network access, or a model account.
 
+`extension_certificate_scope_mismatch.json` preserves the Claim Five
+oscillation from `run-20260902-200908-ec9c6470`. One candidate omitted the
+restrictions on newly introduced extension data; its replacement incorrectly
+applied those restrictions to inherited data too. The executable regression
+requires a complete, structured extension certificate to route directly to the
+existing transactional blueprint-decomposition boundary. It also requires an
+incomplete certificate to remain an ordinary Lean/plan correction, so free text
+or a partial model suggestion cannot authorize a blueprint edit.
+
 `theorem_like_contract_poisoning.json` preserves the terminal Simplex loop from
 `run-20260827-131622`. A rejected theorem-like candidate was emitted as
 `def ... : Prop := sorry`, rewrote its own authoritative contract before the
@@ -108,6 +117,15 @@ scope check attributed the deterministic edit to the model, falsely rejected
 it as downstream, and discarded both authorized operations. The regression
 requires scope validation to inspect only the model-authored delta while the
 complete five-contract transaction remains committed.
+
+The fourth case preserves the Simplex `prop:newton-pieces` boundary failure
+from `run-20260903-021411`. The repaired proposition claimed a correspondence
+under a "suitable affine isomorphism" without exposing the witness, its source
+and target, or the action needed by consumers. The historical audit accepted
+that component, after which Phase 1 spent repeated generation and audit calls
+inventing incompatible representations. The regression requires this defect
+to return to the existing blueprint-repair transaction before Lean generation;
+ordinary complete existential theorems remain accepted.
 
 `immediate_dependency_edge.json` preserves the `def:local-basis-unitary`
 failure from `run-20260731-133708`. The statement auditor identified an

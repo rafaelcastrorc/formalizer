@@ -420,6 +420,11 @@ def _save_state(
                 str(item)
                 for item in (entry.get("attempted_corrections") or [])[-24:]
             ],
+            "adjudications": {
+                str(key): copy.deepcopy(value)
+                for key, value in (entry.get("adjudications") or {}).items()
+                if str(key) and isinstance(value, dict)
+            },
             "repeated_state": bool(entry.get("repeated_state")),
         }
         for label, entry in (phase2_node_candidates or {}).items()
@@ -1099,6 +1104,11 @@ def _load_state(ctx: Ctx, lean_command: list[str]) -> list[Section]:
                 str(item)
                 for item in (entry.get("attempted_corrections") or [])[-24:]
             ],
+            "adjudications": {
+                str(key): copy.deepcopy(value)
+                for key, value in (entry.get("adjudications") or {}).items()
+                if str(key) and isinstance(value, dict)
+            },
             "repeated_state": bool(entry.get("repeated_state")),
         }
         for label, entry in raw_phase2_candidates.items()

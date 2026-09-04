@@ -73,6 +73,29 @@
         "def:local-basis-unitary",
         "def:tensor-register-partial-trace"
       ]
+    },
+    {
+      "run_id": "20260903-021411",
+      "source_log": ".auto-blueprint/formalization/simplex/run-20260903-021411.log",
+      "target": "prop:newton-pieces",
+      "prompt_sha256": "cbd38f3e8e5107da626207fe75ee24a6133dab4bc0cbca097ceb3b984587911f",
+      "response_sha256": "796e4ebe9f38fb0c0ce3641743f6db9fdc8eb0d507c77c85a80e235031e42799",
+      "observed_response": {
+        "accepted": true,
+        "issues": []
+      },
+      "incomplete_claim": "the subdivision corresponds under a suitable affine isomorphism",
+      "missing_witness_information": [
+        "the affine-isomorphism witness",
+        "its domain and codomain",
+        "the equations describing its action on the relevant cells"
+      ],
+      "expected_response": {
+        "accepted": false,
+        "classification": "blueprint_contract_defect",
+        "target": "prop:newton-pieces"
+      },
+      "expected_lean_generation_calls_before_repair": 0
     }
   ]
 }

@@ -572,12 +572,38 @@ compact semantic plan plus candidate-derived typed contracts described above.
    correction lifecycle. This reuses the publication audit and adds no separate
    critic call.
 
+   During this same Phase 1 audit, a node that explicitly promises a reusable
+   named mathematical structure or reusable global algebraic, order,
+   topological, or closure laws must expose an interface through which its
+   consumers can use that structure or those laws. A bare carrier or predicate
+   is rejected when it would force every consumer to unfold membership and
+   re-prove the promised global laws. This is an interface-usability check, not
+   a request for a Phase 1 body: terminal bodies remain `:= sorry`. Ordinary
+   predicates and sets whose blueprint nodes promise no such reusable structure
+   or laws are unaffected. The rule runs inside the existing mandatory audit,
+   so it adds no model call or pipeline stage.
+
    Per-node structured classifications are authoritative at this boundary.
    Only an explicit `needs_decomposition` issue can enter decomposition;
    free-text words such as "missing", "concrete", or "erases" cannot override
    a `lean_translation_issue`. Existing required blueprint dependencies are
    applied through the separate deterministic, cycle-checked edge transaction,
    and plan-origin omissions remain scoped plan corrections.
+
+   One structured representation certificate is also recognized at this
+   boundary. When a construction must distinguish an inherited source object
+   from newly introduced data, but its current blueprint contract can constrain
+   only the whole result, the critic may return an `extension_certificate`.
+   The certificate is valid only when it explicitly names the source object,
+   result object, introduced data, assembly relation, constraints scoped to the
+   introduced data, and concrete result semantics. A complete certificate routes
+   directly to the existing transactional blueprint-decomposition path so the
+   distinction becomes an explicit blueprint-owned helper before Lean is tried
+   again. It bypasses ordinary plan revision and statement regeneration because
+   neither can express a distinction absent from the blueprint contract. A
+   partial certificate, free-text diagnosis, timeout, or compiler failure cannot
+   authorize this route. The repaired draft still passes ordinary scope,
+   dependency-cycle, blueprint-validation, Lean, and independent alignment gates.
 
    The same source-of-failure rule applies when Lean rejects a candidate-derived
    interface. Compiler-unknown names, malformed helper types, generated-only
@@ -766,7 +792,10 @@ compact semantic plan plus candidate-derived typed contracts described above.
    decomposition verdict under the revised plan routes through the existing
    `NEEDS-DECOMPOSITION` blueprint transaction. This avoids mutating the
    blueprint for an interface-planning mistake while still decomposing a claim
-   when the evidence persists.
+   when the evidence persists. A complete `extension_certificate` is the narrow
+   exception: it already supplies structured evidence that the missing
+   source/new-data distinction belongs in the blueprint, so the plan retry is
+   skipped.
    After any model repair changes a public statement or statement-scoped
    `\uses` contract, the changed component receives one blueprint-only semantic
    boundary audit before any new Lean generation. This audit is batched over
@@ -920,6 +949,16 @@ compact semantic plan plus candidate-derived typed contracts described above.
    Candidate state is fingerprinted by the blueprint and dependency-contract
    epoch and survives outer retries and `--continue`; a changed contract
    invalidates it automatically.
+   This retention also applies to the ordinary Phase 2 proof frontier, not only
+   to nodes regenerated after blueprint repair. Fresh nodes remain batched, but
+   a rejected retained candidate is isolated as a singleton correction so its
+   exact compiler or audit evidence cannot make accepted siblings regenerate.
+   Candidate, failure, epoch, tier, and runner identify a correction dispatch;
+   the same dispatch is not paid for twice, including after `--continue`.
+   If a compiling candidate receives an ambiguous semantic rejection, one
+   focused, cached adjudication decides whether the existing body can be
+   corrected or the blueprint genuinely lacks a named helper. Compiler errors,
+   malformed responses, and timeouts never authorize that decomposition path.
    Object generation is also a bounded interface-usability gate. Candidate
    modules receive 90 seconds for `lean -o`; the final assembled integration
    check keeps its longer budget. If a complete Phase 2 node exceeds that
@@ -1075,8 +1114,11 @@ compact semantic plan plus candidate-derived typed contracts described above.
    generated imports are rebound to the repaired modules, and Lean recompiles
    them locally. Reactivation is attempted eagerly after every frozen section,
    not only between waves, so a chain of deferred sections recovers as soon as
-   its dependencies refreeze. A descendant is reactivated only if that
-   deterministic check passes. Before Phase 2 starts, an unsuccessful recheck
+   its dependencies refreeze. While a directly changed provider is absent,
+   those descendants remain reserved and cannot enter model-backed generation;
+   the active repair also remains open until their rechecks settle. A descendant
+   is reactivated only if that deterministic check passes. Before Phase 2
+   starts, an unsuccessful recheck
    remains ordinary Phase 1 contract refinement. After Phase 2 starts, each new
    or changed node enters a **Phase 2 whole-node transaction**: an initial model
    call returns the current Lean statement and its complete proof or definition
@@ -1092,9 +1134,14 @@ compact semantic plan plus candidate-derived typed contracts described above.
    failing root and exact Lean/audit evidence. Before new Lean generation, it
    checks the complete changed helper component: every new helper must close
    through existing dependencies or helpers included in the same repair rather
-   than postponing another obvious obligation. This reuses the boundary-audit
-   call that already existed; it does not add another planning phase or model
-   call to successful repairs. The workflow never reopens Phase 1,
+   than postponing another obvious obligation. A repaired correspondence,
+   equivalence, or transport that relies on a particular witness must expose
+   that witness and the equations needed by the claim or downstream nodes;
+   vague phrases such as "under a suitable isomorphism" cannot pass this gate.
+   This does not reject an ordinary existential theorem that is mathematically
+   complete without choosing one distinguished witness. This reuses the
+   boundary-audit call that already existed; it does not add another planning
+   phase or model call to successful repairs. The workflow never reopens Phase 1,
    unaffected Phase 1 contracts and accepted proofs remain frozen, and the
    Phase 1 completion counter never regresses. Thus proof-prose edits cannot
    silently retain stale Lean, while an interface repair does not force model
@@ -1159,9 +1206,12 @@ continue the latest unpublished state, restart Phase 2 from the saved Phase 1
 snapshot, or start fresh from the published blueprint. The Phase 1 option is
 enabled only after a complete checkpoint exists for the selected blueprint.
 The **Use last-used settings** button restores the previous model, timeout,
-worker, section-size, conjecture, planner-tier, and Lean-command configuration.
-It deliberately does not change the selected blueprint, paper, or starting
-point. Its preset is intentionally two-tiered:
+worker, section-size, conjecture, planner-tier, Lean-command, selected
+blueprint, paper context, and starting-point configuration. In other words, it
+restores every visible setting from the last accepted Refine run. Browser
+uploads are kept under `.auto-blueprint/webui-uploads/`, so an uploaded paper
+can be restored after the Web UI restarts. Its model preset is intentionally
+two-tiered:
 
 - If `OPENAI_API_KEY` is set, the UI/CLI calls OpenAI's `GET /v1/models`,
   fills the dropdown from the returned model IDs, and chooses a base model from

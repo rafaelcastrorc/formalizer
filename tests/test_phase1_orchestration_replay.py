@@ -97,6 +97,25 @@ class PhaseOneOrchestrationReplayTests(unittest.TestCase):
         self.assertGreater(blocked_seconds, compile_seconds)
         self.assertEqual(case["final_audit_calls"], 1)
 
+    def test_phase2_deferred_reactivation_preserves_historical_blast_radius(self) -> None:
+        case = _phase2_fixture(
+            "simplex_deferred_reactivation_blast_radius.json"
+        )
+        observed = case["observed"]
+
+        self.assertEqual(observed["invalidated_count"], 84)
+        self.assertEqual(observed["unchanged_deferred_count"], 81)
+        self.assertEqual(observed["expected_model_regeneration_count"], 3)
+        self.assertEqual(observed["dependencies_unavailable_drops"], 81)
+        self.assertGreaterEqual(
+            observed["first_observed_whole_node_wave"],
+            30 * observed["expected_model_regeneration_count"],
+        )
+        self.assertTrue(case["expected"]["deferred_descendants_are_reserved"])
+        self.assertTrue(
+            case["expected"]["repair_completes_only_after_deferred_rechecks"]
+        )
+
     def test_lean_rejection_cannot_repeat_without_a_revision_call(self) -> None:
         case = _fixture("compile_reuse_loop.json")["cases"][0]
 
@@ -173,6 +192,19 @@ class PhaseOneOrchestrationReplayTests(unittest.TestCase):
             | set(case["model_changed_labels"]),
         )
 
+    def test_boundary_fixture_requires_named_witness_for_correspondence(self) -> None:
+        case = _fixture("post_repair_boundary.json")["cases"][3]
+
+        self.assertTrue(case["observed_response"]["accepted"])
+        self.assertIn("suitable affine isomorphism", case["incomplete_claim"])
+        self.assertEqual(
+            case["expected_response"]["classification"],
+            "blueprint_contract_defect",
+        )
+        self.assertEqual(case["expected_response"]["target"], case["target"])
+        self.assertEqual(case["expected_lean_generation_calls_before_repair"], 0)
+        self.assertEqual(len(case["missing_witness_information"]), 3)
+
     def test_statement_dependency_evidence_routes_before_generation_retry(self) -> None:
         case = _fixture("immediate_dependency_edge.json")["cases"][0]
 
@@ -212,6 +244,26 @@ class PhaseOneOrchestrationReplayTests(unittest.TestCase):
             self.assertTrue(issue["missing_plan_requirements"])
             self.assertEqual(issue["missing_helpers"], [])
             self.assertEqual(issue["missing_blueprint_information"], [])
+
+    def test_extension_scope_mismatch_routes_to_blueprint_transaction(self) -> None:
+        case = _fixture("extension_certificate_scope_mismatch.json")
+        repair = case["audit_response"]["issues"][0]["representation_repair"]
+
+        self.assertEqual(repair["kind"], "extension_certificate")
+        self.assertTrue(repair["source_object"])
+        self.assertTrue(repair["result_object"])
+        self.assertTrue(repair["introduced_data"])
+        self.assertTrue(repair["assembly_relation"])
+        self.assertTrue(repair["scoped_constraints"])
+        self.assertTrue(repair["result_semantics"])
+        self.assertEqual(
+            case["expected_after_fix"]["route"],
+            "transactional_blueprint_decomposition",
+        )
+        self.assertEqual(case["expected_after_fix"]["plan_revision_labels"], [])
+        self.assertEqual(
+            case["expected_after_fix"]["ordinary_statement_retry_labels"], []
+        )
 
     def test_semantic_plan_defects_route_before_stale_plan_generation(self) -> None:
         cases = _fixture("semantic_origin_serialization.json")["cases"]

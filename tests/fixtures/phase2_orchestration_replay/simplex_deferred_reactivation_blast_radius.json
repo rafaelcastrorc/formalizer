@@ -1,0 +1,30 @@
+{
+  "source": {
+    "blueprint": "simplex",
+    "run_id": "20260903-021411",
+    "repair_number": 66,
+    "repair_root": "def:support-fn"
+  },
+  "observed": {
+    "changed_labels": [
+      "def:support-fn",
+      "lem:support-attainment",
+      "lem:support-value-unique"
+    ],
+    "invalidated_count": 84,
+    "unchanged_deferred_count": 81,
+    "expected_model_regeneration_count": 3,
+    "dependencies_unavailable_drops": 81,
+    "first_observed_whole_node_wave": 98,
+    "largest_observed_whole_node_wave": 118
+  },
+  "expected": {
+    "model_work_before_provider_replacement": [
+      "def:support-fn",
+      "lem:support-attainment",
+      "lem:support-value-unique"
+    ],
+    "deferred_descendants_are_reserved": true,
+    "repair_completes_only_after_deferred_rechecks": true
+  }
+}

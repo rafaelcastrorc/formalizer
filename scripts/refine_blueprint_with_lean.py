@@ -1864,6 +1864,14 @@ STATEMENT-PHASE CONVENTIONS (this audit runs BEFORE any proofs are written):
   separately named public helper that another blueprint statement must
   reference. Internal predicates or clauses that can be implemented inside
   the body are Phase-2 obligations, not missing Phase-1 helpers.
+- When a blueprint node explicitly promises a reusable named mathematical
+  structure or reusable global algebraic, order, topological, or closure laws,
+  its public Phase-1 interface must let downstream blueprint nodes use that
+  structure or those laws directly. Reject a bare carrier/predicate encoding
+  that forces every consumer to unfold membership and re-prove the same global
+  laws. This is an interface-usability defect, not a request to implement the
+  deferred body. It does NOT apply to ordinary predicates or sets whose
+  blueprint nodes promise no reusable named structure or global laws.
 - The blueprint is the source of truth. The design-plan contract is an
   untrusted intermediate artifact used to decide which artifact needs
   correction; never weaken the blueprint to agree with the plan.
@@ -1889,6 +1897,14 @@ blueprint nodes before Lean generation continues. For example, a node may refer
 to several concrete terms defined only in its prose proof, or quantify over an
 object's parameters without any dependency exposing those parameters.
 List the exact definitions or helper statements needed in `missing_helpers`.
+When the blueprint distinguishes an inherited/source object from data newly
+introduced by a construction, but the current public interface can constrain
+only the whole result, return a complete `representation_repair` with kind
+`extension_certificate`. Use it only when all six roles are explicit in the
+blueprint and a named blueprint interface is required to preserve that scope.
+The certificate must expose source, result, introduced data, their assembly
+relation, constraints scoped to introduced data, and the result's concrete
+semantics. Otherwise return `representation_repair: null`.
 Do not use this classification merely because a faithful, already self-contained
 Lean statement is syntactically difficult or its eventual proof is difficult.
 """
@@ -1945,7 +1961,16 @@ If anything should block publication, return:
       ],
       "deferred_body_obligations": [
         "exact semantic clause that Phase 2 must implement in a deferred def/abbrev body"
-      ]
+      ],
+      "representation_repair": null | {{
+        "kind": "extension_certificate",
+        "source_object": "the inherited/source object that must remain distinguishable",
+        "result_object": "the constructed result object",
+        "introduced_data": ["each category of data newly introduced by the construction"],
+        "assembly_relation": "the relation tying source plus introduced data to the result",
+        "scoped_constraints": ["each condition that applies only to introduced data"],
+        "result_semantics": ["each concrete behavior the result must realize"]
+      }}
     }}
   ]
 }}

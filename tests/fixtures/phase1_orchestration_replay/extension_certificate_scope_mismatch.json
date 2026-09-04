@@ -1,0 +1,49 @@
+{
+  "source": {
+    "run_id": "20260902-200908-ec9c6470",
+    "label": "lem:claim-five-r-dyadic-lifts",
+    "first_rejection": "The contract omitted the restriction on coefficients and biases introduced by the extension.",
+    "second_rejection": "The replacement constrained every coefficient and bias in the resulting network rather than only the newly introduced data."
+  },
+  "audit_response": {
+    "accepted": false,
+    "classification": "lean_translation_issue",
+    "issues": [
+      {
+        "node": "lem:claim-five-r-dyadic-lifts",
+        "severity": "reject",
+        "classification": "lean_translation_issue",
+        "reason": "The current statement cannot express that the restrictions apply only to data introduced while extending the inherited network.",
+        "failure_origin": "both",
+        "missing_plan_requirements": [],
+        "missing_helpers": [],
+        "missing_blueprint_information": [],
+        "required_dependencies": [],
+        "forbidden_dependencies": [],
+        "representation_repair": {
+          "kind": "extension_certificate",
+          "source_object": "the inherited layered network presentation",
+          "result_object": "the extended layered network presentation",
+          "introduced_data": [
+            "new affine coefficients",
+            "new affine biases"
+          ],
+          "assembly_relation": "the result is assembled by extending the source with the introduced affine data",
+          "scoped_constraints": [
+            "allowed coefficient values apply only to new affine coefficients",
+            "zero-bias condition applies only to new affine biases"
+          ],
+          "result_semantics": [
+            "the result realizes the required lifted function"
+          ]
+        }
+      }
+    ]
+  },
+  "expected_after_fix": {
+    "routed_kind": "decomposition",
+    "route": "transactional_blueprint_decomposition",
+    "plan_revision_labels": [],
+    "ordinary_statement_retry_labels": []
+  }
+}

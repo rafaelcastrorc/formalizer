@@ -416,6 +416,26 @@ def _frozen_labels(sections: list[Section]) -> set[str]:
     }
 
 
+def _deferred_contract_labels(sections: Iterable[Section]) -> set[str]:
+    """Return labels whose verified source is reserved for dependency recheck."""
+    return {
+        label
+        for section in sections
+        if section.deferred
+        for label in section.labels
+    }
+
+
+def _deferred_recheck_may_drop_unready(
+    sections: Iterable[Section], contract_pending: Iterable[str]
+) -> bool:
+    """True only when no missing direct declaration can unblock the cache."""
+    section_list = list(sections)
+    deferred = _deferred_contract_labels(section_list)
+    direct_pending = set(contract_pending) - deferred
+    return bool(deferred) and not direct_pending
+
+
 def _reserved_labels(sections: list[Section]) -> set[str]:
     """Contracts owned by active or deterministically deferred sections."""
     return {label for sec in sections for label in sec.labels}

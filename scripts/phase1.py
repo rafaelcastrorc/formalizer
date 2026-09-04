@@ -9528,7 +9528,7 @@ def _route_phase1_compile_failure(
             failed_code,
             source="phase1_interface_usability_gate",
             all_labels=failed.labels,
-            lean_status="passed",
+            lean_status="failed",
             lean_output=interface_evidence,
             expected_plan_fps=failed.plan_fps,
         )
@@ -10799,6 +10799,41 @@ def _expand_rejected_section_components(
     return expanded
 
 
+def _route_phase1_representation_repairs(
+    ctx: Ctx,
+    audit: AlignmentAuditResult,
+    decomposition_labels: set[str],
+    *,
+    layer_no: int,
+    source: str,
+) -> set[str]:
+    """Route complete representation certificates through one shared boundary."""
+    labels = audit.representation_repair_labels(
+        "extension_certificate"
+    ) & decomposition_labels
+    if not labels:
+        return set()
+    _record(
+        ctx.telemetry,
+        "phase1_representation_repair_routed",
+        layer=layer_no,
+        source=source,
+        labels=sorted(labels),
+        kind="extension_certificate",
+        route="transactional_blueprint_decomposition",
+        repairs={
+            label: audit.representation_repairs_by_label[label]
+            for label in sorted(labels)
+        },
+        avoided_route="plan_revision_and_statement_retry",
+    )
+    _log(
+        "  inherited/new-data scope mismatch requires an explicit "
+        "blueprint extension certificate: " + ", ".join(sorted(labels))
+    )
+    return labels
+
+
 def _audit_phase1_layer_candidates(
     ctx: Ctx,
     layer_no: int,
@@ -10854,10 +10889,17 @@ def _audit_phase1_layer_candidates(
         audit.labels_for("decomposition") - dependency_repair_labels
     )
     blueprint_rejected = audit.labels_for("blueprint") - dependency_repair_labels
+    certificate_repairs = _route_phase1_representation_repairs(
+        ctx,
+        audit,
+        decomposition_rejected,
+        layer_no=layer_no,
+        source="integrated_alignment",
+    )
     plan_revised = _revise_decomposition_plans_once(
         ctx,
-        decomposition_rejected,
-        audit.reason_for(sorted(decomposition_rejected)),
+        decomposition_rejected - certificate_repairs,
+        audit.reason_for(sorted(decomposition_rejected - certificate_repairs)),
         layer_no=layer_no,
         source="integrated_alignment",
     )
@@ -11276,10 +11318,17 @@ def _semantic_first_failure_request(
         audit.labels_for("decomposition") - dependency_repair_labels
     )
     blueprint_rejected = audit.labels_for("blueprint") - dependency_repair_labels
+    certificate_repairs = _route_phase1_representation_repairs(
+        ctx,
+        audit,
+        decomposition_rejected,
+        layer_no=layer_no,
+        source="semantic_first_alignment",
+    )
     plan_revised = _revise_decomposition_plans_once(
         ctx,
-        decomposition_rejected,
-        audit.reason_for(sorted(decomposition_rejected)),
+        decomposition_rejected - certificate_repairs,
+        audit.reason_for(sorted(decomposition_rejected - certificate_repairs)),
         layer_no=layer_no,
         source="semantic_first_alignment",
     )
@@ -12149,7 +12198,12 @@ def _run_validated_contract_phase1_layer(
             ):
                 routed_failures.append((index, routed))
         failures = routed_failures + compile_failures
-        for candidate in candidates:
+        compile_failed_indexes = {
+            index for index, _request in compile_failures
+        }
+        for index, candidate in enumerate(generated):
+            if candidate is None or index in compile_failed_indexes:
+                continue
             _store_generation_candidates(
                 ctx,
                 candidate.labels,

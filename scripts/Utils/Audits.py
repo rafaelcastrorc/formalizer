@@ -579,13 +579,19 @@ def _alignment_issue_failure_identity(
         ]
         for field in fact_fields
     }
+    representation_repair = _normalized_representation_repair(issue)
     dependencies = sorted(
         {str(item).strip() for item in required_dependencies if str(item).strip()}
     )
     forbidden = sorted(
         {str(item).strip() for item in forbidden_dependencies if str(item).strip()}
     )
-    if not dependencies and not forbidden and not any(facts.values()):
+    if (
+        not dependencies
+        and not forbidden
+        and not any(facts.values())
+        and not representation_repair
+    ):
         return {}
     return _canonical_failure_identity(
         {
@@ -595,8 +601,63 @@ def _alignment_issue_failure_identity(
             "failure_origin": failure_origin,
             "required_dependencies": dependencies,
             "forbidden_dependencies": forbidden,
+            "representation_repair": representation_repair,
             **facts,
         }
+    )
+
+
+def _normalized_representation_repair(issue: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate a critic-certified blueprint representation repair.
+
+    The only currently supported certificate separates inherited/source data
+    from data introduced by a construction. All semantic roles are required;
+    an incomplete model suggestion remains an ordinary translation failure and
+    cannot authorize a blueprint edit.
+    """
+    raw = issue.get("representation_repair")
+    if not isinstance(raw, Mapping):
+        return {}
+    if str(raw.get("kind") or "").strip() != "extension_certificate":
+        return {}
+    scalar_fields = ("source_object", "result_object", "assembly_relation")
+    normalized: dict[str, Any] = {"kind": "extension_certificate"}
+    for field_name in scalar_fields:
+        value = str(raw.get(field_name) or "").strip()
+        if not value:
+            return {}
+        normalized[field_name] = value
+    for field_name in ("introduced_data", "scoped_constraints", "result_semantics"):
+        raw_values = raw.get(field_name)
+        if not isinstance(raw_values, list):
+            return {}
+        values = list(
+            dict.fromkeys(
+                str(value).strip() for value in raw_values if str(value).strip()
+            )
+        )
+        if not values:
+            return {}
+        normalized[field_name] = values
+    return normalized
+
+
+def _extension_certificate_helper(repair: Mapping[str, Any]) -> str:
+    """Render a validated certificate as one precise blueprint helper request."""
+    return (
+        "Add one explicit extension-certificate definition that exposes: "
+        f"source/inherited object ({repair['source_object']}); "
+        f"result object ({repair['result_object']}); "
+        "newly introduced data ("
+        + " | ".join(repair["introduced_data"])
+        + "); assembly/realization relation ("
+        + str(repair["assembly_relation"])
+        + "); constraints scoped only to the introduced data ("
+        + " | ".join(repair["scoped_constraints"])
+        + "); and concrete result semantics ("
+        + " | ".join(repair["result_semantics"])
+        + "). The repaired consumer must use this certificate. Do not constrain "
+        "the entire result when the blueprint constrains only newly added data."
     )
 
 
@@ -860,6 +921,7 @@ def _model_alignment_audit(
     origins_by_label: dict[str, str] = {}
     plan_requirements_by_label: dict[str, list[str]] = {}
     failure_identities_by_label: dict[str, dict[str, Any]] = {}
+    representation_repairs_by_label: dict[str, dict[str, Any]] = {}
     global_classification = str(payload.get("classification") or "")
     for issue in issues if isinstance(issues, list) else []:
         if not isinstance(issue, dict):
@@ -882,6 +944,14 @@ def _model_alignment_audit(
                 issue_kind, missing_info = _authorized_alignment_failure_kind(
                     issue_classification, [issue_line], [issue]
                 )
+            representation_repair = _normalized_representation_repair(issue)
+            if representation_repair:
+                # This complete structured certificate is stronger routing
+                # evidence than the critic's broad classification. It says the
+                # existing blueprint needs a named interface, so retrying Lean
+                # under the same node contract cannot resolve the mismatch.
+                issue_kind = "decomposition"
+                representation_repairs_by_label[node] = representation_repair
             # The structured issue classification is authoritative. In
             # particular, prose such as "erases the concrete terms" still
             # describes a translation/plan defect when the critic explicitly
@@ -929,6 +999,10 @@ def _model_alignment_audit(
                 for helper in issue.get("missing_helpers") or []
                 if str(helper).strip()
             )
+            if representation_repair:
+                helpers_by_label[node].append(
+                    _extension_certificate_helper(representation_repair)
+                )
             requested_dependencies = {
                 str(dep).strip()
                 for dep in issue.get("required_dependencies") or []
@@ -1027,6 +1101,10 @@ def _model_alignment_audit(
             label: list(dict.fromkeys(requirements))
             for label, requirements in sorted(plan_requirements_by_label.items())
         },
+        representation_repairs={
+            label: repair
+            for label, repair in sorted(representation_repairs_by_label.items())
+        },
     )
     decomposition_helpers = list(
         dict.fromkeys(
@@ -1079,4 +1157,5 @@ def _model_alignment_audit(
         },
         failure_identities_by_label=failure_identities_by_label,
         forbidden_dependencies=forbidden_dependencies,
+        representation_repairs_by_label=representation_repairs_by_label,
     )

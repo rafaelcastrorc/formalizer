@@ -555,7 +555,16 @@ def main(argv: list[str] | None = None) -> int:
                 label for label, node in ctx.nodes.items() if not node.mathlibok
             }
             frozen = _frozen_labels(sections)
-            if any(sec.deferred for sec in sections):
+            contract_pending = required_skeleton - frozen
+            # Deferred sections can become ready only after their directly
+            # changed/missing providers have been regenerated. Preserve those
+            # cached descendants until that work is complete. Forcing the
+            # recheck now would report "dependencies_unavailable", delete the
+            # retained source, and turn a small repair into whole-subgraph
+            # model regeneration.
+            if _deferred_recheck_may_drop_unready(
+                sections, contract_pending
+            ):
                 sections, more_reactivated, more_dropped = (
                     _reactivate_deferred_sections(
                         ctx, sections, drop_unready=True
@@ -705,10 +714,13 @@ def main(argv: list[str] | None = None) -> int:
                                 if str(active.get("stage") or "") == "verify"
                                 else ""
                             )
-                            if verifying_id:
-                                _complete_phase2_repair_request(
-                                    ctx, verifying_id
+                            repair_complete = bool(
+                                verifying_id
+                                and _complete_verified_phase2_repair(
+                                    ctx, sections
                                 )
+                            )
+                            if verifying_id:
                                 _save_ctx_state(ctx, sections)
                             _record(
                                 ctx.telemetry,
@@ -716,14 +728,25 @@ def main(argv: list[str] | None = None) -> int:
                                 labels=sorted(declaration_work),
                                 completed_count=len(declaration_work),
                             )
-                            _log(
-                                "==> Phase 2 whole-node repair complete; "
-                                "resuming top-down proof scheduling"
-                            )
+                            if not verifying_id:
+                                _log(
+                                    "==> Phase 2 whole-node repair complete; "
+                                    "resuming top-down proof scheduling"
+                                )
+                            elif repair_complete:
+                                _log(
+                                    "==> Phase 2 whole-node replacement verified; "
+                                    "repair transaction complete"
+                                )
+                            else:
+                                _log(
+                                    "==> Phase 2 whole-node replacement verified; "
+                                    "rechecking unchanged deferred descendants"
+                                )
                             if verifying_id:
                                 # Re-enter through the queue gate so stale
-                                # diagnoses are pruned against the verified
-                                # dependency environment before another edit.
+                                # diagnoses are pruned only after the complete
+                                # repaired dependency environment verifies.
                                 continue
                     except RepairRequest as request:
                         scheduling_request = _phase2_prerequisite_request_for_repair(
@@ -819,7 +842,13 @@ def main(argv: list[str] | None = None) -> int:
                         else ""
                     )
                     if verifying_id:
-                        _complete_phase2_repair_request(ctx, verifying_id)
+                        if not _complete_verified_phase2_repair(ctx, sections):
+                            _save_ctx_state(ctx, sections)
+                            _log(
+                                "==> Active Phase 2 repair still has deferred "
+                                "dependency rechecks; keeping its transaction open"
+                            )
+                            continue
                         _save_ctx_state(ctx, sections)
                         _log(
                             "==> Verified active Phase 2 blueprint repair; "
@@ -881,21 +910,12 @@ def main(argv: list[str] | None = None) -> int:
                 proof_roots: list[str] = []
                 frontier_labels = sorted(all_unproved)
                 if all_unproved:
-                    prerequisite_frontier = _phase2_prerequisite_frontier(
-                        ctx, all_unproved
-                    )
-                    if prerequisite_frontier is not None:
-                        proof_layer, frontier_labels, proof_roots = (
-                            prerequisite_frontier
-                        )
-                        scheduling_mode = "definition_prerequisite_override"
-                    else:
-                        proof_layer, frontier_labels, proof_roots = (
-                            _next_implementation_frontier(
-                                ctx.nodes, all_unproved, PHASE2_PROOF_ORDER
-                            )
-                        )
-                        scheduling_mode = "dynamic_branch_ready_frontier"
+                    (
+                        proof_layer,
+                        frontier_labels,
+                        proof_roots,
+                        scheduling_mode,
+                    ) = _phase2_scheduling_frontier(ctx, all_unproved)
                     frontier = set(frontier_labels)
                     unproved_by_section = [
                         (sec, [label for label in labels if label in frontier])
@@ -909,7 +929,10 @@ def main(argv: list[str] | None = None) -> int:
                 if unproved_by_section:
                     mode_note = (
                         (
-                            "dependency-first definition prerequisite"
+                            "dependency-first definition prerequisite plus independent ready branches"
+                            if scheduling_mode
+                            == "definition_prerequisite_with_independent_ready"
+                            else "dependency-first definition prerequisite"
                             if scheduling_mode == "definition_prerequisite_override"
                             else f"{PHASE2_PROOF_ORDER} ready frontier {proof_layer}"
                         )
@@ -984,6 +1007,47 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         repair_components = list(request.repair_components)
                         if request.authorizes_blueprint_repair:
+                            active = getattr(ctx, "phase2_repair_active", {}) or {}
+                            if str(active.get("stage") or "") == "verify":
+                                if request.provider_contract_labels:
+                                    sections = _reroute_active_phase2_repair_to_provider(
+                                        ctx, sections, request
+                                    )
+                                    phase1_integration_checked = False
+                                    continue
+                                sections, request = _restart_active_phase2_repair(
+                                    ctx, sections, request
+                                )
+                                evidence_for_repair = request.evidence
+                                repair_labels = list(request.labels)
+                                repair_helpers = list(
+                                    request.decomposition_helpers
+                                )
+                                repair_section_labels = list(
+                                    request.section_labels
+                                )
+                                repair_context_labels = list(
+                                    request.context_labels
+                                )
+                                repair_model_labels = list(
+                                    request.model_repair_labels
+                                )
+                                repair_evidence_by_label = dict(
+                                    request.evidence_by_label
+                                )
+                                repair_authorized = (
+                                    request.authorizes_blueprint_repair
+                                )
+                                repair_required_dependencies = dict(
+                                    request.required_dependencies
+                                )
+                                repair_evidence_identities_by_label = copy.deepcopy(
+                                    request.evidence_identities_by_label
+                                )
+                                repair_components = list(
+                                    request.repair_components
+                                )
+                                phase1_integration_checked = False
                             active_phase2_repair_id = (
                                 _start_phase2_repair_transaction(
                                     ctx,
